@@ -116,6 +116,517 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/inventories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List inventories */
+        get: operations["listInventories"];
+        put?: never;
+        /** Create an inventory */
+        post: operations["createInventory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inventories/{inventoryId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        /** Get an inventory */
+        get: operations["getInventory"];
+        put?: never;
+        post?: never;
+        /** Delete an inventory with its hosts and groups */
+        delete: operations["deleteInventory"];
+        options?: never;
+        head?: never;
+        /** Update an inventory */
+        patch: operations["updateInventory"];
+        trace?: never;
+    };
+    "/api/v1/inventories/{inventoryId}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Export an inventory in Ansible's JSON inventory format
+         * @description The same document job runners receive. Disabled hosts are left out.
+         *     Host variables are under `_meta.hostvars`.
+         */
+        get: operations["exportInventory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inventories/{inventoryId}/hosts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        /** List an inventory's hosts */
+        get: operations["listHosts"];
+        put?: never;
+        /** Add a host to an inventory */
+        post: operations["createHost"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/hosts/{hostId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                hostId: components["parameters"]["HostId"];
+            };
+            cookie?: never;
+        };
+        /** Get a host */
+        get: operations["getHost"];
+        put?: never;
+        post?: never;
+        /** Delete a host */
+        delete: operations["deleteHost"];
+        options?: never;
+        head?: never;
+        /** Update a host */
+        patch: operations["updateHost"];
+        trace?: never;
+    };
+    "/api/v1/inventories/{inventoryId}/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        /** List an inventory's host groups */
+        get: operations["listGroups"];
+        put?: never;
+        /** Add a host group to an inventory */
+        post: operations["createGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/groups/{groupId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                groupId: components["parameters"]["GroupId"];
+            };
+            cookie?: never;
+        };
+        /** Get a host group */
+        get: operations["getGroup"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a host group
+         * @description The group's hosts and child groups are kept.
+         */
+        delete: operations["deleteGroup"];
+        options?: never;
+        head?: never;
+        /** Update a host group */
+        patch: operations["updateGroup"];
+        trace?: never;
+    };
+    "/api/v1/credential-kinds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Describe the credential kinds and their input fields */
+        get: operations["listCredentialKinds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List credentials */
+        get: operations["listCredentials"];
+        put?: never;
+        /** Create a credential */
+        post: operations["createCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/credentials/{credentialId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                credentialId: components["parameters"]["CredentialId"];
+            };
+            cookie?: never;
+        };
+        /** Get a credential (without secret values) */
+        get: operations["getCredential"];
+        put?: never;
+        post?: never;
+        /** Delete a credential */
+        delete: operations["deleteCredential"];
+        options?: never;
+        head?: never;
+        /** Update a credential */
+        patch: operations["updateCredential"];
+        trace?: never;
+    };
+    "/api/v1/execution-environments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List execution environments (job images) */
+        get: operations["listExecutionEnvironments"];
+        put?: never;
+        /** Register an execution environment */
+        post: operations["createExecutionEnvironment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/execution-environments/{executionEnvironmentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                executionEnvironmentId: components["parameters"]["ExecutionEnvironmentId"];
+            };
+            cookie?: never;
+        };
+        /** Get an execution environment */
+        get: operations["getExecutionEnvironment"];
+        put?: never;
+        post?: never;
+        /** Delete an execution environment */
+        delete: operations["deleteExecutionEnvironment"];
+        options?: never;
+        head?: never;
+        /** Update an execution environment */
+        patch: operations["updateExecutionEnvironment"];
+        trace?: never;
+    };
+    "/api/v1/job-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List job templates */
+        get: operations["listJobTemplates"];
+        put?: never;
+        /** Create a job template */
+        post: operations["createJobTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/job-templates/{jobTemplateId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        /** Get a job template */
+        get: operations["getJobTemplate"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a job template
+         * @description Jobs launched from it are kept.
+         */
+        delete: operations["deleteJobTemplate"];
+        options?: never;
+        head?: never;
+        /** Update a job template */
+        patch: operations["updateJobTemplate"];
+        trace?: never;
+    };
+    "/api/v1/job-templates/{jobTemplateId}/launch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch a job from a template
+         * @description Queues a job. The template's configuration is resolved and stored with
+         *     the job, so later template changes don't affect it. Only fields listed
+         *     in the template's `allowOverrides` may be given.
+         */
+        post: operations["launchJobTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List jobs, newest first */
+        get: operations["listJobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{jobId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        /** Get a job */
+        get: operations["getJob"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{jobId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel a job
+         * @description A pending job is canceled at once. A job that has started is asked to
+         *     stop: the runner sends SIGTERM, then SIGKILL after a grace period, and
+         *     the job ends as `canceled`.
+         */
+        post: operations["cancelJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{jobId}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Page through a job's output events
+         * @description Returns events in sequence order. To get the next page, pass the last
+         *     event's `seq` as `afterSeq`.
+         */
+        get: operations["listJobEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{jobId}/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Follow a job's output live (server-sent events)
+         * @description A `text/event-stream` with these events:
+         *
+         *     - `job_event`: one output event (a `JobEvent`). The SSE `id` is its
+         *       `seq`, so a reconnecting `EventSource` resumes where it left off.
+         *     - `status`: the job (a `Job`) whenever its status changes, and once
+         *       when the stream opens.
+         *     - `end`: the job has finished and all of its output has been sent.
+         *       The server then closes the stream.
+         */
+        get: operations["streamJob"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/runner/v1/jobs/{jobId}/spec": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Fetch the job to run, including decrypted credentials
+         * @description Can be called once per job. It moves the job to `running`. A runner
+         *     whose protocol version is not supported makes the job fail with an
+         *     explanation.
+         */
+        get: operations["getRunnerJobSpec"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/runner/v1/jobs/{jobId}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Append output events
+         * @description Events are keyed by `seq`, so a retried batch is stored once. Send
+         *     batches in order and wait for each to be accepted.
+         */
+        post: operations["postRunnerJobEvents"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/runner/v1/jobs/{jobId}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report that the job is still running
+         * @description The response says whether the job should be canceled.
+         */
+        post: operations["runnerHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/runner/v1/jobs/{jobId}/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report the job's final status
+         * @description Send all events first. The job token stops working afterwards.
+         */
+        post: operations["finishRunnerJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -151,7 +662,7 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
-            lastLoginAt?: string | null;
+            lastLoginAt: string | null;
         };
         ApiToken: {
             /** Format: uuid */
@@ -162,9 +673,9 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
-            expiresAt?: string | null;
+            expiresAt: string | null;
             /** Format: date-time */
-            lastUsedAt?: string | null;
+            lastUsedAt: string | null;
         };
         CreateApiTokenRequest: {
             name: string;
@@ -174,6 +685,427 @@ export interface components {
         CreatedApiToken: components["schemas"]["ApiToken"] & {
             /** @description The token secret. Shown only once. */
             token: string;
+        };
+        Name: string;
+        Description: string;
+        /** @description Variables as a JSON object (e.g. Ansible variables) */
+        Variables: {
+            [key: string]: unknown;
+        };
+        Inventory: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            description: string;
+            variables: components["schemas"]["Variables"];
+            hostCount: number;
+            groupCount: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        InventoryCreate: {
+            name: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            variables?: components["schemas"]["Variables"];
+        };
+        InventoryUpdate: {
+            name?: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            variables?: components["schemas"]["Variables"];
+        };
+        InventoryList: {
+            items: components["schemas"]["Inventory"][];
+            total: number;
+        };
+        /**
+         * @description Ansible JSON inventory: one key per group (`hosts`, `vars`,
+         *     `children`), plus `all`, `ungrouped` and `_meta.hostvars`.
+         */
+        InventoryExport: {
+            [key: string]: unknown;
+        };
+        /** @description Host name or address, as Ansible will see it. No whitespace. */
+        HostName: string;
+        Host: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            inventoryId: string;
+            name: string;
+            description: string;
+            variables: components["schemas"]["Variables"];
+            /** @description Disabled hosts are left out of job inventories */
+            enabled: boolean;
+            /** @description Groups the host is a direct member of */
+            groupIds: string[];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        HostCreate: {
+            name: components["schemas"]["HostName"];
+            description?: components["schemas"]["Description"];
+            variables?: components["schemas"]["Variables"];
+            /** @default true */
+            enabled: boolean;
+            groupIds?: string[];
+        };
+        HostUpdate: {
+            name?: components["schemas"]["HostName"];
+            description?: components["schemas"]["Description"];
+            variables?: components["schemas"]["Variables"];
+            enabled?: boolean;
+            /** @description Replaces the host's group memberships */
+            groupIds?: string[];
+        };
+        HostList: {
+            items: components["schemas"]["Host"][];
+            total: number;
+        };
+        /**
+         * @description A valid Ansible group name: letters, digits and underscores, not
+         *     starting with a digit. `all` and `ungrouped` are reserved.
+         */
+        GroupName: string;
+        Group: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            inventoryId: string;
+            name: string;
+            description: string;
+            variables: components["schemas"]["Variables"];
+            /** @description Direct child groups */
+            childIds: string[];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        GroupCreate: {
+            name: components["schemas"]["GroupName"];
+            description?: components["schemas"]["Description"];
+            variables?: components["schemas"]["Variables"];
+            childIds?: string[];
+        };
+        GroupUpdate: {
+            name?: components["schemas"]["GroupName"];
+            description?: components["schemas"]["Description"];
+            variables?: components["schemas"]["Variables"];
+            /** @description Replaces the group's children. Cycles are rejected. */
+            childIds?: string[];
+        };
+        GroupList: {
+            items: components["schemas"]["Group"][];
+            total: number;
+        };
+        /** @enum {string} */
+        CredentialKind: "ssh" | "username_password" | "api_token" | "registry" | "scm" | "generic";
+        CredentialKindInfo: {
+            kind: components["schemas"]["CredentialKind"];
+            label: string;
+            /** @description Any input names are accepted, and all values are secret */
+            freeform: boolean;
+            fields: components["schemas"]["CredentialField"][];
+        };
+        CredentialField: {
+            name: string;
+            label: string;
+            /** @description Secret values are encrypted and never returned by the API */
+            secret: boolean;
+            required: boolean;
+            multiline: boolean;
+        };
+        Credential: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            description: string;
+            kind: components["schemas"]["CredentialKind"];
+            /** @description Values of the non-secret fields */
+            publicInputs: {
+                [key: string]: string;
+            };
+            /** @description Names of the secret fields that have a value */
+            secretFields: string[];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        /** @description Field values, by field name (see `GET /credential-kinds`) */
+        CredentialInputs: {
+            [key: string]: string;
+        };
+        CredentialCreate: {
+            name: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            kind: components["schemas"]["CredentialKind"];
+            inputs: components["schemas"]["CredentialInputs"];
+        };
+        CredentialUpdate: {
+            name?: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            /**
+             * @description Merged into the existing inputs: fields given here are replaced,
+             *     others are kept. An empty string removes a field.
+             */
+            inputs?: components["schemas"]["CredentialInputs"];
+        };
+        CredentialList: {
+            items: components["schemas"]["Credential"][];
+            total: number;
+        };
+        /** @description Container image, e.g. `ghcr.io/acme/ee-shell:1.2` or `…@sha256:…` */
+        ImageReference: string;
+        /** @enum {string} */
+        PullPolicy: "Always" | "IfNotPresent" | "Never";
+        ExecutionEnvironment: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            description: string;
+            image: string;
+            pullPolicy: components["schemas"]["PullPolicy"];
+            /**
+             * Format: uuid
+             * @description A `registry` credential used to pull the image
+             */
+            registryCredentialId: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ExecutionEnvironmentCreate: {
+            name: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            image: components["schemas"]["ImageReference"];
+            /** @default IfNotPresent */
+            pullPolicy: components["schemas"]["PullPolicy"];
+            /** Format: uuid */
+            registryCredentialId?: string;
+        };
+        ExecutionEnvironmentUpdate: {
+            name?: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            image?: components["schemas"]["ImageReference"];
+            pullPolicy?: components["schemas"]["PullPolicy"];
+            /**
+             * Format: uuid
+             * @description `null` removes the registry credential
+             */
+            registryCredentialId?: string | null;
+        };
+        ExecutionEnvironmentList: {
+            items: components["schemas"]["ExecutionEnvironment"][];
+            total: number;
+        };
+        /**
+         * @description Only `container` is supported so far; `ansible` and `script` arrive with projects.
+         * @enum {string}
+         */
+        JobType: "ansible" | "script" | "container";
+        /** @description The program and its arguments. Not run through a shell. */
+        Command: string[];
+        /** @enum {string} */
+        OverridableField: "inventory" | "extraVars" | "limit" | "command";
+        JobTemplate: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            description: string;
+            jobType: components["schemas"]["JobType"];
+            /** Format: uuid */
+            executionEnvironmentId: string;
+            /** Format: uuid */
+            inventoryId: string | null;
+            credentialIds: string[];
+            command: string[];
+            extraVars: components["schemas"]["Variables"];
+            /** @description Host pattern to restrict the job to (Ansible `--limit`) */
+            limit: string;
+            timeoutSeconds: number;
+            allowOverrides: components["schemas"]["OverridableField"][];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        JobTemplateCreate: {
+            name: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            jobType: components["schemas"]["JobType"];
+            /** Format: uuid */
+            executionEnvironmentId: string;
+            /** Format: uuid */
+            inventoryId?: string;
+            credentialIds?: string[];
+            command: components["schemas"]["Command"];
+            extraVars?: components["schemas"]["Variables"];
+            limit?: string;
+            /** @default 3600 */
+            timeoutSeconds: number;
+            allowOverrides?: components["schemas"]["OverridableField"][];
+        };
+        JobTemplateUpdate: {
+            name?: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            /** Format: uuid */
+            executionEnvironmentId?: string;
+            /**
+             * Format: uuid
+             * @description `null` removes the inventory
+             */
+            inventoryId?: string | null;
+            /** @description Replaces the template's credentials */
+            credentialIds?: string[];
+            command?: components["schemas"]["Command"];
+            extraVars?: components["schemas"]["Variables"];
+            limit?: string;
+            timeoutSeconds?: number;
+            allowOverrides?: components["schemas"]["OverridableField"][];
+        };
+        JobTemplateList: {
+            items: components["schemas"]["JobTemplate"][];
+            total: number;
+        };
+        LaunchRequest: {
+            /** Format: uuid */
+            inventoryId?: string;
+            /** @description Merged over the template's extra vars (top-level keys replace) */
+            extraVars?: components["schemas"]["Variables"];
+            limit?: string;
+            command?: components["schemas"]["Command"];
+        };
+        /**
+         * @description `pending`: queued. `waiting`: the Kubernetes Job was created and the
+         *     runner has not started yet. `running`: the runner is executing it.
+         *     `successful`, `failed` (the command failed), `error` (the system could
+         *     not run it) and `canceled` are final.
+         * @enum {string}
+         */
+        JobStatus: "pending" | "waiting" | "running" | "successful" | "failed" | "error" | "canceled";
+        UserRef: {
+            /** Format: uuid */
+            id: string;
+            username: string;
+        };
+        ExecutionEnvironmentRef: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            image: string;
+            pullPolicy: components["schemas"]["PullPolicy"];
+        };
+        /** @description The configuration the job runs with, resolved at launch */
+        JobConfig: {
+            jobType: components["schemas"]["JobType"];
+            executionEnvironment: components["schemas"]["ExecutionEnvironmentRef"];
+            /** Format: uuid */
+            inventoryId: string | null;
+            credentialIds: string[];
+            command: string[];
+            extraVars: components["schemas"]["Variables"];
+            limit: string;
+            timeoutSeconds: number;
+        };
+        Job: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /**
+             * Format: uuid
+             * @description `null` if the template has since been deleted
+             */
+            jobTemplateId: string | null;
+            status: components["schemas"]["JobStatus"];
+            /** @enum {string} */
+            launchType: "manual" | "api" | "schedule" | "relaunch";
+            launchedBy: components["schemas"]["UserRef"] | null;
+            config: components["schemas"]["JobConfig"];
+            cancelRequested: boolean;
+            exitCode: number | null;
+            /** @description Why the job failed, errored or was canceled, if known */
+            failureReason: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            startedAt: string | null;
+            /** Format: date-time */
+            finishedAt: string | null;
+        };
+        JobList: {
+            items: components["schemas"]["Job"][];
+            total: number;
+        };
+        JobEvent: {
+            /** Format: int64 */
+            seq: number;
+            /** Format: date-time */
+            time: string;
+            /** @description `stdout` for command output, `runner` for messages from the runner */
+            type: string;
+            stdout: string;
+            hostName: string | null;
+            data: {
+                [key: string]: unknown;
+            } | null;
+        };
+        JobEventList: {
+            items: components["schemas"]["JobEvent"][];
+        };
+        RunnerJobSpec: {
+            /** Format: uuid */
+            jobId: string;
+            jobType: components["schemas"]["JobType"];
+            command: string[];
+            extraVars: components["schemas"]["Variables"];
+            limit: string;
+            timeoutSeconds: number;
+            inventory: components["schemas"]["InventoryExport"] | null;
+            credentials: components["schemas"]["RunnerCredential"][];
+        };
+        RunnerCredential: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            kind: components["schemas"]["CredentialKind"];
+            /** @description All field values, secret ones decrypted */
+            inputs: {
+                [key: string]: string;
+            };
+        };
+        RunnerEvent: {
+            /**
+             * Format: int64
+             * @description Starts at 1 and increases by one per event
+             */
+            seq: number;
+            type: string;
+            stdout: string;
+            hostName?: string;
+            data?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            time?: string;
+        };
+        RunnerEventBatch: {
+            events: components["schemas"]["RunnerEvent"][];
+        };
+        RunnerJobState: {
+            /** @description Stop the job and finish it as `canceled` */
+            cancelRequested: boolean;
+        };
+        RunnerFinish: {
+            /** @enum {string} */
+            status: "successful" | "failed" | "error" | "canceled";
+            exitCode?: number;
+            failureReason?: string;
         };
     };
     responses: {
@@ -213,8 +1145,29 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
+        /** @description The request conflicts with the current state, e.g. the name is taken */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
     };
-    parameters: never;
+    parameters: {
+        Limit: number;
+        Offset: number;
+        /** @description Case-insensitive substring match on the name */
+        Search: string;
+        InventoryId: string;
+        HostId: string;
+        GroupId: string;
+        CredentialId: string;
+        ExecutionEnvironmentId: string;
+        JobTemplateId: string;
+        JobId: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -390,6 +1343,1151 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    listInventories: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of inventories */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InventoryList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createInventory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InventoryCreate"];
+            };
+        };
+        responses: {
+            /** @description Inventory created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Inventory"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getInventory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The inventory */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Inventory"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteInventory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description A job template still uses the inventory */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    updateInventory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InventoryUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated inventory */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Inventory"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    exportInventory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ansible JSON inventory */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InventoryExport"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listHosts: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+                /** @description Only hosts that are direct members of this group */
+                groupId?: string;
+            };
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of hosts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostCreate"];
+            };
+        };
+        responses: {
+            /** @description Host created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Host"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                hostId: components["parameters"]["HostId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The host */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Host"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                hostId: components["parameters"]["HostId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                hostId: components["parameters"]["HostId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated host */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Host"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listGroups: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+            };
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of groups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupCreate"];
+            };
+        };
+        responses: {
+            /** @description Group created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Group"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                groupId: components["parameters"]["GroupId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Group"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                groupId: components["parameters"]["GroupId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                groupId: components["parameters"]["GroupId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Group"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listCredentialKinds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All credential kinds */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["CredentialKindInfo"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listCredentials: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+                kind?: components["schemas"]["CredentialKind"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of credentials. Secret values are never returned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialCreate"];
+            };
+        };
+        responses: {
+            /** @description Credential created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Credential"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                credentialId: components["parameters"]["CredentialId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The credential */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Credential"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                credentialId: components["parameters"]["CredentialId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description A job template still uses the credential */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    updateCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                credentialId: components["parameters"]["CredentialId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated credential */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Credential"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listExecutionEnvironments: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of execution environments */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionEnvironmentList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createExecutionEnvironment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExecutionEnvironmentCreate"];
+            };
+        };
+        responses: {
+            /** @description Execution environment created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionEnvironment"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getExecutionEnvironment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                executionEnvironmentId: components["parameters"]["ExecutionEnvironmentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The execution environment */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionEnvironment"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteExecutionEnvironment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                executionEnvironmentId: components["parameters"]["ExecutionEnvironmentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description A job template still uses the execution environment */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    updateExecutionEnvironment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                executionEnvironmentId: components["parameters"]["ExecutionEnvironmentId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExecutionEnvironmentUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated execution environment */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionEnvironment"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listJobTemplates: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of job templates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobTemplateList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createJobTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobTemplateCreate"];
+            };
+        };
+        responses: {
+            /** @description Job template created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobTemplate"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getJobTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job template */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobTemplate"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteJobTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateJobTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobTemplateUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated job template */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobTemplate"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    launchJobTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["LaunchRequest"];
+            };
+        };
+        responses: {
+            /** @description Job queued */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listJobs: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                status?: components["schemas"]["JobStatus"];
+                jobTemplateId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of jobs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    cancelJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancellation requested (or done, for a pending job) */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description The job has already finished */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    listJobEvents: {
+        parameters: {
+            query?: {
+                afterSeq?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Events after `afterSeq` */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobEventList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    streamJob: {
+        parameters: {
+            query?: {
+                /** @description Start after this event. `Last-Event-ID` takes precedence. */
+                afterSeq?: number;
+            };
+            header?: {
+                "Last-Event-ID"?: string;
+            };
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Event stream */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getRunnerJobSpec: {
+        parameters: {
+            query: {
+                /** @description The runner protocol version the runner speaks */
+                protocol: number;
+                /** @description The runner's release version, for display */
+                version: string;
+            };
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job specification */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunnerJobSpec"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    postRunnerJobEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunnerEventBatch"];
+            };
+        };
+        responses: {
+            /** @description Stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunnerJobState"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    runnerHeartbeat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunnerJobState"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    finishRunnerJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunnerFinish"];
+            };
+        };
+        responses: {
+            /** @description Recorded */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
         };
     };
 }

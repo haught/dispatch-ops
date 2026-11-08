@@ -11,6 +11,8 @@ import (
 const (
 	SessionTokenPrefix = "dos_"
 	APITokenPrefix     = "dop_"
+	// JobTokenPrefix marks the one-time token a job's runner authenticates with.
+	JobTokenPrefix = "doj_"
 )
 
 // displayPrefixLen is how many characters of a token are stored in clear so
@@ -38,7 +40,7 @@ func HashToken(secret string) []byte {
 // LooksLikeToken reports whether s has the shape of a dispatch-ops token, to
 // skip a database lookup for obviously bogus values.
 func LooksLikeToken(s string) bool {
-	if !strings.HasPrefix(s, SessionTokenPrefix) && !strings.HasPrefix(s, APITokenPrefix) {
+	if !strings.HasPrefix(s, SessionTokenPrefix) && !strings.HasPrefix(s, APITokenPrefix) && !strings.HasPrefix(s, JobTokenPrefix) {
 		return false
 	}
 	return len(s) == len(APITokenPrefix)+base64.RawURLEncoding.EncodedLen(32)

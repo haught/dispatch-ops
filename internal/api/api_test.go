@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -17,29 +16,28 @@ import (
 
 	"dispatch-ops/internal/api"
 	"dispatch-ops/internal/auth"
-	"dispatch-ops/internal/db"
+	"dispatch-ops/internal/credentials"
+	"dispatch-ops/internal/jobstream"
+	"dispatch-ops/internal/secrets"
 	"dispatch-ops/internal/server"
 	"dispatch-ops/internal/store"
+	"dispatch-ops/internal/testdb"
 )
 
 // testServer starts the full HTTP stack against the database named by
 // DISPATCH_TEST_DATABASE_URL, and creates a fresh local user.
 func testServer(t *testing.T) (srv *httptest.Server, username, password string) {
 	t.Helper()
-	dsn := os.Getenv("DISPATCH_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL not set; skipping database test (see `make test-db`)")
-	}
-	if err := db.MigrateUp(dsn); err != nil {
-		t.Fatal(err)
-	}
+	srv, _, username, password = startServer(t)
+	return srv, username, password
+}
+
+// startServer is testServer that also returns the store.
+func startServer(t *testing.T) (srv *httptest.Server, st *store.Store, username, password string) {
+	t.Helper()
+	pool, _ := testdb.Open(t, "api")
 	ctx := context.Background()
-	pool, err := db.Open(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	st := store.New(pool)
+	st = store.New(pool)
 
 	username = "user-" + rand.Text()[:10]
 	password = "a-long-test-password"
@@ -52,14 +50,24 @@ func testServer(t *testing.T) (srv *httptest.Server, username, password string) 
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h, err := api.NewHandler(&api.Handlers{Store: st, Log: log, SessionTTL: time.Hour, Version: "test"})
+	keys, err := secrets.NewKeyring(secrets.GenerateKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubCtx, stopHub := context.WithCancel(context.Background())
+	t.Cleanup(stopHub)
+	hub := jobstream.NewHub()
+	go hub.Run(hubCtx, st, log)
+	h, err := api.NewHandler(&api.Handlers{
+		Store: st, Vault: credentials.Vault{Keys: keys}, Hub: hub, Log: log, SessionTTL: time.Hour, Version: "test",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ui := fstest.MapFS{"200.html": {Data: []byte("<html>app shell</html>")}}
 	srv = httptest.NewServer(server.New(h, st, ui, log))
 	t.Cleanup(srv.Close)
-	return srv, username, password
+	return srv, st, username, password
 }
 
 type client struct {

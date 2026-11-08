@@ -37,11 +37,12 @@
 	<section class="card">
 		<h2>Getting started</h2>
 		<p>
-			This is the milestone 1 skeleton. Create an <a href="/tokens">API token</a> to call the API
-			from scripts, or browse the spec at <code>api/openapi.yaml</code>.
+			Launch a <a href="/templates">job template</a> and follow its output live on the
+			<a href="/jobs">jobs</a> page.
 		</p>
 		<p class="muted">
-			Job templates, inventories, credentials and execution environments come next.
+			Inventories, credentials, execution environments and templates are managed through the API for
+			now: create an <a href="/tokens">API token</a> and see <code>api/openapi.yaml</code>.
 		</p>
 	</section>
 </div>

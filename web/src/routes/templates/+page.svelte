@@ -1,0 +1,119 @@
+<script lang="ts">
+	import { goto } from '$app/navigation';
+	import { api, errorMessage, type JobTemplate } from '#lib/api/client.js';
+
+	let templates = $state<JobTemplate[]>([]);
+	let total = $state(0);
+	let search = $state('');
+	let loading = $state(true);
+	let error = $state('');
+	let launching = $state<string | null>(null);
+
+	async function load() {
+		const { data, error: err } = await api.GET('/api/v1/job-templates', {
+			params: { query: { limit: 500, search: search || undefined } }
+		});
+		loading = false;
+		if (data) {
+			templates = data.items;
+			total = data.total;
+		} else {
+			error = errorMessage(err);
+		}
+	}
+
+	$effect(() => {
+		void search;
+		load();
+	});
+
+	async function launch(t: JobTemplate) {
+		launching = t.id;
+		error = '';
+		const { data, error: err } = await api.POST('/api/v1/job-templates/{jobTemplateId}/launch', {
+			params: { path: { jobTemplateId: t.id } },
+			body: {}
+		});
+		launching = null;
+		if (data) goto(`/jobs/${data.id}`);
+		else error = errorMessage(err);
+	}
+</script>
+
+<h1>Job templates</h1>
+<p class="muted">
+	Templates are created through the API for now (<code>POST /api/v1/job-templates</code>).
+</p>
+
+<label class="search">
+	Search
+	<input bind:value={search} placeholder="Name contains…" />
+</label>
+
+{#if error}
+	<p class="error" role="alert">{error}</p>
+{/if}
+
+<section class="card">
+	{#if loading}
+		<p class="muted">Loading…</p>
+	{:else if templates.length === 0}
+		<p class="muted">No job templates{search ? ' match' : ' yet'}.</p>
+	{:else}
+		<div class="table-wrap">
+			<table>
+				<thead>
+					<tr>
+						<th>Name</th>
+						<th>Type</th>
+						<th>Command</th>
+						<th></th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each templates as t (t.id)}
+						<tr>
+							<td>
+								{t.name}
+								{#if t.description}<div class="muted small">{t.description}</div>{/if}
+							</td>
+							<td>{t.jobType}</td>
+							<td><code class="command">{t.command.join(' ')}</code></td>
+							<td>
+								<button onclick={() => launch(t)} disabled={launching !== null}>
+									{launching === t.id ? 'Launching…' : 'Launch'}
+								</button>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+		{#if total > templates.length}
+			<p class="muted">Showing {templates.length} of {total}. Narrow the search to see others.</p>
+		{/if}
+	{/if}
+</section>
+
+<style>
+	.search {
+		max-width: 320px;
+	}
+
+	.table-wrap {
+		overflow-x: auto;
+	}
+
+	.small {
+		font-size: 0.85rem;
+	}
+
+	.command {
+		display: inline-block;
+		max-width: 40ch;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		vertical-align: bottom;
+	}
+</style>

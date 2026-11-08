@@ -8,11 +8,18 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BIN := bin/dispatch-ops
 TEST_DATABASE_URL := postgres://dispatch:dispatch@localhost:5433/dispatch_test?sslmode=disable
 
+IMAGE_TAG ?= dev
+KIND_VERSION := v0.33.0
+KIND := go run sigs.k8s.io/kind@$(KIND_VERSION)
+KIND_CLUSTER := dispatch-ops
+KUBE_CONTEXT := kind-$(KIND_CLUSTER)
+DISPATCH_JOB_NAMESPACE ?= dispatch-jobs
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: setup-env
 setup-env: ## Create .env from .env.example
@@ -58,9 +65,41 @@ admin: ## Create an "admin" user with a generated password
 run: ## Run the API server (serves the last UI build)
 	go run -ldflags "-X main.version=$(VERSION)" ./cmd/dispatch-ops serve
 
+.PHONY: task-manager
+task-manager: ## Run the task manager (runs jobs on the kind cluster; see kind-up)
+	go run -ldflags "-X main.version=$(VERSION)" ./cmd/dispatch-ops task-manager
+
 .PHONY: web-dev
 web-dev: ## Run the Vite dev server with hot reload (proxies /api to :8080)
 	cd web && npm run dev
+
+# --- Dev cluster and execution environments ----------------------------------
+
+.PHONY: kind-up
+kind-up: ## Create the kind cluster and the job namespace
+	@$(KIND) get clusters 2>/dev/null | grep -qx $(KIND_CLUSTER) || $(KIND) create cluster --config deploy/dev/kind.yaml
+	@kubectl --context $(KUBE_CONTEXT) get namespace $(DISPATCH_JOB_NAMESPACE) >/dev/null 2>&1 \
+		|| kubectl --context $(KUBE_CONTEXT) create namespace $(DISPATCH_JOB_NAMESPACE)
+
+.PHONY: kind-down
+kind-down: ## Delete the kind cluster
+	$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: images
+images: ## Build the runner-base and ee-shell images
+	docker build -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) -t dispatch-ops/runner-base:$(IMAGE_TAG) .
+	docker build --build-arg RUNNER_BASE=dispatch-ops/runner-base:$(IMAGE_TAG) -t dispatch-ops/ee-shell:$(IMAGE_TAG) images/ee-shell
+
+.PHONY: kind-load
+kind-load: images ## Build the images and load them into the kind cluster
+	$(KIND) load docker-image --name $(KIND_CLUSTER) dispatch-ops/runner-base:$(IMAGE_TAG) dispatch-ops/ee-shell:$(IMAGE_TAG)
+
+.PHONY: runner
+runner: ## Build static dispatch-runner binaries (linux amd64/arm64) for custom EE images
+	for arch in amd64 arm64; do \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o bin/dispatch-runner-linux-$$arch ./cmd/dispatch-runner || exit 1; \
+	done
 
 # --- Build & test ------------------------------------------------------------
 

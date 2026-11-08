@@ -10,6 +10,8 @@ import (
 
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/auth"
+	"dispatch-ops/internal/credentials"
+	"dispatch-ops/internal/jobstream"
 	"dispatch-ops/internal/store"
 )
 
@@ -18,7 +20,11 @@ const SessionCookieName = "dispatch_session"
 
 // Handlers implements apigen.StrictServerInterface.
 type Handlers struct {
-	Store         *store.Store
+	Store *store.Store
+	// Vault encrypts and decrypts credential values.
+	Vault credentials.Vault
+	// Hub wakes live job streams; it must be running (see jobstream.Hub.Run).
+	Hub           *jobstream.Hub
 	Log           *slog.Logger
 	SessionTTL    time.Duration
 	SecureCookies bool

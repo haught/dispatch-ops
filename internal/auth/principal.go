@@ -36,3 +36,17 @@ func FromContext(ctx context.Context) *Principal {
 	p, _ := ctx.Value(principalKey{}).(*Principal)
 	return p
 }
+
+type jobKey struct{}
+
+// WithJob returns a context carrying the job whose runner token
+// authenticated the request.
+func WithJob(ctx context.Context, jobID uuid.UUID) context.Context {
+	return context.WithValue(ctx, jobKey{}, jobID)
+}
+
+// JobFromContext returns the job a runner request authenticated as.
+func JobFromContext(ctx context.Context) (uuid.UUID, bool) {
+	id, ok := ctx.Value(jobKey{}).(uuid.UUID)
+	return id, ok
+}

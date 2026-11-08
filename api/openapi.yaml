@@ -1,19 +1,38 @@
 openapi: 3.0.3
 info:
   title: Dispatch Ops API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     Dispatch Ops runs automation jobs (Ansible, scripts, or any container) on
-    Kubernetes. This spec is the source of truth: the Go server and the
-    TypeScript client are generated from it.
+    Kubernetes. This spec is the source of truth: the Go server, the
+    TypeScript client and the runner's client are generated from it.
 
     Authentication is either a browser session cookie (from `POST /auth/login`)
     or an API token sent as `Authorization: Bearer <token>`.
+
+    ## Conventions
+    - List endpoints take `limit` and `offset` and return `{items, total}`.
+      Named resources are sorted by name and accept `search` (case-insensitive
+      substring match on the name).
+    - `PATCH` updates only the fields present in the body. Optional references
+      can be cleared with `null`.
+    - Errors use RFC 9457 problem details (`application/problem+json`).
+
+    ## Runner API
+    Paths under `/runner/v1` are called by the runner inside a job pod. They
+    accept only that job's one-time job token, never user credentials.
 
 tags:
   - name: system
   - name: auth
   - name: tokens
+  - name: inventories
+  - name: credentials
+  - name: execution-environments
+  - name: job-templates
+  - name: jobs
+  - name: runner
+    description: Called by the runner inside job pods. Job-token auth only.
 
 security:
   - cookieAuth: []
@@ -168,6 +187,998 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  # --- Inventories -----------------------------------------------------------
+
+  /api/v1/inventories:
+    get:
+      operationId: listInventories
+      tags: [inventories]
+      summary: List inventories
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200":
+          description: A page of inventories
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createInventory
+      tags: [inventories]
+      summary: Create an inventory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryCreate"
+      responses:
+        "201":
+          description: Inventory created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Inventory"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/inventories/{inventoryId}:
+    parameters:
+      - $ref: "#/components/parameters/InventoryId"
+    get:
+      operationId: getInventory
+      tags: [inventories]
+      summary: Get an inventory
+      responses:
+        "200":
+          description: The inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Inventory"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateInventory
+      tags: [inventories]
+      summary: Update an inventory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryUpdate"
+      responses:
+        "200":
+          description: The updated inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Inventory"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteInventory
+      tags: [inventories]
+      summary: Delete an inventory with its hosts and groups
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A job template still uses the inventory
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /api/v1/inventories/{inventoryId}/export:
+    parameters:
+      - $ref: "#/components/parameters/InventoryId"
+    get:
+      operationId: exportInventory
+      tags: [inventories]
+      summary: Export an inventory in Ansible's JSON inventory format
+      description: |
+        The same document job runners receive. Disabled hosts are left out.
+        Host variables are under `_meta.hostvars`.
+      responses:
+        "200":
+          description: Ansible JSON inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryExport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/inventories/{inventoryId}/hosts:
+    parameters:
+      - $ref: "#/components/parameters/InventoryId"
+    get:
+      operationId: listHosts
+      tags: [inventories]
+      summary: List an inventory's hosts
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+        - name: groupId
+          in: query
+          description: Only hosts that are direct members of this group
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: A page of hosts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createHost
+      tags: [inventories]
+      summary: Add a host to an inventory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostCreate"
+      responses:
+        "201":
+          description: Host created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Host"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/hosts/{hostId}:
+    parameters:
+      - $ref: "#/components/parameters/HostId"
+    get:
+      operationId: getHost
+      tags: [inventories]
+      summary: Get a host
+      responses:
+        "200":
+          description: The host
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Host"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateHost
+      tags: [inventories]
+      summary: Update a host
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostUpdate"
+      responses:
+        "200":
+          description: The updated host
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Host"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteHost
+      tags: [inventories]
+      summary: Delete a host
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/inventories/{inventoryId}/groups:
+    parameters:
+      - $ref: "#/components/parameters/InventoryId"
+    get:
+      operationId: listGroups
+      tags: [inventories]
+      summary: List an inventory's host groups
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200":
+          description: A page of groups
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createGroup
+      tags: [inventories]
+      summary: Add a host group to an inventory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GroupCreate"
+      responses:
+        "201":
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/groups/{groupId}:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    get:
+      operationId: getGroup
+      tags: [inventories]
+      summary: Get a host group
+      responses:
+        "200":
+          description: The group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateGroup
+      tags: [inventories]
+      summary: Update a host group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GroupUpdate"
+      responses:
+        "200":
+          description: The updated group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteGroup
+      tags: [inventories]
+      summary: Delete a host group
+      description: The group's hosts and child groups are kept.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --- Credentials -----------------------------------------------------------
+
+  /api/v1/credential-kinds:
+    get:
+      operationId: listCredentialKinds
+      tags: [credentials]
+      summary: Describe the credential kinds and their input fields
+      responses:
+        "200":
+          description: All credential kinds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CredentialKindInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/credentials:
+    get:
+      operationId: listCredentials
+      tags: [credentials]
+      summary: List credentials
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+        - name: kind
+          in: query
+          schema:
+            $ref: "#/components/schemas/CredentialKind"
+      responses:
+        "200":
+          description: A page of credentials. Secret values are never returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createCredential
+      tags: [credentials]
+      summary: Create a credential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialCreate"
+      responses:
+        "201":
+          description: Credential created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Credential"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/credentials/{credentialId}:
+    parameters:
+      - $ref: "#/components/parameters/CredentialId"
+    get:
+      operationId: getCredential
+      tags: [credentials]
+      summary: Get a credential (without secret values)
+      responses:
+        "200":
+          description: The credential
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Credential"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateCredential
+      tags: [credentials]
+      summary: Update a credential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialUpdate"
+      responses:
+        "200":
+          description: The updated credential
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Credential"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteCredential
+      tags: [credentials]
+      summary: Delete a credential
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A job template still uses the credential
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  # --- Execution environments ------------------------------------------------
+
+  /api/v1/execution-environments:
+    get:
+      operationId: listExecutionEnvironments
+      tags: [execution-environments]
+      summary: List execution environments (job images)
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200":
+          description: A page of execution environments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionEnvironmentList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createExecutionEnvironment
+      tags: [execution-environments]
+      summary: Register an execution environment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutionEnvironmentCreate"
+      responses:
+        "201":
+          description: Execution environment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionEnvironment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/execution-environments/{executionEnvironmentId}:
+    parameters:
+      - $ref: "#/components/parameters/ExecutionEnvironmentId"
+    get:
+      operationId: getExecutionEnvironment
+      tags: [execution-environments]
+      summary: Get an execution environment
+      responses:
+        "200":
+          description: The execution environment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionEnvironment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateExecutionEnvironment
+      tags: [execution-environments]
+      summary: Update an execution environment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutionEnvironmentUpdate"
+      responses:
+        "200":
+          description: The updated execution environment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionEnvironment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteExecutionEnvironment
+      tags: [execution-environments]
+      summary: Delete an execution environment
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A job template still uses the execution environment
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  # --- Job templates ---------------------------------------------------------
+
+  /api/v1/job-templates:
+    get:
+      operationId: listJobTemplates
+      tags: [job-templates]
+      summary: List job templates
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200":
+          description: A page of job templates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobTemplateList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createJobTemplate
+      tags: [job-templates]
+      summary: Create a job template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobTemplateCreate"
+      responses:
+        "201":
+          description: Job template created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/job-templates/{jobTemplateId}:
+    parameters:
+      - $ref: "#/components/parameters/JobTemplateId"
+    get:
+      operationId: getJobTemplate
+      tags: [job-templates]
+      summary: Get a job template
+      responses:
+        "200":
+          description: The job template
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobTemplate"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateJobTemplate
+      tags: [job-templates]
+      summary: Update a job template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobTemplateUpdate"
+      responses:
+        "200":
+          description: The updated job template
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteJobTemplate
+      tags: [job-templates]
+      summary: Delete a job template
+      description: Jobs launched from it are kept.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/job-templates/{jobTemplateId}/launch:
+    parameters:
+      - $ref: "#/components/parameters/JobTemplateId"
+    post:
+      operationId: launchJobTemplate
+      tags: [job-templates]
+      summary: Launch a job from a template
+      description: |
+        Queues a job. The template's configuration is resolved and stored with
+        the job, so later template changes don't affect it. Only fields listed
+        in the template's `allowOverrides` may be given.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LaunchRequest"
+      responses:
+        "201":
+          description: Job queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --- Jobs ------------------------------------------------------------------
+
+  /api/v1/jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      summary: List jobs, newest first
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/JobStatus"
+        - name: jobTemplateId
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: A page of jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/jobs/{jobId}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Get a job
+      responses:
+        "200":
+          description: The job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/jobs/{jobId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      operationId: cancelJob
+      tags: [jobs]
+      summary: Cancel a job
+      description: |
+        A pending job is canceled at once. A job that has started is asked to
+        stop: the runner sends SIGTERM, then SIGKILL after a grace period, and
+        the job ends as `canceled`.
+      responses:
+        "202":
+          description: Cancellation requested (or done, for a pending job)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The job has already finished
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /api/v1/jobs/{jobId}/events:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      operationId: listJobEvents
+      tags: [jobs]
+      summary: Page through a job's output events
+      description: |
+        Returns events in sequence order. To get the next page, pass the last
+        event's `seq` as `afterSeq`.
+      parameters:
+        - name: afterSeq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 1000
+      responses:
+        "200":
+          description: Events after `afterSeq`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEventList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/jobs/{jobId}/stream:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      operationId: streamJob
+      tags: [jobs]
+      summary: Follow a job's output live (server-sent events)
+      description: |
+        A `text/event-stream` with these events:
+
+        - `job_event`: one output event (a `JobEvent`). The SSE `id` is its
+          `seq`, so a reconnecting `EventSource` resumes where it left off.
+        - `status`: the job (a `Job`) whenever its status changes, and once
+          when the stream opens.
+        - `end`: the job has finished and all of its output has been sent.
+          The server then closes the stream.
+      parameters:
+        - name: afterSeq
+          in: query
+          description: Start after this event. `Last-Event-ID` takes precedence.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: Last-Event-ID
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --- Runner ----------------------------------------------------------------
+
+  /runner/v1/jobs/{jobId}/spec:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      operationId: getRunnerJobSpec
+      tags: [runner]
+      summary: Fetch the job to run, including decrypted credentials
+      description: |
+        Can be called once per job. It moves the job to `running`. A runner
+        whose protocol version is not supported makes the job fail with an
+        explanation.
+      security:
+        - jobToken: []
+      parameters:
+        - name: protocol
+          in: query
+          required: true
+          description: The runner protocol version the runner speaks
+          schema:
+            type: integer
+            minimum: 1
+        - name: version
+          in: query
+          required: true
+          description: The runner's release version, for display
+          schema:
+            type: string
+            maxLength: 100
+      responses:
+        "200":
+          description: The job specification
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunnerJobSpec"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /runner/v1/jobs/{jobId}/events:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      operationId: postRunnerJobEvents
+      tags: [runner]
+      summary: Append output events
+      description: |
+        Events are keyed by `seq`, so a retried batch is stored once. Send
+        batches in order and wait for each to be accepted.
+      security:
+        - jobToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunnerEventBatch"
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunnerJobState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /runner/v1/jobs/{jobId}/heartbeat:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      operationId: runnerHeartbeat
+      tags: [runner]
+      summary: Report that the job is still running
+      description: The response says whether the job should be canceled.
+      security:
+        - jobToken: []
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunnerJobState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /runner/v1/jobs/{jobId}/finish:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      operationId: finishRunnerJob
+      tags: [runner]
+      summary: Report the job's final status
+      description: Send all events first. The job token stops working afterwards.
+      security:
+        - jobToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunnerFinish"
+      responses:
+        "204":
+          description: Recorded
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
 components:
   securitySchemes:
     cookieAuth:
@@ -177,6 +1188,83 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+    jobToken:
+      type: http
+      scheme: bearer
+      description: One-time token given to a job's runner (`doj_…`)
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 50
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    Search:
+      name: search
+      in: query
+      description: Case-insensitive substring match on the name
+      schema:
+        type: string
+        maxLength: 255
+    InventoryId:
+      name: inventoryId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    HostId:
+      name: hostId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CredentialId:
+      name: credentialId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ExecutionEnvironmentId:
+      name: executionEnvironmentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    JobTemplateId:
+      name: jobTemplateId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
 
   responses:
     BadRequest:
@@ -199,6 +1287,12 @@ components:
             $ref: "#/components/schemas/Problem"
     NotFound:
       description: The resource does not exist
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: The request conflicts with the current state, e.g. the name is taken
       content:
         application/problem+json:
           schema:
@@ -248,7 +1342,7 @@ components:
 
     User:
       type: object
-      required: [id, username, displayName, email, authSource, isAdmin, createdAt]
+      required: [id, username, displayName, email, authSource, isAdmin, createdAt, lastLoginAt]
       properties:
         id:
           type: string
@@ -274,7 +1368,7 @@ components:
 
     ApiToken:
       type: object
-      required: [id, name, prefix, createdAt]
+      required: [id, name, prefix, createdAt, expiresAt, lastUsedAt]
       properties:
         id:
           type: string
@@ -319,3 +1413,942 @@ components:
             token:
               type: string
               description: The token secret. Shown only once.
+
+    # --- Shared field types ---
+
+    Name:
+      type: string
+      minLength: 1
+      maxLength: 255
+    Description:
+      type: string
+      maxLength: 4096
+    Variables:
+      type: object
+      description: Variables as a JSON object (e.g. Ansible variables)
+      additionalProperties: true
+
+    # --- Inventories ---
+
+    Inventory:
+      type: object
+      required: [id, name, description, variables, hostCount, groupCount, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        variables:
+          $ref: "#/components/schemas/Variables"
+        hostCount:
+          type: integer
+        groupCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    InventoryCreate:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        variables:
+          $ref: "#/components/schemas/Variables"
+
+    InventoryUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        variables:
+          $ref: "#/components/schemas/Variables"
+
+    InventoryList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Inventory"
+        total:
+          type: integer
+
+    InventoryExport:
+      type: object
+      description: |
+        Ansible JSON inventory: one key per group (`hosts`, `vars`,
+        `children`), plus `all`, `ungrouped` and `_meta.hostvars`.
+      additionalProperties: true
+
+    HostName:
+      type: string
+      minLength: 1
+      maxLength: 255
+      pattern: '^\S+$'
+      description: Host name or address, as Ansible will see it. No whitespace.
+
+    Host:
+      type: object
+      required: [id, inventoryId, name, description, variables, enabled, groupIds, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        inventoryId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        variables:
+          $ref: "#/components/schemas/Variables"
+        enabled:
+          type: boolean
+          description: Disabled hosts are left out of job inventories
+        groupIds:
+          type: array
+          description: Groups the host is a direct member of
+          items:
+            type: string
+            format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    HostCreate:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/HostName"
+        description:
+          $ref: "#/components/schemas/Description"
+        variables:
+          $ref: "#/components/schemas/Variables"
+        enabled:
+          type: boolean
+          default: true
+        groupIds:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+            format: uuid
+
+    HostUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/HostName"
+        description:
+          $ref: "#/components/schemas/Description"
+        variables:
+          $ref: "#/components/schemas/Variables"
+        enabled:
+          type: boolean
+        groupIds:
+          type: array
+          description: Replaces the host's group memberships
+          maxItems: 1000
+          items:
+            type: string
+            format: uuid
+
+    HostList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Host"
+        total:
+          type: integer
+
+    GroupName:
+      type: string
+      minLength: 1
+      maxLength: 255
+      pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+      description: |
+        A valid Ansible group name: letters, digits and underscores, not
+        starting with a digit. `all` and `ungrouped` are reserved.
+
+    Group:
+      type: object
+      required: [id, inventoryId, name, description, variables, childIds, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        inventoryId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        variables:
+          $ref: "#/components/schemas/Variables"
+        childIds:
+          type: array
+          description: Direct child groups
+          items:
+            type: string
+            format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    GroupCreate:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/GroupName"
+        description:
+          $ref: "#/components/schemas/Description"
+        variables:
+          $ref: "#/components/schemas/Variables"
+        childIds:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+            format: uuid
+
+    GroupUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/GroupName"
+        description:
+          $ref: "#/components/schemas/Description"
+        variables:
+          $ref: "#/components/schemas/Variables"
+        childIds:
+          type: array
+          description: Replaces the group's children. Cycles are rejected.
+          maxItems: 1000
+          items:
+            type: string
+            format: uuid
+
+    GroupList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Group"
+        total:
+          type: integer
+
+    # --- Credentials ---
+
+    CredentialKind:
+      type: string
+      enum: [ssh, username_password, api_token, registry, scm, generic]
+
+    CredentialKindInfo:
+      type: object
+      required: [kind, label, freeform, fields]
+      properties:
+        kind:
+          $ref: "#/components/schemas/CredentialKind"
+        label:
+          type: string
+        freeform:
+          type: boolean
+          description: Any input names are accepted, and all values are secret
+        fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialField"
+
+    CredentialField:
+      type: object
+      required: [name, label, secret, required, multiline]
+      properties:
+        name:
+          type: string
+        label:
+          type: string
+        secret:
+          type: boolean
+          description: Secret values are encrypted and never returned by the API
+        required:
+          type: boolean
+        multiline:
+          type: boolean
+
+    Credential:
+      type: object
+      required: [id, name, description, kind, publicInputs, secretFields, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          $ref: "#/components/schemas/CredentialKind"
+        publicInputs:
+          type: object
+          description: Values of the non-secret fields
+          additionalProperties:
+            type: string
+        secretFields:
+          type: array
+          description: Names of the secret fields that have a value
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CredentialInputs:
+      type: object
+      description: Field values, by field name (see `GET /credential-kinds`)
+      maxProperties: 100
+      additionalProperties:
+        type: string
+        maxLength: 65536
+
+    CredentialCreate:
+      type: object
+      required: [name, kind, inputs]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        kind:
+          $ref: "#/components/schemas/CredentialKind"
+        inputs:
+          $ref: "#/components/schemas/CredentialInputs"
+
+    CredentialUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        inputs:
+          allOf:
+            - $ref: "#/components/schemas/CredentialInputs"
+          description: |
+            Merged into the existing inputs: fields given here are replaced,
+            others are kept. An empty string removes a field.
+
+    CredentialList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Credential"
+        total:
+          type: integer
+
+    # --- Execution environments ---
+
+    ImageReference:
+      type: string
+      minLength: 1
+      maxLength: 512
+      pattern: '^\S+$'
+      description: Container image, e.g. `ghcr.io/acme/ee-shell:1.2` or `…@sha256:…`
+
+    PullPolicy:
+      type: string
+      enum: [Always, IfNotPresent, Never]
+
+    ExecutionEnvironment:
+      type: object
+      required: [id, name, description, image, pullPolicy, registryCredentialId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        image:
+          type: string
+        pullPolicy:
+          $ref: "#/components/schemas/PullPolicy"
+        registryCredentialId:
+          type: string
+          format: uuid
+          nullable: true
+          description: A `registry` credential used to pull the image
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ExecutionEnvironmentCreate:
+      type: object
+      required: [name, image]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        image:
+          $ref: "#/components/schemas/ImageReference"
+        pullPolicy:
+          allOf:
+            - $ref: "#/components/schemas/PullPolicy"
+          default: IfNotPresent
+        registryCredentialId:
+          type: string
+          format: uuid
+
+    ExecutionEnvironmentUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        image:
+          $ref: "#/components/schemas/ImageReference"
+        pullPolicy:
+          $ref: "#/components/schemas/PullPolicy"
+        registryCredentialId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "`null` removes the registry credential"
+          # Tells an absent field (leave unchanged) apart from null (clear).
+          x-go-type: nullable.Nullable[openapi_types.UUID]
+          x-go-type-skip-optional-pointer: true
+          x-go-type-import:
+            path: github.com/oapi-codegen/nullable
+
+    ExecutionEnvironmentList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExecutionEnvironment"
+        total:
+          type: integer
+
+    # --- Job templates ---
+
+    JobType:
+      type: string
+      enum: [ansible, script, container]
+      description: Only `container` is supported so far; `ansible` and `script` arrive with projects.
+
+    Command:
+      type: array
+      description: The program and its arguments. Not run through a shell.
+      minItems: 1
+      maxItems: 1000
+      items:
+        type: string
+        maxLength: 65536
+
+    OverridableField:
+      type: string
+      enum: [inventory, extraVars, limit, command]
+
+    JobTemplate:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - jobType
+        - executionEnvironmentId
+        - inventoryId
+        - credentialIds
+        - command
+        - extraVars
+        - limit
+        - timeoutSeconds
+        - allowOverrides
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        jobType:
+          $ref: "#/components/schemas/JobType"
+        executionEnvironmentId:
+          type: string
+          format: uuid
+        inventoryId:
+          type: string
+          format: uuid
+          nullable: true
+        credentialIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        command:
+          type: array
+          items:
+            type: string
+        extraVars:
+          $ref: "#/components/schemas/Variables"
+        limit:
+          type: string
+          description: Host pattern to restrict the job to (Ansible `--limit`)
+        timeoutSeconds:
+          type: integer
+        allowOverrides:
+          type: array
+          items:
+            $ref: "#/components/schemas/OverridableField"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    JobTemplateCreate:
+      type: object
+      required: [name, jobType, executionEnvironmentId, command]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        jobType:
+          $ref: "#/components/schemas/JobType"
+        executionEnvironmentId:
+          type: string
+          format: uuid
+        inventoryId:
+          type: string
+          format: uuid
+        credentialIds:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+        command:
+          $ref: "#/components/schemas/Command"
+        extraVars:
+          $ref: "#/components/schemas/Variables"
+        limit:
+          type: string
+          maxLength: 4096
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 604800
+          default: 3600
+        allowOverrides:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/OverridableField"
+
+    JobTemplateUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        executionEnvironmentId:
+          type: string
+          format: uuid
+        inventoryId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "`null` removes the inventory"
+          x-go-type: nullable.Nullable[openapi_types.UUID]
+          x-go-type-skip-optional-pointer: true
+          x-go-type-import:
+            path: github.com/oapi-codegen/nullable
+        credentialIds:
+          type: array
+          description: Replaces the template's credentials
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+        command:
+          $ref: "#/components/schemas/Command"
+        extraVars:
+          $ref: "#/components/schemas/Variables"
+        limit:
+          type: string
+          maxLength: 4096
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 604800
+        allowOverrides:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/OverridableField"
+
+    JobTemplateList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobTemplate"
+        total:
+          type: integer
+
+    LaunchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        inventoryId:
+          type: string
+          format: uuid
+        extraVars:
+          allOf:
+            - $ref: "#/components/schemas/Variables"
+          description: Merged over the template's extra vars (top-level keys replace)
+        limit:
+          type: string
+          maxLength: 4096
+        command:
+          $ref: "#/components/schemas/Command"
+
+    # --- Jobs ---
+
+    JobStatus:
+      type: string
+      description: |
+        `pending`: queued. `waiting`: the Kubernetes Job was created and the
+        runner has not started yet. `running`: the runner is executing it.
+        `successful`, `failed` (the command failed), `error` (the system could
+        not run it) and `canceled` are final.
+      enum: [pending, waiting, running, successful, failed, error, canceled]
+
+    UserRef:
+      type: object
+      required: [id, username]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+
+    ExecutionEnvironmentRef:
+      type: object
+      required: [id, name, image, pullPolicy]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        image:
+          type: string
+        pullPolicy:
+          $ref: "#/components/schemas/PullPolicy"
+
+    JobConfig:
+      type: object
+      description: The configuration the job runs with, resolved at launch
+      required:
+        - jobType
+        - executionEnvironment
+        - inventoryId
+        - credentialIds
+        - command
+        - extraVars
+        - limit
+        - timeoutSeconds
+      properties:
+        jobType:
+          $ref: "#/components/schemas/JobType"
+        executionEnvironment:
+          $ref: "#/components/schemas/ExecutionEnvironmentRef"
+        inventoryId:
+          type: string
+          format: uuid
+          nullable: true
+        credentialIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        command:
+          type: array
+          items:
+            type: string
+        extraVars:
+          $ref: "#/components/schemas/Variables"
+        limit:
+          type: string
+        timeoutSeconds:
+          type: integer
+
+    Job:
+      type: object
+      required:
+        - id
+        - name
+        - jobTemplateId
+        - status
+        - launchType
+        - launchedBy
+        - config
+        - cancelRequested
+        - exitCode
+        - failureReason
+        - createdAt
+        - startedAt
+        - finishedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        jobTemplateId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "`null` if the template has since been deleted"
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        launchType:
+          type: string
+          enum: [manual, api, schedule, relaunch]
+        launchedBy:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+        config:
+          $ref: "#/components/schemas/JobConfig"
+        cancelRequested:
+          type: boolean
+        exitCode:
+          type: integer
+          nullable: true
+        failureReason:
+          type: string
+          description: Why the job failed, errored or was canceled, if known
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    JobList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        total:
+          type: integer
+
+    JobEvent:
+      type: object
+      required: [seq, time, type, stdout, hostName, data]
+      properties:
+        seq:
+          type: integer
+          format: int64
+        time:
+          type: string
+          format: date-time
+        type:
+          type: string
+          description: "`stdout` for command output, `runner` for messages from the runner"
+        stdout:
+          type: string
+        hostName:
+          type: string
+          nullable: true
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    JobEventList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobEvent"
+
+    # --- Runner ---
+
+    RunnerJobSpec:
+      type: object
+      required: [jobId, jobType, command, extraVars, limit, timeoutSeconds, inventory, credentials]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        jobType:
+          $ref: "#/components/schemas/JobType"
+        command:
+          type: array
+          items:
+            type: string
+        extraVars:
+          $ref: "#/components/schemas/Variables"
+        limit:
+          type: string
+        timeoutSeconds:
+          type: integer
+        inventory:
+          allOf:
+            - $ref: "#/components/schemas/InventoryExport"
+          nullable: true
+        credentials:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunnerCredential"
+
+    RunnerCredential:
+      type: object
+      required: [id, name, kind, inputs]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        kind:
+          $ref: "#/components/schemas/CredentialKind"
+        inputs:
+          type: object
+          description: All field values, secret ones decrypted
+          additionalProperties:
+            type: string
+
+    RunnerEvent:
+      type: object
+      required: [seq, type, stdout]
+      properties:
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Starts at 1 and increases by one per event
+        type:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[a-z][a-z_]*$'
+        stdout:
+          type: string
+          maxLength: 65536
+        hostName:
+          type: string
+          maxLength: 255
+        data:
+          type: object
+          additionalProperties: true
+        time:
+          type: string
+          format: date-time
+
+    RunnerEventBatch:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/RunnerEvent"
+
+    RunnerJobState:
+      type: object
+      required: [cancelRequested]
+      properties:
+        cancelRequested:
+          type: boolean
+          description: Stop the job and finish it as `canceled`
+
+    RunnerFinish:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [successful, failed, error, canceled]
+        exitCode:
+          type: integer
+        failureReason:
+          type: string
+          maxLength: 4096

@@ -11,17 +11,12 @@
 
 	const nav = [
 		{ href: '/', label: 'Dashboard' },
+		{ href: '/jobs', label: 'Jobs' },
+		{ href: '/templates', label: 'Job templates' },
 		{ href: '/tokens', label: 'API tokens' }
 	];
-	// Sections from PLAN.md that arrive in later milestones.
-	const upcoming = [
-		'Job templates',
-		'Jobs',
-		'Inventories',
-		'Credentials',
-		'Projects',
-		'Execution environments'
-	];
+	// Managed through the API until their pages arrive; projects come with milestone 3.
+	const upcoming = ['Inventories', 'Credentials', 'Execution environments', 'Projects'];
 
 	const isLogin = $derived(page.url.pathname === '/login');
 
@@ -64,7 +59,7 @@
 				{#each nav as item (item.href)}
 					<a href={item.href} class:active={isActive(item.href)}>{item.label}</a>
 				{/each}
-				<div class="section">Coming soon</div>
+				<div class="section">API only for now</div>
 				{#each upcoming as label (label)}
 					<span class="disabled">{label}</span>
 				{/each}

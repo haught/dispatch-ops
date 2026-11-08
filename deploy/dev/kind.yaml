@@ -1,0 +1,7 @@
+# Local Kubernetes cluster for development (`make kind-up`). Job pods run
+# here; the API server and task manager run on the host.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: dispatch-ops
+nodes:
+  - role: control-plane

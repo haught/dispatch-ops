@@ -1,0 +1,109 @@
+// Package secrets encrypts credential values at rest with AES-256-GCM.
+package secrets
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// KeySize is the length of an encryption key in bytes.
+const KeySize = 32
+
+// Keyring encrypts with the current key and decrypts with any known key, so
+// the key can be rotated: add the old key to the decrypt-only list, set a new
+// current key, and values are re-encrypted with it as they are next saved.
+type Keyring struct {
+	currentID string
+	aeads     map[string]cipher.AEAD
+}
+
+// NewKeyring builds a keyring from base64-encoded 32-byte keys.
+func NewKeyring(current string, old ...string) (*Keyring, error) {
+	k := &Keyring{aeads: map[string]cipher.AEAD{}}
+	id, err := k.add(current)
+	if err != nil {
+		return nil, fmt.Errorf("encryption key: %w", err)
+	}
+	k.currentID = id
+	for i, o := range old {
+		if strings.TrimSpace(o) == "" {
+			continue
+		}
+		if _, err := k.add(o); err != nil {
+			return nil, fmt.Errorf("old encryption key %d: %w", i+1, err)
+		}
+	}
+	return k, nil
+}
+
+func (k *Keyring) add(encoded string) (string, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		return "", errors.New("not valid base64")
+	}
+	if len(key) != KeySize {
+		return "", fmt.Errorf("must be %d bytes, got %d", KeySize, len(key))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	id := KeyID(key)
+	k.aeads[id] = aead
+	return id, nil
+}
+
+// KeyID derives a short, non-secret identifier for a key.
+func KeyID(key []byte) string {
+	sum := sha256.Sum256(append([]byte("dispatch-ops key id\x00"), key...))
+	return hex.EncodeToString(sum[:8])
+}
+
+// CurrentKeyID identifies the key new values are encrypted with.
+func (k *Keyring) CurrentKeyID() string { return k.currentID }
+
+// Encrypt seals plaintext with the current key. aad binds the ciphertext to
+// its context (e.g. the credential ID) so it can't be moved to another row.
+func (k *Keyring) Encrypt(plaintext, aad []byte) (ciphertext []byte, keyID string, err error) {
+	aead := k.aeads[k.currentID]
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, "", err
+	}
+	return aead.Seal(nonce, nonce, plaintext, aad), k.currentID, nil
+}
+
+// Decrypt opens a value sealed by Encrypt.
+func (k *Keyring) Decrypt(ciphertext []byte, keyID string, aad []byte) ([]byte, error) {
+	aead, ok := k.aeads[keyID]
+	if !ok {
+		return nil, fmt.Errorf("value was encrypted with key %s, which is not configured", keyID)
+	}
+	if len(ciphertext) < aead.NonceSize() {
+		return nil, errors.New("ciphertext too short")
+	}
+	nonce, sealed := ciphertext[:aead.NonceSize()], ciphertext[aead.NonceSize():]
+	plaintext, err := aead.Open(nil, nonce, sealed, aad)
+	if err != nil {
+		return nil, errors.New("decryption failed: wrong key or corrupted value")
+	}
+	return plaintext, nil
+}
+
+// GenerateKey returns a new random key, base64-encoded.
+func GenerateKey() string {
+	key := make([]byte, KeySize)
+	_, _ = rand.Read(key) // crypto/rand.Read never fails
+	return base64.StdEncoding.EncodeToString(key)
+}

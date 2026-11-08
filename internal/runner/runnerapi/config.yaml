@@ -1,0 +1,9 @@
+# oapi-codegen configuration for the runner's API client: only the operations
+# tagged "runner". Regenerate with `make generate`.
+package: runnerapi
+output: runnerapi.gen.go
+generate:
+  client: true
+  models: true
+output-options:
+  include-tags: [runner]

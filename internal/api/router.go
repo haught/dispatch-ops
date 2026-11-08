@@ -20,9 +20,10 @@ import (
 // maxBodyBytes caps API request bodies.
 const maxBodyBytes = 1 << 20
 
-// NewHandler returns the http.Handler serving everything under /api/.
+// NewHandler returns the http.Handler serving everything under /api/ and
+// /runner/.
 //
-// Request flow: identify the caller (cookie or bearer token) → validate the
+// Request flow: identify the caller (cookie, API token or job token) → validate the
 // request against the OpenAPI spec, which also enforces each operation's
 // `security` requirements → generated router → strict handlers.
 func NewHandler(h *Handlers) (http.Handler, error) {
@@ -46,6 +47,13 @@ func NewHandler(h *Handlers) (http.Handler, error) {
 			writeProblem(w, problemDetail(http.StatusBadRequest, "Invalid request", err.Error()))
 		},
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			if p, ok := problemFor(err); ok {
+				writeProblem(w, p)
+				return
+			}
+			if r.Context().Err() != nil {
+				return // the client went away
+			}
 			h.Log.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 			writeProblem(w, problem(http.StatusInternalServerError, "Internal server error"))
 		},
@@ -62,13 +70,28 @@ func NewHandler(h *Handlers) (http.Handler, error) {
 	return identify(h.Store, h.Log, validate(mux)), nil
 }
 
-// identify resolves the caller from a bearer API token or the session cookie
-// and stores it in the request context. It never rejects a request itself:
-// whether an operation needs a caller is decided by the spec (see authenticate).
-// A request carrying invalid credentials is treated as anonymous.
+// identify resolves the caller from a bearer token (API or job token) or the
+// session cookie and stores it in the request context. It never rejects a
+// request itself: whether an operation needs a caller is decided by the spec
+// (see authenticate). A request carrying invalid credentials is treated as
+// anonymous.
 func identify(st *store.Store, log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+
+		if secret := jobTokenFrom(r); secret != "" && auth.LooksLikeToken(secret) {
+			jobID, err := st.LookupJobToken(r.Context(), auth.HashToken(secret))
+			switch {
+			case err == nil:
+				r = r.WithContext(auth.WithJob(r.Context(), jobID))
+			case !errors.Is(err, store.ErrNotFound):
+				log.ErrorContext(r.Context(), "job token lookup failed", "err", err)
+				writeProblem(w, problem(http.StatusServiceUnavailable, "Service unavailable"))
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		secret, kind, method := credentialsFrom(r)
 		if secret != "" && auth.LooksLikeToken(secret) {
@@ -105,13 +128,29 @@ func credentialsFrom(r *http.Request) (secret string, kind store.TokenKind, meth
 	return "", "", ""
 }
 
+// jobTokenFrom returns the runner job token the request presents, if any.
+func jobTokenFrom(r *http.Request) string {
+	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if ok && strings.EqualFold(scheme, "Bearer") && strings.HasPrefix(token, auth.JobTokenPrefix) {
+		return strings.TrimSpace(token)
+	}
+	return ""
+}
+
 var errNotAuthenticated = errors.New("not authenticated")
 
 // authenticate is called by the OpenAPI validator for each security scheme an
 // operation accepts. It succeeds when identify found a caller that used that
 // scheme.
 func authenticate(_ context.Context, in *openapi3filter.AuthenticationInput) error {
-	p := auth.FromContext(in.RequestValidationInput.Request.Context())
+	ctx := in.RequestValidationInput.Request.Context()
+	if in.SecuritySchemeName == "jobToken" {
+		if _, ok := auth.JobFromContext(ctx); ok {
+			return nil
+		}
+		return errNotAuthenticated
+	}
+	p := auth.FromContext(ctx)
 	if p == nil {
 		return errNotAuthenticated
 	}

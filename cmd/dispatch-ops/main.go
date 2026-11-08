@@ -19,13 +19,19 @@ import (
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 
 	"dispatch-ops/internal/api"
 	"dispatch-ops/internal/auth"
 	"dispatch-ops/internal/config"
+	"dispatch-ops/internal/credentials"
 	"dispatch-ops/internal/db"
+	"dispatch-ops/internal/jobstream"
+	"dispatch-ops/internal/secrets"
 	"dispatch-ops/internal/server"
 	"dispatch-ops/internal/store"
+	"dispatch-ops/internal/taskmanager"
 	"dispatch-ops/web"
 )
 
@@ -36,11 +42,13 @@ const usage = `Usage: dispatch-ops <command> [arguments]
 
 Commands:
   serve                     Run the API server and web UI
+  task-manager              Run the task manager, which runs jobs on Kubernetes
   migrate up                Apply all pending database migrations
   migrate down              Roll back the most recent migration
   migrate version           Show the current migration version
   migrate force <version>   Mark a version as applied after fixing a failed migration
   user create [flags]       Create a local user (run "dispatch-ops user create -h")
+  gen-key                   Print a new random credential encryption key
   version                   Print the version
 
 Configuration is read from DISPATCH_* environment variables; see README.md.
@@ -61,6 +69,11 @@ func run(args []string) error {
 	switch args[0] {
 	case "serve":
 		return serve()
+	case "task-manager":
+		return runTaskManager()
+	case "gen-key":
+		fmt.Println(secrets.GenerateKey())
+		return nil
 	case "migrate":
 		return migrateCmd(args[1:])
 	case "user":
@@ -96,6 +109,10 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	keys, err := cfg.Keyring()
+	if err != nil {
+		return err
+	}
 	log := newLogger(cfg)
 	slog.SetDefault(log)
 
@@ -116,8 +133,13 @@ func serve() error {
 	defer pool.Close()
 	st := store.New(pool)
 
+	hub := jobstream.NewHub()
+	go hub.Run(ctx, st, log)
+
 	apiHandler, err := api.NewHandler(&api.Handlers{
 		Store:         st,
+		Vault:         credentials.Vault{Keys: keys},
+		Hub:           hub,
 		Log:           log,
 		SessionTTL:    cfg.SessionTTL,
 		SecureCookies: cfg.SecureCookies,
@@ -152,6 +174,63 @@ func serve() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+func runTaskManager() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if err := cfg.ValidateTaskManager(); err != nil {
+		return err
+	}
+	keys, err := cfg.Keyring()
+	if err != nil {
+		return err
+	}
+	log := newLogger(cfg).With("component", "task-manager")
+	slog.SetDefault(log)
+	// client-go logs through klog; send that to the same logger.
+	klog.SetSlogLogger(log)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	restCfg, err := taskmanager.KubeConfig(cfg.TaskManager.KubeContext)
+	if err != nil {
+		return err
+	}
+	kube, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return err
+	}
+	log.Info("connected to Kubernetes", "host", restCfg.Host, "context", cfg.TaskManager.KubeContext)
+
+	tm := cfg.TaskManager
+	m := &taskmanager.Manager{
+		Store: store.New(pool),
+		Kube:  kube,
+		Vault: credentials.Vault{Keys: keys},
+		Log:   log,
+		Config: taskmanager.Config{
+			Namespace:         tm.Namespace,
+			RunnerAPIURL:      tm.RunnerAPIURL,
+			MaxConcurrentJobs: tm.MaxConcurrentJobs,
+			JobTTL:            tm.JobTTL,
+			StartTimeout:      tm.StartTimeout,
+		},
+	}
+	if !tm.LeaderElection {
+		log.Warn("leader election is off; run only one task manager")
+		return m.Run(ctx)
+	}
+	return taskmanager.RunWithLeaderElection(ctx, kube, m, log)
 }
 
 func cleanupExpiredTokens(ctx context.Context, st *store.Store, log *slog.Logger) {

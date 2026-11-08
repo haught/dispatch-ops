@@ -6,6 +6,13 @@ export type ApiToken = components['schemas']['ApiToken'];
 export type CreatedApiToken = components['schemas']['CreatedApiToken'];
 export type Problem = components['schemas']['Problem'];
 export type Health = components['schemas']['Health'];
+export type Job = components['schemas']['Job'];
+export type JobStatus = components['schemas']['JobStatus'];
+export type JobEvent = components['schemas']['JobEvent'];
+export type JobTemplate = components['schemas']['JobTemplate'];
+
+/** Statuses after which a job no longer changes. */
+export const finishedStatuses: readonly JobStatus[] = ['successful', 'failed', 'error', 'canceled'];
 
 /** Typed client for the Dispatch Ops API, generated from api/openapi.yaml. */
 export const api = createClient<paths>({ baseUrl: '', credentials: 'same-origin' });

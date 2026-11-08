@@ -1,5 +1,5 @@
-// Package server assembles the top-level HTTP handler: the API, health
-// probes and the embedded single-page app.
+// Package server assembles the top-level HTTP handler: the API (including the
+// runner API), health probes and the embedded single-page app.
 package server
 
 import (
@@ -21,6 +21,7 @@ const spaFallback = "200.html"
 func New(apiHandler http.Handler, st *store.Store, ui fs.FS, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler)
+	mux.Handle("/runner/", apiHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
