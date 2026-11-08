@@ -15,3 +15,8 @@ export function fmtDuration(start: string | null | undefined, end?: string | nul
 	if (m) return `${m}m ${sec}s`;
 	return `${s % 60}s`;
 }
+
+/** A number of seconds as a duration, e.g. "1h 00m". */
+export function fmtSeconds(seconds: number): string {
+	return fmtDuration(new Date(0).toISOString(), new Date(seconds * 1000).toISOString());
+}

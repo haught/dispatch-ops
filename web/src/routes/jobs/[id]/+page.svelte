@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { tick } from 'svelte';
 	import {
@@ -8,7 +9,8 @@
 		hostEventTypes,
 		type Job,
 		type JobEvent,
-		type JobHostSummary
+		type JobHostSummary,
+		type NotificationDelivery
 	} from '#lib/api/client.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import { fmtDuration, fmtTime } from '#lib/format.js';
@@ -19,6 +21,8 @@
 	let live = $state(false);
 	let error = $state('');
 	let canceling = $state(false);
+	let relaunching = $state(false);
+	let deliveries = $state<NotificationDelivery[]>([]);
 
 	// Per-host results (Ansible jobs), and the task results of the host
 	// picked in the table.
@@ -33,6 +37,24 @@
 	let now = $state(Date.now());
 
 	const finished = $derived(job ? finishedStatuses.includes(job.status) : false);
+	const failedHosts = $derived(hosts.filter((h) => h.failed > 0 || h.unreachable > 0).length);
+
+	async function loadDeliveries(id: string) {
+		const { data } = await api.GET('/api/v1/jobs/{jobId}/notifications', {
+			params: { path: { jobId: id } }
+		});
+		if (data && page.params.id === id) deliveries = data.items;
+	}
+
+	// Notifications are queued as the status changes and sent shortly after.
+	$effect(() => {
+		const id = job?.id;
+		void job?.status;
+		if (!id) return;
+		loadDeliveries(id);
+		const timer = setTimeout(() => loadDeliveries(id), 3000);
+		return () => clearTimeout(timer);
+	});
 
 	$effect(() => {
 		const id = page.params.id;
@@ -41,6 +63,7 @@
 		lines = [];
 		error = '';
 		hosts = [];
+		deliveries = [];
 		selectedHost = null;
 		let source: EventSource | null = null;
 		let pending: JobEvent[] = [];
@@ -188,6 +211,19 @@
 		else error = errorMessage(err);
 	}
 
+	async function relaunch(hosts: 'all' | 'failed') {
+		if (!job) return;
+		relaunching = true;
+		error = '';
+		const { data, error: err } = await api.POST('/api/v1/jobs/{jobId}/relaunch', {
+			params: { path: { jobId: job.id } },
+			body: { hosts }
+		});
+		relaunching = false;
+		if (data) goto(`/jobs/${data.id}`);
+		else error = errorMessage(err);
+	}
+
 	function duration(j: Job) {
 		void now;
 		return fmtDuration(j.startedAt, j.finishedAt);
@@ -203,6 +239,15 @@
 		{#if !finished}
 			<button class="danger" onclick={cancel} disabled={canceling || job.cancelRequested}>
 				{job.cancelRequested ? 'Canceling…' : 'Cancel'}
+			</button>
+		{:else}
+			{#if job.config.jobType === 'ansible' && failedHosts > 0}
+				<button class="secondary" onclick={() => relaunch('failed')} disabled={relaunching}>
+					Relaunch on failed hosts ({failedHosts})
+				</button>
+			{/if}
+			<button class="secondary" onclick={() => relaunch('all')} disabled={relaunching}>
+				{relaunching ? 'Relaunching…' : 'Relaunch'}
 			</button>
 		{/if}
 	</div>
@@ -252,7 +297,20 @@
 				<dd><code>{job.config.skipTags}</code></dd>
 			{/if}
 			<dt>Launched by</dt>
-			<dd>{job.launchedBy?.username ?? '—'} ({job.launchType})</dd>
+			<dd>
+				{#if job.schedule}
+					schedule <strong>{job.schedule.name}</strong>
+				{:else}
+					{job.launchedBy?.username ?? '—'} ({job.launchType})
+				{/if}
+				{#if job.relaunchOf}
+					<span class="muted">· rerun of <a href="/jobs/{job.relaunchOf}">an earlier job</a></span>
+				{/if}
+			</dd>
+			{#if job.jobTemplateId}
+				<dt>Template</dt>
+				<dd><a href="/templates/{job.jobTemplateId}">{job.name}</a></dd>
+			{/if}
 			<dt>Created</dt>
 			<dd>{fmtTime(job.createdAt)}</dd>
 			<dt>Started</dt>
@@ -356,6 +414,52 @@
 		</section>
 	{/if}
 
+	{#if deliveries.length > 0}
+		<section class="card notifications">
+			<h2>Notifications</h2>
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Target</th>
+							<th>Event</th>
+							<th>Status</th>
+							<th>Details</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each deliveries as d (d.id)}
+							<tr>
+								<td>{d.targetName} <span class="muted small">{d.targetKind}</span></td>
+								<td>{d.event}</td>
+								<td>
+									<span
+										class="badge"
+										class:accent={d.status === 'sent'}
+										class:warn={d.status !== 'sent'}>{d.status}</span
+									>
+								</td>
+								<td class="small">
+									{#if d.status === 'sent'}
+										{fmtTime(d.sentAt)}
+									{:else if d.status === 'pending' && d.attempts > 0}
+										Attempt {d.attempts} failed: {d.lastError}. Retrying at {fmtTime(
+											d.nextAttemptAt
+										)}.
+									{:else if d.status === 'failed'}
+										<span class="error">{d.lastError}</span>
+									{:else}
+										<span class="muted">Sending…</span>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		</section>
+	{/if}
+
 	<section class="card log-card">
 		<pre class="log" bind:this={logEl} onscroll={onScroll}>{#each lines as line (line.seq)}<span
 					class="line {line.type}">{line.stdout}</span
@@ -419,7 +523,8 @@
 		overflow-wrap: anywhere;
 	}
 
-	.hosts {
+	.hosts,
+	.notifications {
 		margin-bottom: 1rem;
 	}
 

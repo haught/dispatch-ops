@@ -14,6 +14,7 @@ import (
 
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/auth"
+	"dispatch-ops/internal/metrics"
 	"dispatch-ops/internal/store"
 )
 
@@ -42,7 +43,7 @@ func NewHandler(h *Handlers) (http.Handler, error) {
 		DoNotValidateServers:  true,
 	})
 
-	strict := apigen.NewStrictHandlerWithOptions(h, nil, apigen.StrictHTTPServerOptions{
+	strict := apigen.NewStrictHandlerWithOptions(h, []apigen.StrictMiddlewareFunc{recordOperation}, apigen.StrictHTTPServerOptions{
 		RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
 			writeProblem(w, problemDetail(http.StatusBadRequest, "Invalid request", err.Error()))
 		},
@@ -68,6 +69,17 @@ func NewHandler(h *Handlers) (http.Handler, error) {
 	})
 
 	return identify(h.Store, h.Log, validate(mux)), nil
+}
+
+// recordOperation notes the OpenAPI operation a request matched, for
+// metrics and the request log. The generated code names operations in Go
+// style (ListJobs); they are recorded as the spec's operationId (listJobs).
+func recordOperation(f apigen.StrictHandlerFunc, operationID string) apigen.StrictHandlerFunc {
+	op := strings.ToLower(operationID[:1]) + operationID[1:]
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		metrics.SetOperation(ctx, op)
+		return f(ctx, w, r, request)
+	}
 }
 
 // identify resolves the caller from a bearer token (API or job token) or the

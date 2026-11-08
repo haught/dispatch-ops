@@ -28,6 +28,8 @@ import (
 	"dispatch-ops/internal/credentials"
 	"dispatch-ops/internal/db"
 	"dispatch-ops/internal/jobstream"
+	"dispatch-ops/internal/metrics"
+	"dispatch-ops/internal/notify"
 	"dispatch-ops/internal/oidc"
 	"dispatch-ops/internal/secrets"
 	"dispatch-ops/internal/server"
@@ -159,6 +161,7 @@ func serve() error {
 		SessionTTL:    cfg.SessionTTL,
 		SecureCookies: cfg.SecureCookies,
 		Version:       version,
+		Notifier:      &notify.Sender{ExternalURL: cfg.ExternalURL, Version: version},
 	})
 	if err != nil {
 		return err
@@ -173,6 +176,9 @@ func serve() error {
 	}
 
 	go cleanupExpiredTokens(ctx, st, log)
+	if addr := cfg.MetricsAddrOr(":9090"); addr != "" {
+		go metrics.Serve(ctx, addr, log)
+	}
 
 	errc := make(chan error, 1)
 	go func() {
@@ -229,17 +235,29 @@ func runTaskManager() error {
 
 	tm := cfg.TaskManager
 	m := &taskmanager.Manager{
-		Store: store.New(pool),
-		Kube:  kube,
-		Vault: credentials.Vault{Keys: keys},
-		Log:   log,
+		Store:       store.New(pool),
+		Kube:        kube,
+		Vault:       credentials.Vault{Keys: keys},
+		Log:         log,
+		Notifier:    &notify.Sender{ExternalURL: cfg.ExternalURL, Version: version},
+		NotifyVault: notify.Vault{Keys: keys},
 		Config: taskmanager.Config{
 			Namespace:         tm.Namespace,
 			RunnerAPIURL:      tm.RunnerAPIURL,
 			MaxConcurrentJobs: tm.MaxConcurrentJobs,
 			JobTTL:            tm.JobTTL,
 			StartTimeout:      tm.StartTimeout,
+			JobRetention:      tm.JobRetention,
+			AuditRetention:    tm.AuditRetention,
 		},
+	}
+	metrics.Registry.MustRegister(taskmanager.NewCollector(m))
+	// A different default from serve's, so both can run on one machine.
+	if addr := cfg.MetricsAddrOr(":9091"); addr != "" {
+		go metrics.Serve(ctx, addr, log)
+	}
+	if cfg.ExternalURL == "" {
+		log.Warn("DISPATCH_EXTERNAL_URL is not set, so notifications won't link to jobs")
 	}
 	if !tm.LeaderElection {
 		log.Warn("leader election is off; run only one task manager")

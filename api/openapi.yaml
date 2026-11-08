@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Dispatch Ops API
-  version: 0.4.0
+  version: 0.6.0
   description: |
     Dispatch Ops runs automation jobs (Ansible, scripts, or any container) on
     Kubernetes. This spec is the source of truth: the Go server, the
@@ -27,7 +27,16 @@ info:
       `execute`, plus `use` on an inventory given at launch.
     - Jobs can be seen by whoever launched them and by anyone with a role on
       their template. Canceling needs `execute` on the template, or having
-      launched the job.
+      launched the job. Relaunching needs `execute` on the template, plus
+      `use` on whatever the job used that the template no longer references.
+    - Schedules can be seen by anyone who can read their template. Creating
+      one needs `execute` on the template (and `use` on an inventory it
+      overrides); changing or deleting one needs `admin` on the template, or
+      being its creator with `execute`.
+    - Notification targets are managed by system administrators. Every
+      signed-in user can list them (so template admins can pick one), but
+      only system administrators and auditors see their configuration.
+      Choosing which targets a template notifies needs `admin` on it.
     - Execution environments can be read and used by everyone, and are
       managed by system administrators. So are users and teams, which every
       signed-in user can list.
@@ -60,6 +69,10 @@ tags:
   - name: projects
   - name: job-templates
   - name: jobs
+  - name: schedules
+    description: Launch job templates on a cron schedule.
+  - name: notifications
+    description: Send webhook, Slack or email notifications about jobs.
   - name: runner
     description: Called by the runner inside job pods. Job-token auth only.
 
@@ -1689,6 +1702,50 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/job-templates/{jobTemplateId}/notifications:
+    parameters:
+      - $ref: "#/components/parameters/JobTemplateId"
+    get:
+      operationId: listJobTemplateNotifications
+      tags: [job-templates, notifications]
+      summary: List the notification targets a template's jobs notify
+      responses:
+        "200":
+          description: The template's notifications, by target name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateNotificationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: setJobTemplateNotifications
+      tags: [job-templates, notifications]
+      summary: Replace the notification targets a template's jobs notify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplateNotificationsUpdate"
+      responses:
+        "200":
+          description: The template's notifications, by target name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateNotificationList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   # --- Jobs ------------------------------------------------------------------
 
   /api/v1/jobs:
@@ -1704,6 +1761,11 @@ paths:
           schema:
             $ref: "#/components/schemas/JobStatus"
         - name: jobTemplateId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: scheduleId
           in: query
           schema:
             type: string
@@ -1872,6 +1934,345 @@ paths:
                 type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/jobs/{jobId}/relaunch:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      operationId: relaunchJob
+      tags: [jobs]
+      summary: Run a job again
+      description: |
+        Queues a new job with the same configuration as this one (the same
+        resolved template, overrides, image and project ref), whether or not
+        the template has changed since. With `hosts: failed`, an Ansible job
+        is rerun only against the hosts that failed or were unreachable.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RelaunchRequest"
+      responses:
+        "201":
+          description: Job queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "The job hasn't finished (only for `hosts: failed`)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /api/v1/jobs/{jobId}/notifications:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      operationId: listJobNotifications
+      tags: [jobs, notifications]
+      summary: List the notifications sent (or being sent) about a job
+      responses:
+        "200":
+          description: The job's notifications, oldest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDeliveryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --- Schedules -------------------------------------------------------------
+
+  /api/v1/schedules:
+    get:
+      operationId: listSchedules
+      tags: [schedules]
+      summary: List schedules
+      description: Sorted by template name, then schedule name.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+        - name: jobTemplateId
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: A page of schedules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduleList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createSchedule
+      tags: [schedules]
+      summary: Create a schedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleCreate"
+      responses:
+        "201":
+          description: Schedule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/schedules/{scheduleId}:
+    parameters:
+      - $ref: "#/components/parameters/ScheduleId"
+    get:
+      operationId: getSchedule
+      tags: [schedules]
+      summary: Get a schedule
+      responses:
+        "200":
+          description: The schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateSchedule
+      tags: [schedules]
+      summary: Update a schedule
+      description: |
+        Changing `cron`, `timezone` or `enabled` plans the next run afresh
+        from now.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleUpdate"
+      responses:
+        "200":
+          description: The updated schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteSchedule
+      tags: [schedules]
+      summary: Delete a schedule
+      description: Jobs it launched are kept.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/schedule-preview:
+    get:
+      operationId: previewSchedule
+      tags: [schedules]
+      summary: Check a cron expression and list its next run times
+      parameters:
+        - name: cron
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/CronExpression"
+        - name: timezone
+          in: query
+          schema:
+            $ref: "#/components/schemas/Timezone"
+        - name: count
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 5
+      responses:
+        "200":
+          description: The next run times
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SchedulePreview"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # --- Notifications ---------------------------------------------------------
+
+  /api/v1/notification-targets:
+    get:
+      operationId: listNotificationTargets
+      tags: [notifications]
+      summary: List notification targets
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200":
+          description: |
+            A page of notification targets. Secret values are never
+            returned, and `config` is empty unless the caller is a system
+            administrator or auditor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationTargetList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createNotificationTarget
+      tags: [notifications]
+      summary: Create a notification target
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotificationTargetCreate"
+      responses:
+        "201":
+          description: Notification target created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationTarget"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/notification-targets/{targetId}:
+    parameters:
+      - $ref: "#/components/parameters/TargetId"
+    get:
+      operationId: getNotificationTarget
+      tags: [notifications]
+      summary: Get a notification target
+      responses:
+        "200":
+          description: The notification target
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationTarget"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateNotificationTarget
+      tags: [notifications]
+      summary: Update a notification target
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotificationTargetUpdate"
+      responses:
+        "200":
+          description: The updated notification target
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationTarget"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteNotificationTarget
+      tags: [notifications]
+      summary: Delete a notification target
+      description: It is removed from every template, and its unsent notifications are dropped.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/notification-targets/{targetId}/test:
+    parameters:
+      - $ref: "#/components/parameters/TargetId"
+    post:
+      operationId: testNotificationTarget
+      tags: [notifications]
+      summary: Send a test notification
+      description: Sends at once, from the API server, and reports the result.
+      responses:
+        "200":
+          description: Whether the test notification was sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationTestResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -2109,6 +2510,20 @@ components:
         format: uuid
     TeamId:
       name: teamId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ScheduleId:
+      name: scheduleId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TargetId:
+      name: targetId
       in: path
       required: true
       schema:
@@ -2571,6 +2986,8 @@ components:
         - user
         - team
         - api_token
+        - schedule
+        - notification_target
 
     AuditEntry:
       type: object
@@ -3598,6 +4015,8 @@ components:
         - status
         - launchType
         - launchedBy
+        - schedule
+        - relaunchOf
         - config
         - cancelRequested
         - exitCode
@@ -3626,6 +4045,17 @@ components:
           allOf:
             - $ref: "#/components/schemas/UserRef"
           nullable: true
+          description: "`null` for scheduled jobs, or if the user has since been deleted"
+        schedule:
+          allOf:
+            - $ref: "#/components/schemas/ScheduleRef"
+          nullable: true
+          description: The schedule that launched the job, if one did and it still exists
+        relaunchOf:
+          type: string
+          format: uuid
+          nullable: true
+          description: The job this one reran, if it still exists
         config:
           $ref: "#/components/schemas/JobConfig"
         cancelRequested:
@@ -3735,6 +4165,388 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/JobHostSummary"
+
+    RelaunchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        hosts:
+          type: string
+          enum: [all, failed]
+          default: all
+          description: |
+            `failed` reruns a finished Ansible job only against the hosts that
+            failed or were unreachable (as its `limit`).
+
+    # --- Schedules ---
+
+    CronExpression:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: |
+        Five fields (minute hour day-of-month month day-of-week, e.g.
+        `30 2 * * 1-5`) or a descriptor: `@yearly`, `@monthly`, `@weekly`,
+        `@daily`, `@hourly`, or `@every <duration>` (at least `1m`).
+      example: "0 3 * * *"
+
+    Timezone:
+      type: string
+      maxLength: 64
+      default: UTC
+      description: IANA time zone the cron expression is read in
+      example: Europe/Berlin
+
+    ScheduleRef:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
+    Schedule:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - jobTemplateId
+        - jobTemplateName
+        - cron
+        - timezone
+        - enabled
+        - overrides
+        - nextRunAt
+        - lastRunAt
+        - lastJobId
+        - lastError
+        - createdBy
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        jobTemplateId:
+          type: string
+          format: uuid
+        jobTemplateName:
+          type: string
+        cron:
+          $ref: "#/components/schemas/CronExpression"
+        timezone:
+          $ref: "#/components/schemas/Timezone"
+        enabled:
+          type: boolean
+        overrides:
+          $ref: "#/components/schemas/LaunchRequest"
+        nextRunAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "`null` while disabled"
+        lastRunAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastJobId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The last job it launched, if it still exists
+        lastError:
+          type: string
+          description: Why the last run could not launch a job (empty if it did)
+        createdBy:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ScheduleCreate:
+      type: object
+      required: [name, jobTemplateId, cron]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        jobTemplateId:
+          type: string
+          format: uuid
+        cron:
+          $ref: "#/components/schemas/CronExpression"
+        timezone:
+          $ref: "#/components/schemas/Timezone"
+        enabled:
+          type: boolean
+          default: true
+        overrides:
+          allOf:
+            - $ref: "#/components/schemas/LaunchRequest"
+          description: Launch overrides, as in a launch request; the template must allow them
+
+    ScheduleUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        cron:
+          $ref: "#/components/schemas/CronExpression"
+        timezone:
+          $ref: "#/components/schemas/Timezone"
+        enabled:
+          type: boolean
+        overrides:
+          allOf:
+            - $ref: "#/components/schemas/LaunchRequest"
+          description: Replaces the overrides
+
+    ScheduleList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Schedule"
+        total:
+          type: integer
+
+    SchedulePreview:
+      type: object
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          items:
+            type: string
+            format: date-time
+
+    # --- Notifications ---
+
+    NotificationKind:
+      type: string
+      description: |
+        - `webhook`: POSTs the event as JSON to `config.url`. Optional
+          secrets: `authorization` (sent as the `Authorization` header) and
+          `signingSecret`, which adds `X-Dispatch-Timestamp` and
+          `X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
+        - `slack`: posts a message to a Slack incoming webhook. Secret:
+          `webhookUrl` (required).
+        - `email`: sends an email over SMTP. Config: `host`, `port` (default
+          587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
+          `none`), `username`, `from`, `to` (a list). Secret: `password`.
+      enum: [webhook, slack, email]
+
+    NotificationEvent:
+      type: string
+      description: "`failed` covers jobs that failed or errored."
+      enum: [started, succeeded, failed, canceled]
+
+    NotificationTarget:
+      type: object
+      required: [id, name, description, kind, config, secretFields, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          $ref: "#/components/schemas/NotificationKind"
+        config:
+          type: object
+          additionalProperties: true
+          description: Non-secret settings (empty unless the caller is a system administrator or auditor)
+        secretFields:
+          type: array
+          description: Names of the secrets that have a value
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    NotificationSecrets:
+      type: object
+      description: Secret values by name (see `NotificationKind`). Never returned by the API.
+      maxProperties: 10
+      additionalProperties:
+        type: string
+        maxLength: 8192
+
+    NotificationTargetCreate:
+      type: object
+      required: [name, kind]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        kind:
+          $ref: "#/components/schemas/NotificationKind"
+        config:
+          type: object
+          additionalProperties: true
+        secrets:
+          $ref: "#/components/schemas/NotificationSecrets"
+
+    NotificationTargetUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        config:
+          type: object
+          additionalProperties: true
+          description: Replaces the config
+        secrets:
+          allOf:
+            - $ref: "#/components/schemas/NotificationSecrets"
+          description: |
+            Merged into the existing secrets: those given here are replaced,
+            others are kept. An empty string removes one.
+
+    NotificationTargetList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationTarget"
+        total:
+          type: integer
+
+    NotificationTestResult:
+      type: object
+      required: [ok, error]
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+          description: Why sending failed (empty if it worked)
+
+    TemplateNotification:
+      type: object
+      required: [targetId, targetName, targetKind, events]
+      properties:
+        targetId:
+          type: string
+          format: uuid
+        targetName:
+          type: string
+        targetKind:
+          $ref: "#/components/schemas/NotificationKind"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationEvent"
+
+    TemplateNotificationList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TemplateNotification"
+
+    TemplateNotificationsUpdate:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            required: [targetId, events]
+            additionalProperties: false
+            properties:
+              targetId:
+                type: string
+                format: uuid
+              events:
+                type: array
+                minItems: 1
+                uniqueItems: true
+                items:
+                  $ref: "#/components/schemas/NotificationEvent"
+
+    NotificationDelivery:
+      type: object
+      required: [id, targetId, targetName, targetKind, event, status, attempts, lastError, createdAt, sentAt, nextAttemptAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        targetId:
+          type: string
+          format: uuid
+        targetName:
+          type: string
+        targetKind:
+          $ref: "#/components/schemas/NotificationKind"
+        event:
+          $ref: "#/components/schemas/NotificationEvent"
+        status:
+          type: string
+          description: "`pending` (not sent yet, or waiting to retry), `sent`, or `failed` for good"
+          enum: [pending, sent, failed]
+        attempts:
+          type: integer
+        lastError:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        sentAt:
+          type: string
+          format: date-time
+          nullable: true
+        nextAttemptAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When a pending notification is next tried
+
+    NotificationDeliveryList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationDelivery"
 
     # --- Runner ---
 

@@ -294,86 +294,16 @@ func (h *Handlers) LaunchJobTemplate(ctx context.Context, req apigen.LaunchJobTe
 	if req.Body != nil {
 		b = *req.Body
 	}
-
-	cfg := store.JobConfig{
-		JobType: t.JobType, Entrypoint: t.Entrypoint, InventoryID: t.InventoryID,
-		CredentialIDs: nonNilSlice(t.CredentialIDs), Command: t.Command, Arguments: t.Arguments,
-		ExtraVars: maps.Clone(t.ExtraVars), Limit: t.Limit, Tags: t.Tags, SkipTags: t.SkipTags,
-		Verbosity: t.Verbosity, TimeoutSeconds: t.TimeoutSeconds,
+	overrides := launchOverrides(b)
+	if err := h.checkOverrideRefs(ctx, t, overrides); err != nil {
+		return nil, err
 	}
-	if cfg.ExtraVars == nil {
-		cfg.ExtraVars = map[string]any{}
-	}
-	allowed := func(field apigen.OverridableField) error {
-		if !slices.Contains(t.AllowOverrides, string(field)) {
-			return badRequest("the job template does not allow overriding %q at launch", field)
-		}
-		return nil
-	}
-	if b.InventoryId != nil {
-		if err := allowed(apigen.OverridableFieldInventory); err != nil {
-			return nil, err
-		}
-		if err := h.authorizeUse(ctx, rbac.Inventory, *b.InventoryId); err != nil {
-			return nil, err
-		}
-		if _, err := h.Store.GetInventory(ctx, *b.InventoryId); errors.Is(err, store.ErrNotFound) {
-			return nil, badRequest("inventory %s does not exist", b.InventoryId)
-		} else if err != nil {
-			return nil, err
-		}
-		cfg.InventoryID = b.InventoryId
-	}
-	if b.ExtraVars != nil {
-		if err := allowed(apigen.OverridableFieldExtraVars); err != nil {
-			return nil, err
-		}
-		maps.Copy(cfg.ExtraVars, *b.ExtraVars)
-	}
-	if b.Limit != nil {
-		if err := allowed(apigen.OverridableFieldLimit); err != nil {
-			return nil, err
-		}
-		cfg.Limit = *b.Limit
-	}
-	if b.Command != nil {
-		if err := allowed(apigen.OverridableFieldCommand); err != nil {
-			return nil, err
-		}
-		cfg.Command = *b.Command
-	}
-	if b.Tags != nil {
-		if err := allowed(apigen.OverridableFieldTags); err != nil {
-			return nil, err
-		}
-		cfg.Tags = *b.Tags
-	}
-	if b.SkipTags != nil {
-		if err := allowed(apigen.OverridableFieldSkipTags); err != nil {
-			return nil, err
-		}
-		cfg.SkipTags = *b.SkipTags
-	}
-
-	if t.ProjectID != nil {
-		p, err := h.Store.GetProject(ctx, *t.ProjectID)
-		if err != nil {
-			return nil, err
-		}
-		cfg.Project = &store.JobProject{
-			ID: p.ID, Name: p.Name, ScmURL: p.ScmURL, ScmRef: p.ScmRef, CredentialID: p.CredentialID,
-		}
-	}
-
-	ee, err := h.Store.GetExecutionEnvironment(ctx, t.ExecutionEnvironmentID)
+	cfg, err := h.Store.ResolveJobConfig(ctx, t, overrides)
 	if err != nil {
 		return nil, err
 	}
-	cfg.ExecutionEnvironment = store.JobExecutionEnvironment{
-		ID: ee.ID, Name: ee.Name, Image: ee.Image, PullPolicy: ee.PullPolicy, RegistryCredentialID: ee.RegistryCredentialID,
-	}
 
-	p := auth.FromContext(ctx)
+	p := caller(ctx)
 	launchType := "api"
 	if p.Method == auth.MethodSession {
 		launchType = "manual"
@@ -386,14 +316,52 @@ func (h *Handlers) LaunchJobTemplate(ctx context.Context, req apigen.LaunchJobTe
 	}
 	h.Log.InfoContext(ctx, "job launched", "job_id", job.ID, "job_template_id", t.ID, "by", p.Username)
 	launch := map[string]any{"jobTemplateId": t.ID, "launchType": launchType}
-	if overrides := toMap(b); len(overrides) > 0 {
-		launch["overrides"] = overrides
+	if o := toMap(b); len(o) > 0 {
+		launch["overrides"] = o
 	}
 	h.audit(ctx, auditRecord{
 		Action: apigen.Launch, ResourceType: apigen.AuditResourceTypeJob, ResourceID: job.ID, ResourceName: job.Name,
 		After: launch,
 	})
 	return apigen.LaunchJobTemplate201JSONResponse(toAPIJob(job)), nil
+}
+
+// launchOverrides converts a launch request's overrides.
+func launchOverrides(b apigen.LaunchRequest) store.LaunchOverrides {
+	o := store.LaunchOverrides{InventoryID: b.InventoryId, Limit: b.Limit, Tags: b.Tags, SkipTags: b.SkipTags}
+	if b.ExtraVars != nil {
+		o.ExtraVars = *b.ExtraVars
+	}
+	if b.Command != nil {
+		o.Command = *b.Command
+	}
+	return o
+}
+
+// toAPILaunchRequest is the reverse of launchOverrides.
+func toAPILaunchRequest(o store.LaunchOverrides) apigen.LaunchRequest {
+	b := apigen.LaunchRequest{InventoryId: o.InventoryID, Limit: o.Limit, Tags: o.Tags, SkipTags: o.SkipTags}
+	if o.ExtraVars != nil {
+		v := apigen.Variables(o.ExtraVars)
+		b.ExtraVars = &v
+	}
+	if o.Command != nil {
+		c := apigen.Command(o.Command)
+		b.Command = &c
+	}
+	return b
+}
+
+// checkOverrideRefs checks that the template allows the overrides and that
+// the caller may use an inventory they name.
+func (h *Handlers) checkOverrideRefs(ctx context.Context, t store.JobTemplate, o store.LaunchOverrides) error {
+	if err := o.CheckAllowed(t); err != nil {
+		return err
+	}
+	if o.InventoryID != nil {
+		return h.authorizeUse(ctx, rbac.Inventory, *o.InventoryID)
+	}
+	return nil
 }
 
 func toAPIJobTemplate(t store.JobTemplate) apigen.JobTemplate {
@@ -435,6 +403,10 @@ func toAPIJob(j store.Job) apigen.Job {
 	if j.LaunchedBy != nil {
 		out.LaunchedBy = &apigen.UserRef{Id: j.LaunchedBy.ID, Username: j.LaunchedBy.Username}
 	}
+	if j.Schedule != nil {
+		out.Schedule = &apigen.ScheduleRef{Id: j.Schedule.ID, Name: j.Schedule.Name}
+	}
+	out.RelaunchOf = j.RelaunchOf
 	return out
 }
 

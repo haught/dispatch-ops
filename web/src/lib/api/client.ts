@@ -21,6 +21,20 @@ export type RoleGrantCreate = components['schemas']['RoleGrantCreate'];
 export type AuditEntry = components['schemas']['AuditEntry'];
 export type AuditAction = components['schemas']['AuditAction'];
 export type AuditResourceType = components['schemas']['AuditResourceType'];
+export type Schedule = components['schemas']['Schedule'];
+export type NotificationTarget = components['schemas']['NotificationTarget'];
+export type NotificationKind = components['schemas']['NotificationKind'];
+export type NotificationEvent = components['schemas']['NotificationEvent'];
+export type TemplateNotification = components['schemas']['TemplateNotification'];
+export type NotificationDelivery = components['schemas']['NotificationDelivery'];
+
+/** Notification events, with labels. */
+export const notificationEvents: { event: NotificationEvent; label: string }[] = [
+	{ event: 'started', label: 'Started' },
+	{ event: 'succeeded', label: 'Succeeded' },
+	{ event: 'failed', label: 'Failed' },
+	{ event: 'canceled', label: 'Canceled' }
+];
 
 /** Resource types roles can be granted on, with display names. */
 export const resourceTypes: { type: ResourceType; label: string; plural: string }[] = [

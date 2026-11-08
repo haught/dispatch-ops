@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"dispatch-ops/internal/api/apigen"
+	"dispatch-ops/internal/metrics"
 	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
 )
@@ -19,7 +22,7 @@ import (
 func (h *Handlers) ListJobs(ctx context.Context, req apigen.ListJobsRequestObject) (apigen.ListJobsResponseObject, error) {
 	p := req.Params
 	items, total, err := h.Store.ListJobs(ctx,
-		store.JobFilter{Status: string(deref(p.Status)), TemplateID: p.JobTemplateId, ReadableBy: readableBy(ctx)},
+		store.JobFilter{Status: string(deref(p.Status)), TemplateID: p.JobTemplateId, ScheduleID: p.ScheduleId, ReadableBy: readableBy(ctx)},
 		pageOf(p.Limit, p.Offset))
 	if err != nil {
 		return nil, err
@@ -147,6 +150,8 @@ func (s jobStream) VisitStreamJobResponse(w http.ResponseWriter) error {
 	ctx := s.ctx
 	wake, unsubscribe := s.h.Hub.Subscribe(s.jobID)
 	defer unsubscribe()
+	metrics.JobStreams.Inc()
+	defer metrics.JobStreams.Dec()
 
 	hdr := w.Header()
 	hdr.Set("Content-Type", "text/event-stream")
@@ -235,4 +240,133 @@ func writeSSE(w http.ResponseWriter, event, id string, data any) error {
 	}
 	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 	return err
+}
+
+// --- Relaunch ---
+
+func (h *Handlers) RelaunchJob(ctx context.Context, req apigen.RelaunchJobRequestObject) (apigen.RelaunchJobResponseObject, error) {
+	j, err := h.getJob(ctx, req.JobId)
+	if err != nil {
+		return nil, err
+	}
+	p := caller(ctx)
+	if err := h.authorizeRelaunch(ctx, j); err != nil {
+		return nil, err
+	}
+
+	cfg := j.Config
+	hosts := apigen.RelaunchRequestHostsAll
+	if req.Body != nil && req.Body.Hosts != nil {
+		hosts = *req.Body.Hosts
+	}
+	if hosts == apigen.RelaunchRequestHostsFailed {
+		limit, err := h.failedHostsLimit(ctx, j)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Limit = limit
+	}
+
+	job, err := h.Store.CreateJob(ctx, store.NewJob{
+		TemplateID: j.TemplateID, Name: j.Name, LaunchType: "relaunch", LaunchedBy: &p.UserID, Config: cfg, RelaunchOf: &j.ID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	h.Log.InfoContext(ctx, "job relaunched", "job_id", job.ID, "relaunch_of", j.ID, "hosts", hosts, "by", p.Username)
+	h.audit(ctx, auditRecord{
+		Action: apigen.Launch, ResourceType: apigen.AuditResourceTypeJob, ResourceID: job.ID, ResourceName: job.Name,
+		After: map[string]any{"jobTemplateId": j.TemplateID, "launchType": "relaunch", "relaunchOf": j.ID, "hosts": hosts},
+	})
+	return apigen.RelaunchJob201JSONResponse(toAPIJob(job)), nil
+}
+
+// authorizeRelaunch checks that the caller may run a job again: they need
+// execute on its template, and use on whatever the job used that the
+// template no longer references, since the job reruns with its own
+// configuration rather than the template's current one.
+func (h *Handlers) authorizeRelaunch(ctx context.Context, j store.Job) error {
+	p := caller(ctx)
+	if p.IsAdmin {
+		return nil
+	}
+	if j.TemplateID == nil {
+		return forbidden("The job's template was deleted; only system administrators can relaunch it")
+	}
+	if err := h.authorize(ctx, rbac.JobTemplate, *j.TemplateID, rbac.Execute); err != nil {
+		return forbidden("Relaunching needs the execute role on the job's template")
+	}
+	t, err := h.Store.GetJobTemplate(ctx, *j.TemplateID)
+	if err != nil {
+		return err
+	}
+	c := j.Config
+	if c.InventoryID != nil && (t.InventoryID == nil || *t.InventoryID != *c.InventoryID) {
+		if err := h.authorize(ctx, rbac.Inventory, *c.InventoryID, rbac.Use); err != nil {
+			return forbidden("The job ran against an inventory its template no longer uses; relaunching it needs the use role on that inventory")
+		}
+	}
+	if c.Project != nil && (t.ProjectID == nil || *t.ProjectID != c.Project.ID) {
+		if err := h.authorize(ctx, rbac.Project, c.Project.ID, rbac.Use); err != nil {
+			return forbidden("The job ran from a project its template no longer uses; relaunching it needs the use role on that project")
+		}
+	}
+	for _, id := range c.CredentialIDs {
+		if !slices.Contains(t.CredentialIDs, id) {
+			if err := h.authorize(ctx, rbac.Credential, id, rbac.Use); err != nil {
+				return forbidden("The job used a credential its template no longer uses; relaunching it needs the use role on that credential")
+			}
+		}
+	}
+	return nil
+}
+
+// failedHostsLimit is the limit pattern selecting the hosts that failed or
+// were unreachable in a finished Ansible job.
+func (h *Handlers) failedHostsLimit(ctx context.Context, j store.Job) (string, error) {
+	if j.Config.JobType != string(apigen.Ansible) {
+		return "", badRequest("only Ansible jobs can be relaunched on their failed hosts")
+	}
+	if !store.JobFinished(j.Status) {
+		return "", conflict("the job has not finished, so it is not known which hosts failed")
+	}
+	summaries, err := h.Store.ListJobHostSummaries(ctx, j.ID)
+	if err != nil {
+		return "", err
+	}
+	var failed []string
+	for _, s := range summaries {
+		if s.Failed > 0 || s.Unreachable > 0 {
+			failed = append(failed, s.HostName)
+		}
+	}
+	if len(failed) == 0 {
+		return "", badRequest("no hosts failed or were unreachable in this job")
+	}
+	return strings.Join(failed, ","), nil
+}
+
+// --- Notifications ---
+
+func (h *Handlers) ListJobNotifications(ctx context.Context, req apigen.ListJobNotificationsRequestObject) (apigen.ListJobNotificationsResponseObject, error) {
+	if _, err := h.getJob(ctx, req.JobId); err != nil {
+		return nil, err
+	}
+	ds, err := h.Store.ListJobDeliveries(ctx, req.JobId)
+	if err != nil {
+		return nil, err
+	}
+	out := apigen.ListJobNotifications200JSONResponse{Items: make([]apigen.NotificationDelivery, 0, len(ds))}
+	for _, d := range ds {
+		item := apigen.NotificationDelivery{
+			Id: d.ID, TargetId: d.TargetID, TargetName: d.TargetName, TargetKind: apigen.NotificationKind(d.TargetKind),
+			Event: apigen.NotificationEvent(d.Event), Status: apigen.NotificationDeliveryStatus(d.Status),
+			Attempts: d.Attempts, LastError: d.LastError, CreatedAt: d.CreatedAt, SentAt: d.SentAt,
+		}
+		if d.Status == store.DeliveryPending {
+			item.NextAttemptAt = &d.NextAttemptAt
+		}
+		out.Items = append(out.Items, item)
+	}
+	return out, nil
 }

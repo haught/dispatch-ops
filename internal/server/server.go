@@ -8,9 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
+	"dispatch-ops/internal/metrics"
 	"dispatch-ops/internal/store"
 )
 
@@ -154,27 +156,55 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
+// streamOperation is the live job stream, whose duration is how long the
+// client watched, so it is left out of the latency histogram.
+const streamOperation = "streamJob"
+
+// logRequests logs each request and records its metrics.
 func logRequests(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
-		next.ServeHTTP(rec, r)
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-			return
-		}
+		ctx := metrics.WithOperationSlot(r.Context())
+		next.ServeHTTP(rec, r.WithContext(ctx))
+		elapsed := time.Since(start)
 		status := rec.status
 		if status == 0 {
 			status = http.StatusOK
+		}
+
+		op := metrics.Operation(ctx)
+		probe := r.URL.Path == "/healthz" || r.URL.Path == "/readyz"
+		switch {
+		case op != "":
+		case probe:
+			op = metrics.OpProbe
+		case strings.HasPrefix(r.URL.Path, "/api/"), strings.HasPrefix(r.URL.Path, "/runner/"):
+			op = metrics.OpUnmatched
+		default:
+			op = metrics.OpUI
+		}
+		metrics.HTTPRequests.WithLabelValues(op, r.Method, strconv.Itoa(status)).Inc()
+		if op != streamOperation {
+			metrics.HTTPDuration.WithLabelValues(op).Observe(elapsed.Seconds())
+		}
+
+		if probe {
+			return
 		}
 		level := slog.LevelInfo
 		if status >= 500 {
 			level = slog.LevelError
 		}
-		log.LogAttrs(r.Context(), level, "request",
+		attrs := []slog.Attr{
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", status),
-			slog.Duration("duration", time.Since(start)),
-		)
+			slog.Duration("duration", elapsed),
+		}
+		if op != metrics.OpUI && op != metrics.OpUnmatched {
+			attrs = append(attrs, slog.String("operation", op))
+		}
+		log.LogAttrs(r.Context(), level, "request", attrs...)
 	})
 }

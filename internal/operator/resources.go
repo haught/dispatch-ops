@@ -28,6 +28,7 @@ const (
 
 const (
 	apiPort       = 8080
+	metricsPort   = 9090
 	postgresPort  = 5432
 	postgresUser  = "dispatch"
 	postgresDB    = "dispatch"
@@ -144,6 +145,27 @@ func (in install) commonEnv() []corev1.EnvVar {
 		secretEnv("DISPATCH_OLD_ENCRYPTION_KEYS", keySelector(in.encryptionKeySecretName(), "oldKeys"), true),
 		{Name: "DISPATCH_LOG_LEVEL", Value: in.Spec.LogLevel},
 		{Name: "DISPATCH_LOG_FORMAT", Value: "json"},
+	}
+}
+
+func (in install) metricsEnabled() bool {
+	return in.Spec.Metrics.Enabled == nil || *in.Spec.Metrics.Enabled
+}
+
+// withMetrics serves metrics from a long-running server container, or
+// turns them off.
+func (in install) withMetrics(pod *corev1.PodTemplateSpec) {
+	c := &pod.Spec.Containers[0]
+	if !in.metricsEnabled() {
+		c.Env = append(c.Env, corev1.EnvVar{Name: "DISPATCH_METRICS_ADDR", Value: ""})
+		return
+	}
+	c.Env = append(c.Env, corev1.EnvVar{Name: "DISPATCH_METRICS_ADDR", Value: ":" + strconv.Itoa(metricsPort)})
+	c.Ports = append(c.Ports, corev1.ContainerPort{Name: "metrics", ContainerPort: metricsPort, Protocol: corev1.ProtocolTCP})
+	pod.Annotations = map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   strconv.Itoa(metricsPort),
+		"prometheus.io/path":   "/metrics",
 	}
 }
 
@@ -269,12 +291,14 @@ func (in install) apiDeployment() *appsv1.Deployment {
 		LivenessProbe:  probe("/healthz"),
 		Resources:      in.Spec.API.Resources,
 	}
+	pod := in.serverPod(componentAPI, []corev1.Container{c}, nil)
+	in.withMetrics(&pod)
 	return &appsv1.Deployment{
 		ObjectMeta: in.meta(componentAPI, in.name(componentAPI)),
 		Spec: appsv1.DeploymentSpec{
 			Replicas: in.Spec.API.Replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: in.selector(componentAPI)},
-			Template: in.serverPod(componentAPI, []corev1.Container{c}, nil),
+			Template: pod,
 		},
 	}
 }
@@ -379,8 +403,19 @@ func (in install) taskManagerDeployment() *appsv1.Deployment {
 	if tm.JobStartTimeout != nil {
 		env = append(env, corev1.EnvVar{Name: "DISPATCH_JOB_START_TIMEOUT", Value: tm.JobStartTimeout.Duration.String()})
 	}
+	// For links to jobs in notifications.
+	if in.Spec.ExternalURL != "" {
+		env = append(env, corev1.EnvVar{Name: "DISPATCH_EXTERNAL_URL", Value: in.Spec.ExternalURL})
+	}
+	if r := in.Spec.Retention.Jobs; r != nil {
+		env = append(env, corev1.EnvVar{Name: "DISPATCH_JOB_RETENTION", Value: r.Duration.String()})
+	}
+	if r := in.Spec.Retention.AuditLog; r != nil {
+		env = append(env, corev1.EnvVar{Name: "DISPATCH_AUDIT_RETENTION", Value: r.Duration.String()})
+	}
 	c := corev1.Container{Name: componentTaskManager, Args: []string{"task-manager"}, Env: env, Resources: tm.Resources}
 	pod := in.serverPod(componentTaskManager, []corev1.Container{c}, nil)
+	in.withMetrics(&pod)
 	pod.Spec.ServiceAccountName = in.name(componentTaskManager)
 	pod.Spec.AutomountServiceAccountToken = new(true)
 	return &appsv1.Deployment{

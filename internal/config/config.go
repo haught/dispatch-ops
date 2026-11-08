@@ -31,6 +31,11 @@ type Config struct {
 	LogLevel string
 	// LogFormat is text or json (DISPATCH_LOG_FORMAT).
 	LogFormat string
+	// MetricsAddr is where /metrics is served (DISPATCH_METRICS_ADDR). Each
+	// command has its own default (see MetricsAddrOr); set it empty to turn
+	// metrics off.
+	MetricsAddr    string
+	metricsAddrSet bool
 
 	// EncryptionKey encrypts credentials: base64 of 32 random bytes
 	// (DISPATCH_ENCRYPTION_KEY). Required by serve and task-manager.
@@ -100,6 +105,21 @@ type TaskManager struct {
 	// LeaderElection makes replicas elect one active task manager with a
 	// Kubernetes Lease (DISPATCH_LEADER_ELECTION).
 	LeaderElection bool
+	// JobRetention is how long finished jobs and their output are kept
+	// (DISPATCH_JOB_RETENTION, e.g. 90d); 0 keeps them forever.
+	JobRetention time.Duration
+	// AuditRetention is how long audit log entries are kept
+	// (DISPATCH_AUDIT_RETENTION); 0, the default, keeps them forever.
+	AuditRetention time.Duration
+}
+
+// MetricsAddrOr returns the metrics address, or def if it isn't set. An
+// empty result means metrics are off.
+func (c Config) MetricsAddrOr(def string) string {
+	if c.metricsAddrSet {
+		return c.MetricsAddr
+	}
+	return def
 }
 
 // Load reads configuration from the environment and validates what every
@@ -128,6 +148,7 @@ func Load() (Config, error) {
 			RunnerAPIURL: strings.TrimRight(os.Getenv("DISPATCH_RUNNER_API_URL"), "/"),
 		},
 	}
+	c.MetricsAddr, c.metricsAddrSet = os.LookupEnv("DISPATCH_METRICS_ADDR")
 	if v := os.Getenv("DISPATCH_OLD_ENCRYPTION_KEYS"); v != "" {
 		c.OldEncryptionKeys = strings.Split(v, ",")
 	}
@@ -153,6 +174,10 @@ func Load() (Config, error) {
 	tm.StartTimeout, err = getduration("DISPATCH_JOB_START_TIMEOUT", 10*time.Minute)
 	collect(err)
 	tm.LeaderElection, err = getbool("DISPATCH_LEADER_ELECTION", true)
+	collect(err)
+	tm.JobRetention, err = getretention("DISPATCH_JOB_RETENTION", 90*24*time.Hour)
+	collect(err)
+	tm.AuditRetention, err = getretention("DISPATCH_AUDIT_RETENTION", 0)
 	collect(err)
 
 	if c.DatabaseURL == "" {
@@ -236,6 +261,42 @@ func getint(key string, def int) (int, error) {
 		return def, fmt.Errorf("%s: %w", key, err)
 	}
 	return n, nil
+}
+
+// getretention reads a retention period: a duration, which may also be in
+// days (e.g. 90d), or 0 for "keep forever".
+func getretention(key string, def time.Duration) (time.Duration, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	d, err := ParseRetention(v)
+	if err != nil {
+		return def, fmt.Errorf("%s: %w", key, err)
+	}
+	return d, nil
+}
+
+// ParseRetention parses a retention period such as 90d, 2160h or 0.
+func ParseRetention(v string) (time.Duration, error) {
+	if v == "0" {
+		return 0, nil
+	}
+	if days, ok := strings.CutSuffix(v, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("invalid retention %q: use a number of days like 90d, or a duration like 720h", v)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid retention %q: use a number of days like 90d, or a duration like 720h", v)
+	}
+	if d > 0 && d < time.Hour {
+		return 0, fmt.Errorf("retention %q is under an hour; that is almost certainly a mistake", v)
+	}
+	return d, nil
 }
 
 func getduration(key string, def time.Duration) (time.Duration, error) {

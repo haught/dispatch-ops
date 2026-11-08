@@ -111,6 +111,38 @@ type DispatchOpsSpec struct {
 	// +kubebuilder:default=info
 	// +optional
 	LogLevel string `json:"logLevel,omitempty"`
+
+	// +kubebuilder:default={}
+	// +optional
+	Retention RetentionSpec `json:"retention,omitempty"`
+	// +kubebuilder:default={}
+	// +optional
+	Metrics MetricsSpec `json:"metrics,omitempty"`
+}
+
+// RetentionSpec is how long old data is kept. The task manager deletes
+// what is older every hour.
+type RetentionSpec struct {
+	// Jobs is how long finished jobs (with their output and notifications)
+	// are kept, e.g. 2160h for 90 days. 0s keeps them forever. Defaults to
+	// 90 days.
+	// +optional
+	Jobs *metav1.Duration `json:"jobs,omitempty"`
+	// AuditLog is how long audit log entries are kept. Unset or 0s keeps
+	// them forever.
+	// +optional
+	AuditLog *metav1.Duration `json:"auditLog,omitempty"`
+}
+
+// MetricsSpec configures the Prometheus metrics the API server and task
+// manager serve at :9090/metrics, on a port of their own (named
+// "metrics") that the API Service doesn't expose.
+type MetricsSpec struct {
+	// Enabled serves metrics, and adds prometheus.io/scrape annotations to
+	// the pods.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // APISpec configures the API server, which also serves the web UI.

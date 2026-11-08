@@ -13,6 +13,7 @@
 		{ href: '/', label: 'Dashboard' },
 		{ href: '/jobs', label: 'Jobs' },
 		{ href: '/templates', label: 'Job templates' },
+		{ href: '/schedules', label: 'Schedules' },
 		{ href: '/tokens', label: 'API tokens' }
 	];
 	// System administrators and auditors.
@@ -20,6 +21,7 @@
 		{ href: '/users', label: 'Users' },
 		{ href: '/teams', label: 'Teams' },
 		{ href: '/access', label: 'Access' },
+		{ href: '/notifications', label: 'Notifications' },
 		{ href: '/audit', label: 'Audit log' }
 	];
 	// Managed through the API until their pages arrive.

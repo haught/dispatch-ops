@@ -387,6 +387,20 @@ spec:
                 - warn
                 - error
                 type: string
+              metrics:
+                default: {}
+                description: |-
+                  MetricsSpec configures the Prometheus metrics the API server and task
+                  manager serve at :9090/metrics, on a port of their own (named
+                  "metrics") that the API Service doesn't expose.
+                properties:
+                  enabled:
+                    default: true
+                    description: |-
+                      Enabled serves metrics, and adds prometheus.io/scrape annotations to
+                      the pods.
+                    type: boolean
+                type: object
               oidc:
                 description: OIDCSpec configures single sign-on.
                 properties:
@@ -434,6 +448,24 @@ spec:
                 required:
                 - clientID
                 - issuer
+                type: object
+              retention:
+                default: {}
+                description: |-
+                  RetentionSpec is how long old data is kept. The task manager deletes
+                  what is older every hour.
+                properties:
+                  auditLog:
+                    description: |-
+                      AuditLog is how long audit log entries are kept. Unset or 0s keeps
+                      them forever.
+                    type: string
+                  jobs:
+                    description: |-
+                      Jobs is how long finished jobs (with their output and notifications)
+                      are kept, e.g. 2160h for 90 days. 0s keeps them forever. Defaults to
+                      90 days.
+                    type: string
                 type: object
               secureCookies:
                 default: true

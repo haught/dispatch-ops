@@ -1,7 +1,8 @@
 // Package taskmanager runs queued jobs as Kubernetes Jobs and watches over
 // them: it starts jobs within the concurrency limit, notices pods that fail
 // before their runner reports, enforces start, heartbeat, timeout and cancel
-// deadlines, and cleans up orphaned Kubernetes objects.
+// deadlines, and cleans up orphaned Kubernetes objects. It also launches
+// scheduled jobs, sends notifications and deletes data past its retention.
 package taskmanager
 
 import (
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +24,8 @@ import (
 
 	"dispatch-ops/internal/auth"
 	"dispatch-ops/internal/credentials"
+	"dispatch-ops/internal/metrics"
+	"dispatch-ops/internal/notify"
 	"dispatch-ops/internal/store"
 )
 
@@ -32,6 +36,10 @@ type Config struct {
 	MaxConcurrentJobs int
 	JobTTL            time.Duration
 	StartTimeout      time.Duration
+	// JobRetention deletes jobs this long after they finish; 0 keeps them.
+	JobRetention time.Duration
+	// AuditRetention deletes audit log entries this old; 0 keeps them.
+	AuditRetention time.Duration
 
 	// The rest have defaults (see withDefaults); tests shorten them.
 
@@ -53,6 +61,8 @@ type Config struct {
 	// OrphanGrace is how long after a job finishes its pod may keep running
 	// (the runner exits right after reporting) before it is deleted.
 	OrphanGrace time.Duration
+	// RetentionInterval is how often old data is deleted.
+	RetentionInterval time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -68,6 +78,7 @@ func (c Config) withDefaults() Config {
 	def(&c.TimeoutGrace, 2*time.Minute)
 	def(&c.MissingGrace, time.Minute)
 	def(&c.OrphanGrace, 2*time.Minute)
+	def(&c.RetentionInterval, time.Hour)
 	return c
 }
 
@@ -79,23 +90,41 @@ type Manager struct {
 	Vault  credentials.Vault
 	Config Config
 	Log    *slog.Logger
+	// Notifier sends notifications, with secrets from NotifyVault. Without
+	// it, notifications fail.
+	Notifier    *notify.Sender
+	NotifyVault notify.Vault
+
+	// leading is set while Run runs (i.e. while this process leads).
+	leading atomic.Bool
 }
 
 // Run dispatches and reconciles jobs until ctx is done.
 func (m *Manager) Run(ctx context.Context) error {
 	m.Config = m.Config.withDefaults()
-	m.Log.Info("task manager started", "namespace", m.Config.Namespace, "max_concurrent_jobs", m.Config.MaxConcurrentJobs)
+	m.Log.Info("task manager started", "namespace", m.Config.Namespace, "max_concurrent_jobs", m.Config.MaxConcurrentJobs,
+		"job_retention", m.Config.JobRetention, "audit_retention", m.Config.AuditRetention)
+	m.leading.Store(true)
+	defer m.leading.Store(false)
 
-	wake := make(chan struct{}, 1)
+	// Job status changes wake both the dispatcher and the notifier, which
+	// sends the notifications the change queued.
+	wake, wakeNotify := make(chan struct{}, 1), make(chan struct{}, 1)
+	signal := func(ch chan struct{}) {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 	go m.Store.Listen(ctx, []string{store.ChannelJobs},
 		func(store.Notification) {
-			select {
-			case wake <- struct{}{}:
-			default:
-			}
+			signal(wake)
+			signal(wakeNotify)
 		},
 		func(err error) { m.Log.Warn("job queue listener disconnected; reconnecting", "err", err) },
 	)
+	go m.notifyLoop(ctx, wakeNotify)
+	go m.cleanupLoop(ctx)
 
 	ticker := time.NewTicker(m.Config.PollInterval)
 	defer ticker.Stop()
@@ -116,9 +145,14 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 }
 
-// Tick runs one dispatch and reconcile pass.
+// Tick runs one pass: launch due schedules, dispatch, reconcile.
 func (m *Manager) Tick(ctx context.Context) {
+	start := time.Now()
+	defer func() { metrics.TaskManagerTick.Observe(time.Since(start).Seconds()) }()
 	m.Config = m.Config.withDefaults()
+	if err := m.runSchedules(ctx); err != nil && ctx.Err() == nil {
+		m.Log.Error("running schedules", "err", err)
+	}
 	if err := m.dispatch(ctx); err != nil && ctx.Err() == nil {
 		m.Log.Error("dispatching jobs", "err", err)
 	}
@@ -145,9 +179,11 @@ func (m *Manager) dispatch(ctx context.Context) error {
 	for _, j := range jobs {
 		if err := m.launch(ctx, j, tokens[j.ID]); err != nil {
 			m.Log.Error("creating Kubernetes Job failed", "job_id", j.ID, "err", err)
+			metrics.JobsDispatched.WithLabelValues("error").Inc()
 			m.end(ctx, j, store.JobError, "Could not create the Kubernetes Job: "+err.Error(), true)
 			continue
 		}
+		metrics.JobsDispatched.WithLabelValues("ok").Inc()
 		m.Log.Info("job dispatched", "job_id", j.ID, "k8s_job", k8sJobName(j.ID.String()), "image", j.Config.ExecutionEnvironment.Image)
 	}
 	return nil
@@ -316,6 +352,7 @@ func (m *Manager) end(ctx context.Context, j store.Job, status, reason string, d
 		return
 	}
 	m.Log.Info("job ended by task manager", "job_id", j.ID, "status", status, "reason", reason)
+	metrics.JobsEndedByTaskManager.WithLabelValues(status).Inc()
 	if deleteK8sJob {
 		m.deleteK8sJob(ctx, k8sJobName(j.ID.String()))
 	}

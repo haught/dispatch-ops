@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -97,19 +98,26 @@ type env struct {
 	kube *fake.Clientset
 	m    *Manager
 	ee   store.ExecutionEnvironment
+	pool *pgxpool.Pool
 }
 
 func newEnv(t *testing.T) *env {
 	pool, _ := testdb.Open(t, "taskmanager")
 	ctx := context.Background()
 	// This database belongs to this package; finish anything earlier runs left.
-	if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'canceled', finished_at = now() WHERE status IN ('pending', 'waiting', 'running')`); err != nil {
-		t.Fatal(err)
+	for _, sql := range []string{
+		`UPDATE jobs SET status = 'canceled', finished_at = now() WHERE status IN ('pending', 'waiting', 'running')`,
+		`DELETE FROM schedules`,
+		`UPDATE notification_deliveries SET status = 'failed' WHERE status = 'pending'`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
 	}
 	st := store.New(pool)
 	keys, _ := secrets.NewKeyring(secrets.GenerateKey())
 	kube := fake.NewClientset()
-	e := &env{t: t, ctx: ctx, st: st, kube: kube}
+	e := &env{t: t, ctx: ctx, st: st, kube: kube, pool: pool}
 	e.m = &Manager{
 		Store: st, Kube: kube, Vault: credentials.Vault{Keys: keys},
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),

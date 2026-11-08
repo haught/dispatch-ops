@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"dispatch-ops/internal/metrics"
 )
 
 // ErrJobState means the job is not in a state that allows the operation,
@@ -103,32 +105,49 @@ type Job struct {
 	StartedAt         *time.Time
 	FinishedAt        *time.Time
 	LastHeartbeatAt   *time.Time
+	// The schedule that launched the job, if one did and it still exists.
+	Schedule *ScheduleRef
+	// The job this one is a relaunch of, if it still exists.
+	RelaunchOf *uuid.UUID
+}
+
+// ScheduleRef identifies a schedule.
+type ScheduleRef struct {
+	ID   uuid.UUID
+	Name string
 }
 
 const jobColumns = `j.id, j.job_template_id, j.name, j.status, j.launch_type, j.launched_by, u.username,
 	j.config, j.cancel_requested, j.cancel_requested_at, j.exit_code, j.failure_reason,
 	j.k8s_namespace, j.k8s_job_name, j.runner_version, j.scm_revision,
-	j.created_at, j.dispatched_at, j.started_at, j.finished_at, j.last_heartbeat_at`
+	j.created_at, j.dispatched_at, j.started_at, j.finished_at, j.last_heartbeat_at,
+	j.schedule_id, sc.name, j.relaunch_of`
 
-const jobFrom = `jobs j LEFT JOIN users u ON u.id = j.launched_by`
+const jobFrom = `jobs j LEFT JOIN users u ON u.id = j.launched_by LEFT JOIN schedules sc ON sc.id = j.schedule_id`
 
-// jobRow holds the nullable launched_by columns while scanning.
+// jobRow holds the nullable launched_by and schedule columns while scanning.
 type jobRow struct {
 	Job
 	launchedByID   *uuid.UUID
 	launchedByName *string
+	scheduleID     *uuid.UUID
+	scheduleName   *string
 }
 
 func (j *jobRow) scanTargets() []any {
 	return []any{&j.ID, &j.TemplateID, &j.Name, &j.Status, &j.LaunchType, &j.launchedByID, &j.launchedByName,
 		&j.Config, &j.CancelRequested, &j.CancelRequestedAt, &j.ExitCode, &j.FailureReason,
 		&j.K8sNamespace, &j.K8sJobName, &j.RunnerVersion, &j.ScmRevision,
-		&j.CreatedAt, &j.DispatchedAt, &j.StartedAt, &j.FinishedAt, &j.LastHeartbeatAt}
+		&j.CreatedAt, &j.DispatchedAt, &j.StartedAt, &j.FinishedAt, &j.LastHeartbeatAt,
+		&j.scheduleID, &j.scheduleName, &j.RelaunchOf}
 }
 
 func (j *jobRow) job() Job {
 	if j.launchedByID != nil && j.launchedByName != nil {
 		j.LaunchedBy = &UserRef{ID: *j.launchedByID, Username: *j.launchedByName}
+	}
+	if j.scheduleID != nil && j.scheduleName != nil {
+		j.Schedule = &ScheduleRef{ID: *j.scheduleID, Name: *j.scheduleName}
 	}
 	return j.Job
 }
@@ -146,19 +165,61 @@ type NewJob struct {
 	LaunchType string
 	LaunchedBy *uuid.UUID
 	Config     JobConfig
+	ScheduleID *uuid.UUID
+	RelaunchOf *uuid.UUID
 }
 
 // CreateJob queues a job as pending.
 func (s *Store) CreateJob(ctx context.Context, in NewJob) (Job, error) {
-	var id uuid.UUID
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO jobs (job_template_id, name, launch_type, launched_by, config)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		in.TemplateID, in.Name, in.LaunchType, in.LaunchedBy, in.Config).Scan(&id)
+	id, err := createJob(ctx, s.pool, in)
 	if err != nil {
-		return Job{}, mapErr(err)
+		return Job{}, err
 	}
 	return s.GetJob(ctx, id)
+}
+
+func createJob(ctx context.Context, db querier, in NewJob) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := db.QueryRow(ctx, `
+		INSERT INTO jobs (job_template_id, name, launch_type, launched_by, config, schedule_id, relaunch_of)
+		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+		in.TemplateID, in.Name, in.LaunchType, in.LaunchedBy, in.Config, in.ScheduleID, in.RelaunchOf).Scan(&id)
+	if err != nil {
+		return uuid.Nil, mapErr(err)
+	}
+	metrics.JobsLaunched.WithLabelValues(in.Config.JobType, in.LaunchType).Inc()
+	return id, nil
+}
+
+// finishedJob is what the queries ending a job return, for metrics.
+type finishedJob struct {
+	jobType    string
+	startedAt  *time.Time
+	finishedAt time.Time
+}
+
+const finishedJobReturning = ` RETURNING config->>'jobType', started_at, finished_at`
+
+func (f finishedJob) record(status string) {
+	metrics.JobsFinished.WithLabelValues(f.jobType, status).Inc()
+	if f.startedAt != nil {
+		metrics.JobDuration.WithLabelValues(f.jobType, status).Observe(f.finishedAt.Sub(*f.startedAt).Seconds())
+	}
+}
+
+// endJobWhere runs an UPDATE that ends at most one job, records metrics if
+// it did, and returns ErrJobState if it didn't.
+func endJobWhere(ctx context.Context, db querier, status, sql string, args ...any) error {
+	var f finishedJob
+	err := db.QueryRow(ctx, sql+finishedJobReturning, args...).Scan(&f.jobType, &f.startedAt, &f.finishedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrJobState
+	}
+	if err != nil {
+		return err
+	}
+	f.record(status)
+	return nil
 }
 
 // GetJob returns one job.
@@ -182,6 +243,7 @@ func getJob(ctx context.Context, db querier, id uuid.UUID, forUpdate bool) (Job,
 type JobFilter struct {
 	Status     string
 	TemplateID *uuid.UUID
+	ScheduleID *uuid.UUID
 	// ReadableBy, if set, limits the list to jobs that user launched or
 	// whose template they hold a role on.
 	ReadableBy *uuid.UUID
@@ -198,6 +260,10 @@ func (s *Store) ListJobs(ctx context.Context, f JobFilter, page Page) ([]Job, in
 	if f.TemplateID != nil {
 		q.args = append(q.args, *f.TemplateID)
 		conds = append(conds, `j.job_template_id = $`+strconv.Itoa(len(q.args)))
+	}
+	if f.ScheduleID != nil {
+		q.args = append(q.args, *f.ScheduleID)
+		conds = append(conds, `j.schedule_id = $`+strconv.Itoa(len(q.args)))
 	}
 	if f.ReadableBy != nil {
 		q.args = append(q.args, *f.ReadableBy)
@@ -223,7 +289,7 @@ func (s *Store) CancelJob(ctx context.Context, id uuid.UUID) (Job, error) {
 		case JobFinished(j.Status):
 			return ErrJobState
 		case j.Status == JobPending:
-			_, err = tx.Exec(ctx, `
+			err = endJobWhere(ctx, tx, JobCanceled, `
 				UPDATE jobs SET status = 'canceled', cancel_requested = true, cancel_requested_at = now(),
 					finished_at = now(), failure_reason = 'Canceled before it started'
 				WHERE id = $1`, id)
@@ -242,32 +308,18 @@ func (s *Store) CancelJob(ctx context.Context, id uuid.UUID) (Job, error) {
 // EndJob gives a job a final status if its current status is one of from.
 // It revokes the job's runner token. It returns ErrJobState otherwise.
 func (s *Store) EndJob(ctx context.Context, id uuid.UUID, status string, exitCode *int, reason string, from ...string) error {
-	tag, err := s.pool.Exec(ctx, `
+	return endJobWhere(ctx, s.pool, status, `
 		UPDATE jobs SET status = $2, exit_code = $3, failure_reason = $4, finished_at = now(), runner_token_hash = NULL
 		WHERE id = $1 AND status = ANY($5)`, id, status, exitCode, reason, from)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrJobState
-	}
-	return nil
 }
 
 // FinishJob records the result a runner reported for its running job, like
 // EndJob, along with the commit its project was checked out at.
 func (s *Store) FinishJob(ctx context.Context, id uuid.UUID, status string, exitCode *int, reason, scmRevision string) error {
-	tag, err := s.pool.Exec(ctx, `
+	return endJobWhere(ctx, s.pool, status, `
 		UPDATE jobs SET status = $2, exit_code = $3, failure_reason = $4, scm_revision = $5,
 			finished_at = now(), runner_token_hash = NULL
 		WHERE id = $1 AND status = 'running'`, id, status, exitCode, reason, scmRevision)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrJobState
-	}
-	return nil
 }
 
 // --- Task manager ------------------------------------------------------------
@@ -372,15 +424,19 @@ func (s *Store) LookupJobToken(ctx context.Context, hash []byte) (uuid.UUID, err
 // It returns ErrJobState if the job is not waiting, which also means the
 // spec was already fetched.
 func (s *Store) StartJob(ctx context.Context, id uuid.UUID, runnerVersion string) (Job, error) {
-	tag, err := s.pool.Exec(ctx, `
+	var jobType string
+	var waited float64
+	err := s.pool.QueryRow(ctx, `
 		UPDATE jobs SET status = 'running', started_at = now(), last_heartbeat_at = now(), runner_version = $2
-		WHERE id = $1 AND status = 'waiting'`, id, runnerVersion)
+		WHERE id = $1 AND status = 'waiting'
+		RETURNING config->>'jobType', extract(epoch FROM started_at - created_at)::float8`, id, runnerVersion).Scan(&jobType, &waited)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Job{}, ErrJobState
+	}
 	if err != nil {
 		return Job{}, err
 	}
-	if tag.RowsAffected() == 0 {
-		return Job{}, ErrJobState
-	}
+	metrics.JobQueueWait.WithLabelValues(jobType).Observe(waited)
 	return s.GetJob(ctx, id)
 }
 

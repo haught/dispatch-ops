@@ -14,6 +14,7 @@ import (
 	"dispatch-ops/internal/auth"
 	"dispatch-ops/internal/credentials"
 	"dispatch-ops/internal/jobstream"
+	"dispatch-ops/internal/notify"
 	"dispatch-ops/internal/oidc"
 	"dispatch-ops/internal/store"
 )
@@ -34,6 +35,8 @@ type Handlers struct {
 	SessionTTL    time.Duration
 	SecureCookies bool
 	Version       string
+	// Notifier sends test notifications; nil uses a default Sender.
+	Notifier *notify.Sender
 }
 
 var _ apigen.StrictServerInterface = (*Handlers)(nil)

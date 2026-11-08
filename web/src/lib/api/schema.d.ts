@@ -804,6 +804,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/job-templates/{jobTemplateId}/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        /** List the notification targets a template's jobs notify */
+        get: operations["listJobTemplateNotifications"];
+        /** Replace the notification targets a template's jobs notify */
+        put: operations["setJobTemplateNotifications"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs": {
         parameters: {
             query?: never;
@@ -935,6 +955,180 @@ export interface paths {
         get: operations["streamJob"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{jobId}/relaunch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a job again
+         * @description Queues a new job with the same configuration as this one (the same
+         *     resolved template, overrides, image and project ref), whether or not
+         *     the template has changed since. With `hosts: failed`, an Ansible job
+         *     is rerun only against the hosts that failed or were unreachable.
+         */
+        post: operations["relaunchJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{jobId}/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        /** List the notifications sent (or being sent) about a job */
+        get: operations["listJobNotifications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List schedules
+         * @description Sorted by template name, then schedule name.
+         */
+        get: operations["listSchedules"];
+        put?: never;
+        /** Create a schedule */
+        post: operations["createSchedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedules/{scheduleId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scheduleId: components["parameters"]["ScheduleId"];
+            };
+            cookie?: never;
+        };
+        /** Get a schedule */
+        get: operations["getSchedule"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a schedule
+         * @description Jobs it launched are kept.
+         */
+        delete: operations["deleteSchedule"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a schedule
+         * @description Changing `cron`, `timezone` or `enabled` plans the next run afresh
+         *     from now.
+         */
+        patch: operations["updateSchedule"];
+        trace?: never;
+    };
+    "/api/v1/schedule-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Check a cron expression and list its next run times */
+        get: operations["previewSchedule"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notification-targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List notification targets */
+        get: operations["listNotificationTargets"];
+        put?: never;
+        /** Create a notification target */
+        post: operations["createNotificationTarget"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notification-targets/{targetId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                targetId: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        /** Get a notification target */
+        get: operations["getNotificationTarget"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a notification target
+         * @description It is removed from every template, and its unsent notifications are dropped.
+         */
+        delete: operations["deleteNotificationTarget"];
+        options?: never;
+        head?: never;
+        /** Update a notification target */
+        patch: operations["updateNotificationTarget"];
+        trace?: never;
+    };
+    "/api/v1/notification-targets/{targetId}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                targetId: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a test notification
+         * @description Sends at once, from the API server, and reports the result.
+         */
+        post: operations["testNotificationTarget"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1236,7 +1430,7 @@ export interface components {
         /** @enum {string} */
         AuditAction: "create" | "update" | "delete" | "launch" | "cancel" | "login" | "grant" | "revoke" | "add_member" | "remove_member";
         /** @enum {string} */
-        AuditResourceType: "inventory" | "host" | "group" | "credential" | "execution_environment" | "project" | "job_template" | "job" | "user" | "team" | "api_token";
+        AuditResourceType: "inventory" | "host" | "group" | "credential" | "execution_environment" | "project" | "job_template" | "job" | "user" | "team" | "api_token" | "schedule" | "notification_target";
         AuditEntry: {
             /** Format: int64 */
             id: number;
@@ -1726,7 +1920,15 @@ export interface components {
             status: components["schemas"]["JobStatus"];
             /** @enum {string} */
             launchType: "manual" | "api" | "schedule" | "relaunch";
+            /** @description `null` for scheduled jobs, or if the user has since been deleted */
             launchedBy: components["schemas"]["UserRef"] | null;
+            /** @description The schedule that launched the job, if one did and it still exists */
+            schedule: components["schemas"]["ScheduleRef"] | null;
+            /**
+             * Format: uuid
+             * @description The job this one reran, if it still exists
+             */
+            relaunchOf: string | null;
             config: components["schemas"]["JobConfig"];
             cancelRequested: boolean;
             exitCode: number | null;
@@ -1787,6 +1989,208 @@ export interface components {
         };
         JobHostSummaryList: {
             items: components["schemas"]["JobHostSummary"][];
+        };
+        RelaunchRequest: {
+            /**
+             * @description `failed` reruns a finished Ansible job only against the hosts that
+             *     failed or were unreachable (as its `limit`).
+             * @default all
+             * @enum {string}
+             */
+            hosts: "all" | "failed";
+        };
+        /**
+         * @description Five fields (minute hour day-of-month month day-of-week, e.g.
+         *     `30 2 * * 1-5`) or a descriptor: `@yearly`, `@monthly`, `@weekly`,
+         *     `@daily`, `@hourly`, or `@every <duration>` (at least `1m`).
+         * @example 0 3 * * *
+         */
+        CronExpression: string;
+        /**
+         * @description IANA time zone the cron expression is read in
+         * @default UTC
+         * @example Europe/Berlin
+         */
+        Timezone: string;
+        ScheduleRef: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        Schedule: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            description: string;
+            /** Format: uuid */
+            jobTemplateId: string;
+            jobTemplateName: string;
+            cron: components["schemas"]["CronExpression"];
+            timezone: components["schemas"]["Timezone"];
+            enabled: boolean;
+            overrides: components["schemas"]["LaunchRequest"];
+            /**
+             * Format: date-time
+             * @description `null` while disabled
+             */
+            nextRunAt: string | null;
+            /** Format: date-time */
+            lastRunAt: string | null;
+            /**
+             * Format: uuid
+             * @description The last job it launched, if it still exists
+             */
+            lastJobId: string | null;
+            /** @description Why the last run could not launch a job (empty if it did) */
+            lastError: string;
+            createdBy: components["schemas"]["UserRef"] | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ScheduleCreate: {
+            name: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            /** Format: uuid */
+            jobTemplateId: string;
+            cron: components["schemas"]["CronExpression"];
+            timezone?: components["schemas"]["Timezone"];
+            /** @default true */
+            enabled: boolean;
+            /** @description Launch overrides, as in a launch request; the template must allow them */
+            overrides?: components["schemas"]["LaunchRequest"];
+        };
+        ScheduleUpdate: {
+            name?: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            cron?: components["schemas"]["CronExpression"];
+            timezone?: components["schemas"]["Timezone"];
+            enabled?: boolean;
+            /** @description Replaces the overrides */
+            overrides?: components["schemas"]["LaunchRequest"];
+        };
+        ScheduleList: {
+            items: components["schemas"]["Schedule"][];
+            total: number;
+        };
+        SchedulePreview: {
+            runs: string[];
+        };
+        /**
+         * @description - `webhook`: POSTs the event as JSON to `config.url`. Optional
+         *       secrets: `authorization` (sent as the `Authorization` header) and
+         *       `signingSecret`, which adds `X-Dispatch-Timestamp` and
+         *       `X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
+         *     - `slack`: posts a message to a Slack incoming webhook. Secret:
+         *       `webhookUrl` (required).
+         *     - `email`: sends an email over SMTP. Config: `host`, `port` (default
+         *       587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
+         *       `none`), `username`, `from`, `to` (a list). Secret: `password`.
+         * @enum {string}
+         */
+        NotificationKind: "webhook" | "slack" | "email";
+        /**
+         * @description `failed` covers jobs that failed or errored.
+         * @enum {string}
+         */
+        NotificationEvent: "started" | "succeeded" | "failed" | "canceled";
+        NotificationTarget: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            description: string;
+            kind: components["schemas"]["NotificationKind"];
+            /** @description Non-secret settings (empty unless the caller is a system administrator or auditor) */
+            config: {
+                [key: string]: unknown;
+            };
+            /** @description Names of the secrets that have a value */
+            secretFields: string[];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        /** @description Secret values by name (see `NotificationKind`). Never returned by the API. */
+        NotificationSecrets: {
+            [key: string]: string;
+        };
+        NotificationTargetCreate: {
+            name: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            kind: components["schemas"]["NotificationKind"];
+            config?: {
+                [key: string]: unknown;
+            };
+            secrets?: components["schemas"]["NotificationSecrets"];
+        };
+        NotificationTargetUpdate: {
+            name?: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            /** @description Replaces the config */
+            config?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description Merged into the existing secrets: those given here are replaced,
+             *     others are kept. An empty string removes one.
+             */
+            secrets?: components["schemas"]["NotificationSecrets"];
+        };
+        NotificationTargetList: {
+            items: components["schemas"]["NotificationTarget"][];
+            total: number;
+        };
+        NotificationTestResult: {
+            ok: boolean;
+            /** @description Why sending failed (empty if it worked) */
+            error: string;
+        };
+        TemplateNotification: {
+            /** Format: uuid */
+            targetId: string;
+            targetName: string;
+            targetKind: components["schemas"]["NotificationKind"];
+            events: components["schemas"]["NotificationEvent"][];
+        };
+        TemplateNotificationList: {
+            items: components["schemas"]["TemplateNotification"][];
+        };
+        TemplateNotificationsUpdate: {
+            items: {
+                /** Format: uuid */
+                targetId: string;
+                events: components["schemas"]["NotificationEvent"][];
+            }[];
+        };
+        NotificationDelivery: {
+            /** Format: int64 */
+            id: number;
+            /** Format: uuid */
+            targetId: string;
+            targetName: string;
+            targetKind: components["schemas"]["NotificationKind"];
+            event: components["schemas"]["NotificationEvent"];
+            /**
+             * @description `pending` (not sent yet, or waiting to retry), `sent`, or `failed` for good
+             * @enum {string}
+             */
+            status: "pending" | "sent" | "failed";
+            attempts: number;
+            lastError: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            sentAt: string | null;
+            /**
+             * Format: date-time
+             * @description When a pending notification is next tried
+             */
+            nextAttemptAt: string | null;
+        };
+        NotificationDeliveryList: {
+            items: components["schemas"]["NotificationDelivery"][];
         };
         RunnerJobSpec: {
             /** Format: uuid */
@@ -1914,6 +2318,8 @@ export interface components {
         JobId: string;
         UserId: string;
         TeamId: string;
+        ScheduleId: string;
+        TargetId: string;
     };
     requestBodies: never;
     headers: never;
@@ -3749,6 +4155,60 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
+    listJobTemplateNotifications: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The template's notifications, by target name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateNotificationList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    setJobTemplateNotifications: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobTemplateId: components["parameters"]["JobTemplateId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TemplateNotificationsUpdate"];
+            };
+        };
+        responses: {
+            /** @description The template's notifications, by target name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateNotificationList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     listJobs: {
         parameters: {
             query?: {
@@ -3756,6 +4216,7 @@ export interface operations {
                 offset?: components["parameters"]["Offset"];
                 status?: components["schemas"]["JobStatus"];
                 jobTemplateId?: string;
+                scheduleId?: string;
             };
             header?: never;
             path?: never;
@@ -3912,6 +4373,389 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    relaunchJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RelaunchRequest"];
+            };
+        };
+        responses: {
+            /** @description Job queued */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The job hasn't finished (only for `hosts: failed`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    listJobNotifications: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job's notifications, oldest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationDeliveryList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listSchedules: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+                jobTemplateId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of schedules */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScheduleCreate"];
+            };
+        };
+        responses: {
+            /** @description Schedule created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Schedule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scheduleId: components["parameters"]["ScheduleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The schedule */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Schedule"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scheduleId: components["parameters"]["ScheduleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scheduleId: components["parameters"]["ScheduleId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScheduleUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated schedule */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Schedule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    previewSchedule: {
+        parameters: {
+            query: {
+                cron: components["schemas"]["CronExpression"];
+                timezone?: components["schemas"]["Timezone"];
+                count?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The next run times */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SchedulePreview"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listNotificationTargets: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /**
+             * @description A page of notification targets. Secret values are never
+             *     returned, and `config` is empty unless the caller is a system
+             *     administrator or auditor.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTargetList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createNotificationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationTargetCreate"];
+            };
+        };
+        responses: {
+            /** @description Notification target created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTarget"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getNotificationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                targetId: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The notification target */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTarget"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteNotificationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                targetId: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateNotificationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                targetId: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationTargetUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated notification target */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTarget"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    testNotificationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                targetId: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether the test notification was sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTestResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };

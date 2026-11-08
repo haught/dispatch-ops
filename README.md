@@ -8,11 +8,15 @@ commands run on Kubernetes with live logs; playbooks and scripts come from
 git projects, and Ansible jobs report per-host results. Users sign in with
 single sign-on (OIDC) or local accounts, and roles granted to users and
 teams control who can see, use, change and launch what; every change is
-audited. Inventories, credentials, execution environments, projects and job
-templates are managed through the API; the UI lists jobs and templates,
-launches templates, streams job output, shows per-host results, and manages
-users, teams, roles and API tokens. An operator installs and upgrades it on
-Kubernetes.
+audited. Templates can run on cron schedules, jobs can be relaunched (or
+rerun on just their failed hosts), and job events can notify webhooks,
+Slack or email. Old jobs are deleted after a retention period, and both
+server processes export Prometheus metrics. Inventories, credentials,
+execution environments, projects and job templates are managed through the
+API; the UI lists jobs and templates, launches templates, manages their
+schedules and notifications, streams job output, shows per-host results,
+and manages users, teams, roles, notification targets and API tokens. An
+operator installs and upgrades it on Kubernetes.
 
 ## Layout
 
@@ -278,6 +282,96 @@ pulled (after 3 minutes), its pod doesn't start within
 OOMKilled), its heartbeats stop for 90s, or it outlives its timeout or a
 cancel by 2 minutes. It also deletes Kubernetes Jobs whose job has finished.
 
+### Relaunching
+
+`POST /api/v1/jobs/{id}/relaunch` (the *Relaunch* button) queues a new job
+with the old one's configuration: the same overrides, image and project
+ref, even if the template has changed since. With `{"hosts": "failed"}`, a
+finished Ansible job is rerun with its `limit` set to the hosts that failed
+or were unreachable. Relaunching needs `execute` on the template, plus `use`
+on anything the job used that the template no longer references (only
+system administrators can relaunch jobs whose template was deleted).
+
+## Schedules
+
+A schedule launches a job template on a cron expression, read in an IANA
+time zone (default UTC): five fields (`30 2 * * 1-5`) or `@daily`,
+`@hourly`, `@every 6h` and the like, at most once a minute. A schedule may
+carry launch overrides, which the template must allow. Add schedules on a
+template's page or with `POST /api/v1/schedules`;
+`GET /api/v1/schedule-preview?cron=…&timezone=…` checks an expression and
+lists its next run times.
+
+The task manager launches due schedules (launch type `schedule`, recorded
+in the audit log as launched by the schedule). A schedule that was due
+several times while no task manager ran launches once, then carries on. If
+a launch fails (say the template no longer allows its overrides), the
+schedule keeps running and shows the error as `lastError`. Seeing schedules
+needs a role on the template; creating one needs `execute` (and `use` on an
+inventory it overrides); changing or deleting one needs `admin` on the
+template, or having created it.
+
+## Notifications
+
+System administrators set up notification targets on the *Notifications*
+page (`/api/v1/notification-targets`); template admins then choose, on the
+template's page, which targets its jobs notify and on which events:
+`started`, `succeeded`, `failed` (which includes `error`) and `canceled`.
+
+| Kind | Config | Secrets |
+|---|---|---|
+| `webhook` | `url` | `authorization` (sent as the `Authorization` header), `signingSecret` |
+| `slack` | | `webhookUrl` (an incoming webhook) |
+| `email` | `host`, `port` (587, or 465 with `tls`), `security` (`starttls`, `tls` or `none`), `username`, `from`, `to` | `password` |
+
+Secrets are encrypted like credentials and never returned. A webhook gets a
+POST of `{"event": …, "job": {…}}` with `X-Dispatch-Event` and
+`X-Dispatch-Delivery` headers; with a signing secret, also
+`X-Dispatch-Timestamp` and `X-Dispatch-Signature: sha256=<hex>`, the
+HMAC-SHA256 of `<timestamp>.<body>`. Check it, and reject old timestamps.
+
+A job's status change queues its notifications in the same database
+transaction, and the task manager sends them. Failures are retried after
+30s, 2m, 10m and 30m; 4xx responses and SMTP 5xx replies are not retried.
+A job's page (and `GET /api/v1/jobs/{id}/notifications`) shows what was
+sent. *Test* on a target sends a test message from the API server at once.
+Links to jobs need `DISPATCH_EXTERNAL_URL`.
+
+## Data retention
+
+The task manager deletes finished jobs, with their output and
+notifications, `DISPATCH_JOB_RETENTION` after they finish (default 90 days;
+`0` keeps them), and audit log entries older than
+`DISPATCH_AUDIT_RETENTION` (default `0`, kept forever). It checks hourly,
+starting a minute after it becomes leader. Retention periods take days
+(`90d`) or Go durations (`2160h`).
+
+## Metrics
+
+The API server serves Prometheus metrics on `:9090/metrics` and the task
+manager on `:9091/metrics` (`DISPATCH_METRICS_ADDR`; set it empty to turn
+them off). The listener is separate from the API, so metrics aren't exposed
+wherever the API is. Counters are per process; sum them across replicas.
+
+| Metric | |
+|---|---|
+| `dispatch_http_requests_total{operation,method,code}`, `dispatch_http_request_duration_seconds{operation}` | API requests by OpenAPI operation ID |
+| `dispatch_job_streams_active` | Open live log streams |
+| `dispatch_jobs_launched_total{job_type,launch_type}` | Jobs queued |
+| `dispatch_jobs_finished_total{job_type,status}`, `dispatch_job_duration_seconds{job_type,status}` | Jobs finished, and how long they ran |
+| `dispatch_job_queue_wait_seconds{job_type}` | Time from launch to the runner starting |
+| `dispatch_taskmanager_jobs_dispatched_total{result}`, `dispatch_taskmanager_jobs_ended_total{status}` | Kubernetes Jobs created; jobs the task manager ended (timeouts, lost pods) |
+| `dispatch_schedule_runs_total{result}` | Schedule firings |
+| `dispatch_notifications_total{kind,result}`, `dispatch_notification_send_duration_seconds{kind}` | Notification attempts (`sent`, `retry`, `failed`) |
+| `dispatch_retention_deleted_total{kind}` | Rows deleted by retention |
+| `dispatch_taskmanager_tick_duration_seconds` | Task manager passes |
+| `dispatch_taskmanager_leader` | 1 on the leading task manager |
+| `dispatch_jobs{status}`, `dispatch_job_queue_oldest_pending_seconds`, `dispatch_notifications_pending` | From the database, by the leader only |
+
+Useful alerts: `dispatch_job_queue_oldest_pending_seconds` growing (jobs
+aren't starting), `sum(dispatch_taskmanager_leader) == 0` (no task
+manager), and a rising rate of `dispatch_notifications_total{result="failed"}`.
+
 ## Job types
 
 | Type | Runs | Needs |
@@ -378,7 +472,8 @@ plus git, ssh and sshpass).
 | `DISPATCH_LOG_FORMAT` | `json` | `json` or `text` |
 | `DISPATCH_ENCRYPTION_KEY` | (required) | Encrypts credentials. 32 bytes, base64; `dispatch-ops gen-key` makes one |
 | `DISPATCH_OLD_ENCRYPTION_KEYS` | | Comma-separated previous keys, still used to decrypt during a rotation |
-| `DISPATCH_EXTERNAL_URL` | | The server's URL as browsers reach it, e.g. `https://dispatch.example.com`. Needed for single sign-on |
+| `DISPATCH_EXTERNAL_URL` | | The server's URL as browsers reach it, e.g. `https://dispatch.example.com`. Needed for single sign-on, and for links to jobs in notifications |
+| `DISPATCH_METRICS_ADDR` | `:9090` (`serve`), `:9091` (`task-manager`) | Where `/metrics` is served; empty turns metrics off |
 | `DISPATCH_OIDC_ISSUER` | | OIDC provider's issuer URL. Turns on single sign-on |
 | `DISPATCH_OIDC_CLIENT_ID` | | Required with the issuer |
 | `DISPATCH_OIDC_CLIENT_SECRET` | | |
@@ -398,6 +493,8 @@ Task manager only:
 | `DISPATCH_JOB_START_TIMEOUT` | `10m` | How long a pod may take to start its runner |
 | `DISPATCH_JOB_TTL` | `1h` | How long finished Kubernetes Jobs are kept |
 | `DISPATCH_LEADER_ELECTION` | `true` | Elect one active task manager with a Lease |
+| `DISPATCH_JOB_RETENTION` | `90d` | Delete finished jobs this long after they finish; `0` keeps them |
+| `DISPATCH_AUDIT_RETENTION` | `0` | Delete audit log entries this old; `0` keeps them |
 
 ## Installing on Kubernetes
 
@@ -430,8 +527,16 @@ whether it is ready and the image it runs; the conditions
 (`DatabaseReady`, `Migrated`, `APIReady`, `TaskManagerReady`, `Ready`) say
 what it is waiting for. `deploy/examples/dispatchops.yaml` shows the
 options for production: an external database, an encryption key you
-provide, an Ingress, single sign-on and a separate job namespace. `kubectl
-explain dispatchops.spec` documents every field.
+provide, an Ingress, single sign-on, a separate job namespace and
+retention periods. `kubectl explain dispatchops.spec` documents every
+field.
+
+`spec.retention.jobs` and `spec.retention.auditLog` set the retention
+periods (e.g. `2160h`). Metrics are on by default (`spec.metrics.enabled`):
+both Deployments' pods serve them on a port named `metrics` (9090) and carry
+`prometheus.io/scrape` annotations; the API Service doesn't expose it. To
+scrape with the Prometheus Operator, use a PodMonitor selecting
+`app.kubernetes.io/name: dispatch-ops` with `port: metrics`.
 
 For an installation named `<name>`, the operator creates:
 

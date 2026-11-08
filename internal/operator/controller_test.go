@@ -1,6 +1,8 @@
 package operator
 
 import (
+	"time"
+
 	"context"
 	"strings"
 	"testing"
@@ -145,6 +147,15 @@ func envValue(c corev1.Container, name string) (corev1.EnvVar, bool) {
 		}
 	}
 	return corev1.EnvVar{}, false
+}
+
+func portNamed(c corev1.Container, name string) (int32, bool) {
+	for _, p := range c.Ports {
+		if p.Name == name {
+			return p.ContainerPort, true
+		}
+	}
+	return 0, false
 }
 
 func TestInstallAndUpgrade(t *testing.T) {
@@ -292,6 +303,9 @@ func TestExternalDatabaseAndSettings(t *testing.T) {
 			ClientSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "oidc"}, Key: "secret"},
 		},
 		API: v1alpha1.APISpec{Ingress: &v1alpha1.IngressSpec{Host: "dispatch.example.com", TLSSecretName: "tls"}},
+		Retention: v1alpha1.RetentionSpec{
+			Jobs: &metav1.Duration{Duration: 30 * 24 * time.Hour}, AuditLog: &metav1.Duration{},
+		},
 	}}
 	e := newEnv(t, cr)
 
@@ -337,6 +351,43 @@ func TestExternalDatabaseAndSettings(t *testing.T) {
 	if v, _ := envValue(c, "DISPATCH_ENCRYPTION_KEY"); v.ValueFrom.SecretKeyRef.Name != "my-key" {
 		t.Errorf("encryption key env = %+v", v)
 	}
+	if p, _ := portNamed(c, "metrics"); p != 9090 || api.Spec.Template.Annotations["prometheus.io/scrape"] != "true" {
+		t.Errorf("API metrics port = %d, annotations = %v", p, api.Spec.Template.Annotations)
+	}
+	var svc corev1.Service
+	e.get("dops-api", &svc)
+	if len(svc.Spec.Ports) != 1 {
+		t.Errorf("the API Service exposes %v; metrics should stay off it", svc.Spec.Ports)
+	}
+
+	var tm appsv1.Deployment
+	e.get("dops-task-manager", &tm)
+	tc := tm.Spec.Template.Spec.Containers[0]
+	for name, want := range map[string]string{
+		"DISPATCH_EXTERNAL_URL": "https://dispatch.example.com", "DISPATCH_JOB_RETENTION": "720h0m0s",
+		"DISPATCH_AUDIT_RETENTION": "0s", "DISPATCH_METRICS_ADDR": ":9090",
+	} {
+		if v, _ := envValue(tc, name); v.Value != want {
+			t.Errorf("task manager %s = %q, want %q", name, v.Value, want)
+		}
+	}
+
+	// Metrics can be turned off.
+	cur := e.cr()
+	cur.Spec.Metrics.Enabled = new(false)
+	if err := e.c.Update(e.ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	e.get("dops-task-manager", &tm)
+	tc = tm.Spec.Template.Spec.Containers[0]
+	if v, ok := envValue(tc, "DISPATCH_METRICS_ADDR"); !ok || v.Value != "" {
+		t.Errorf("metrics off: DISPATCH_METRICS_ADDR = %+v", v)
+	}
+	if _, ok := portNamed(tc, "metrics"); ok || len(tm.Spec.Template.Annotations) != 0 {
+		t.Errorf("metrics off: ports %v, annotations %v", tc.Ports, tm.Spec.Template.Annotations)
+	}
+
 	var ing networkingv1.Ingress
 	if !e.get("dops", &ing) {
 		t.Error("no ingress")

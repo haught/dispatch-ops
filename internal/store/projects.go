@@ -50,8 +50,12 @@ func (s *Store) ListProjects(ctx context.Context, search string, readableBy *uui
 
 // GetProject returns one project.
 func (s *Store) GetProject(ctx context.Context, id uuid.UUID) (Project, error) {
+	return getProject(ctx, s.pool, id)
+}
+
+func getProject(ctx context.Context, db querier, id uuid.UUID) (Project, error) {
 	var p Project
-	err := s.pool.QueryRow(ctx, `SELECT `+projectColumns+` FROM projects p WHERE p.id = $1`, id).Scan(p.scanTargets()...)
+	err := db.QueryRow(ctx, `SELECT `+projectColumns+` FROM projects p WHERE p.id = $1`, id).Scan(p.scanTargets()...)
 	return p, mapErr(err)
 }
 

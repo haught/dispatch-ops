@@ -50,11 +50,14 @@ func forbidden(detail string) error {
 func problemFor(err error) (p apigen.Problem, ok bool) {
 	var ae *apiError
 	var ve *credentials.ValidationError
+	var le *store.LaunchError
 	switch {
 	case errors.As(err, &ae):
 		return problemDetail(ae.status, ae.title, ae.detail), true
 	case errors.As(err, &ve):
 		return problemDetail(http.StatusBadRequest, "Invalid request", ve.Error()), true
+	case errors.As(err, &le):
+		return problemDetail(http.StatusBadRequest, "Invalid request", le.Error()), true
 	case errors.Is(err, store.ErrNotFound):
 		return problem(http.StatusNotFound, "Not found"), true
 	case errors.Is(err, store.ErrConflict):

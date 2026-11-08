@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import {
 		api,
 		errorMessage,
@@ -27,9 +28,15 @@
 	let loading = $state(true);
 	let error = $state('');
 
+	// Links from a template or schedule narrow the list to its jobs.
+	const jobTemplateId = $derived(page.url.searchParams.get('jobTemplateId') || undefined);
+	const scheduleId = $derived(page.url.searchParams.get('scheduleId') || undefined);
+
 	async function load() {
 		const { data, error: err } = await api.GET('/api/v1/jobs', {
-			params: { query: { limit: pageSize, offset, status: status || undefined } }
+			params: {
+				query: { limit: pageSize, offset, status: status || undefined, jobTemplateId, scheduleId }
+			}
 		});
 		loading = false;
 		if (data) {
@@ -46,6 +53,8 @@
 	$effect(() => {
 		void status;
 		void offset;
+		void jobTemplateId;
+		void scheduleId;
 		load();
 		const timer = setInterval(() => {
 			if (jobs.some((j) => !finishedStatuses.includes(j.status))) load();
@@ -71,7 +80,11 @@
 			{/each}
 		</select>
 	</label>
-	<a href="/templates">Launch a job template →</a>
+	{#if jobTemplateId || scheduleId}
+		<a href="/jobs">Show all jobs</a>
+	{:else}
+		<a href="/templates">Launch a job template →</a>
+	{/if}
 </div>
 
 {#if error}
@@ -100,7 +113,9 @@
 						<tr>
 							<td><a href="/jobs/{job.id}">{job.name}</a></td>
 							<td><StatusBadge status={job.status} /></td>
-							<td>{job.launchedBy?.username ?? '—'}</td>
+							<td>
+								{job.schedule ? `schedule ${job.schedule.name}` : (job.launchedBy?.username ?? '—')}
+							</td>
 							<td>{fmtTime(job.createdAt)}</td>
 							<td>{fmtDuration(job.startedAt, job.finishedAt)}</td>
 						</tr>

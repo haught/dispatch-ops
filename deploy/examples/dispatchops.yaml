@@ -33,3 +33,8 @@ spec:
       key: client-secret
     scopes: [profile, email, groups]
     displayName: Corp SSO
+  # Finished jobs are deleted after 90 days unless set; audit log entries
+  # are kept forever unless set.
+  retention:
+    jobs: 2160h
+    auditLog: 8760h

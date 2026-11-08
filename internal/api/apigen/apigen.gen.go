@@ -78,7 +78,9 @@ const (
 	AuditResourceTypeInventory            AuditResourceType = "inventory"
 	AuditResourceTypeJob                  AuditResourceType = "job"
 	AuditResourceTypeJobTemplate          AuditResourceType = "job_template"
+	AuditResourceTypeNotificationTarget   AuditResourceType = "notification_target"
 	AuditResourceTypeProject              AuditResourceType = "project"
+	AuditResourceTypeSchedule             AuditResourceType = "schedule"
 	AuditResourceTypeTeam                 AuditResourceType = "team"
 	AuditResourceTypeUser                 AuditResourceType = "user"
 )
@@ -102,7 +104,11 @@ func (e AuditResourceType) Valid() bool {
 		return true
 	case AuditResourceTypeJobTemplate:
 		return true
+	case AuditResourceTypeNotificationTarget:
+		return true
 	case AuditResourceTypeProject:
+		return true
+	case AuditResourceTypeSchedule:
 		return true
 	case AuditResourceTypeTeam:
 		return true
@@ -287,6 +293,72 @@ func (e JobType) Valid() bool {
 	}
 }
 
+// Defines values for NotificationDeliveryStatus.
+const (
+	NotificationDeliveryStatusFailed  NotificationDeliveryStatus = "failed"
+	NotificationDeliveryStatusPending NotificationDeliveryStatus = "pending"
+	NotificationDeliveryStatusSent    NotificationDeliveryStatus = "sent"
+)
+
+// Valid indicates whether the value is a known member of the NotificationDeliveryStatus enum.
+func (e NotificationDeliveryStatus) Valid() bool {
+	switch e {
+	case NotificationDeliveryStatusFailed:
+		return true
+	case NotificationDeliveryStatusPending:
+		return true
+	case NotificationDeliveryStatusSent:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for NotificationEvent.
+const (
+	NotificationEventCanceled  NotificationEvent = "canceled"
+	NotificationEventFailed    NotificationEvent = "failed"
+	NotificationEventStarted   NotificationEvent = "started"
+	NotificationEventSucceeded NotificationEvent = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the NotificationEvent enum.
+func (e NotificationEvent) Valid() bool {
+	switch e {
+	case NotificationEventCanceled:
+		return true
+	case NotificationEventFailed:
+		return true
+	case NotificationEventStarted:
+		return true
+	case NotificationEventSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for NotificationKind.
+const (
+	Email   NotificationKind = "email"
+	Slack   NotificationKind = "slack"
+	Webhook NotificationKind = "webhook"
+)
+
+// Valid indicates whether the value is a known member of the NotificationKind enum.
+func (e NotificationKind) Valid() bool {
+	switch e {
+	case Email:
+		return true
+	case Slack:
+		return true
+	case Webhook:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for OverridableField.
 const (
 	OverridableFieldCommand   OverridableField = "command"
@@ -332,6 +404,24 @@ func (e PullPolicy) Valid() bool {
 	case IfNotPresent:
 		return true
 	case Never:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RelaunchRequestHosts.
+const (
+	RelaunchRequestHostsAll    RelaunchRequestHosts = "all"
+	RelaunchRequestHostsFailed RelaunchRequestHosts = "failed"
+)
+
+// Valid indicates whether the value is a known member of the RelaunchRequestHosts enum.
+func (e RelaunchRequestHosts) Valid() bool {
+	switch e {
+	case RelaunchRequestHostsAll:
+		return true
+	case RelaunchRequestHostsFailed:
 		return true
 	default:
 		return false
@@ -672,6 +762,13 @@ type CredentialUpdate struct {
 	Name   *Name             `json:"name,omitempty"`
 }
 
+// CronExpression Five fields (minute hour day-of-month month day-of-week, e.g.
+// `30 2 * * 1-5`) or a descriptor: `@yearly`, `@monthly`, `@weekly`,
+// `@daily`, `@hourly`, or `@every <duration>` (at least `1m`).
+//
+// Example: 0 3 * * *
+type CronExpression = string
+
 // Description defines model for Description.
 type Description = string
 
@@ -914,8 +1011,16 @@ type Job struct {
 	// JobTemplateId `null` if the template has since been deleted
 	JobTemplateId *openapi_types.UUID `json:"jobTemplateId"`
 	LaunchType    JobLaunchType       `json:"launchType"`
-	LaunchedBy    *UserRef            `json:"launchedBy"`
-	Name          string              `json:"name"`
+
+	// LaunchedBy `null` for scheduled jobs, or if the user has since been deleted
+	LaunchedBy *UserRef `json:"launchedBy"`
+	Name       string   `json:"name"`
+
+	// RelaunchOf The job this one reran, if it still exists
+	RelaunchOf *openapi_types.UUID `json:"relaunchOf"`
+
+	// Schedule The schedule that launched the job, if one did and it still exists
+	Schedule *ScheduleRef `json:"schedule"`
 
 	// ScmRevision The commit the project was checked out at (empty if unknown)
 	ScmRevision string     `json:"scmRevision"`
@@ -1177,6 +1282,134 @@ type LoginRequest struct {
 // Name defines model for Name.
 type Name = string
 
+// NotificationDelivery defines model for NotificationDelivery.
+type NotificationDelivery struct {
+	Attempts  int       `json:"attempts"`
+	CreatedAt time.Time `json:"createdAt"`
+
+	// Event `failed` covers jobs that failed or errored.
+	Event     NotificationEvent `json:"event"`
+	Id        int64             `json:"id"`
+	LastError string            `json:"lastError"`
+
+	// NextAttemptAt When a pending notification is next tried
+	NextAttemptAt *time.Time `json:"nextAttemptAt"`
+	SentAt        *time.Time `json:"sentAt"`
+
+	// Status `pending` (not sent yet, or waiting to retry), `sent`, or `failed` for good
+	Status   NotificationDeliveryStatus `json:"status"`
+	TargetId openapi_types.UUID         `json:"targetId"`
+
+	// TargetKind - `webhook`: POSTs the event as JSON to `config.url`. Optional
+	//   secrets: `authorization` (sent as the `Authorization` header) and
+	//   `signingSecret`, which adds `X-Dispatch-Timestamp` and
+	//   `X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
+	// - `slack`: posts a message to a Slack incoming webhook. Secret:
+	//   `webhookUrl` (required).
+	// - `email`: sends an email over SMTP. Config: `host`, `port` (default
+	//   587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
+	//   `none`), `username`, `from`, `to` (a list). Secret: `password`.
+	TargetKind NotificationKind `json:"targetKind"`
+	TargetName string           `json:"targetName"`
+}
+
+// NotificationDeliveryStatus `pending` (not sent yet, or waiting to retry), `sent`, or `failed` for good
+type NotificationDeliveryStatus string
+
+// NotificationDeliveryList defines model for NotificationDeliveryList.
+type NotificationDeliveryList struct {
+	Items []NotificationDelivery `json:"items"`
+}
+
+// NotificationEvent `failed` covers jobs that failed or errored.
+type NotificationEvent string
+
+// NotificationKind - `webhook`: POSTs the event as JSON to `config.url`. Optional
+//
+//		secrets: `authorization` (sent as the `Authorization` header) and
+//		`signingSecret`, which adds `X-Dispatch-Timestamp` and
+//		`X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
+//	  - `slack`: posts a message to a Slack incoming webhook. Secret:
+//	    `webhookUrl` (required).
+//	  - `email`: sends an email over SMTP. Config: `host`, `port` (default
+//	    587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
+//	    `none`), `username`, `from`, `to` (a list). Secret: `password`.
+type NotificationKind string
+
+// NotificationSecrets Secret values by name (see `NotificationKind`). Never returned by the API.
+type NotificationSecrets map[string]string
+
+// NotificationTarget defines model for NotificationTarget.
+type NotificationTarget struct {
+	// Config Non-secret settings (empty unless the caller is a system administrator or auditor)
+	Config      map[string]interface{} `json:"config"`
+	CreatedAt   time.Time              `json:"createdAt"`
+	Description string                 `json:"description"`
+	Id          openapi_types.UUID     `json:"id"`
+
+	// Kind - `webhook`: POSTs the event as JSON to `config.url`. Optional
+	//   secrets: `authorization` (sent as the `Authorization` header) and
+	//   `signingSecret`, which adds `X-Dispatch-Timestamp` and
+	//   `X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
+	// - `slack`: posts a message to a Slack incoming webhook. Secret:
+	//   `webhookUrl` (required).
+	// - `email`: sends an email over SMTP. Config: `host`, `port` (default
+	//   587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
+	//   `none`), `username`, `from`, `to` (a list). Secret: `password`.
+	Kind NotificationKind `json:"kind"`
+	Name string           `json:"name"`
+
+	// SecretFields Names of the secrets that have a value
+	SecretFields []string  `json:"secretFields"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// NotificationTargetCreate defines model for NotificationTargetCreate.
+type NotificationTargetCreate struct {
+	Config      *map[string]interface{} `json:"config,omitempty"`
+	Description *Description            `json:"description,omitempty"`
+
+	// Kind - `webhook`: POSTs the event as JSON to `config.url`. Optional
+	//   secrets: `authorization` (sent as the `Authorization` header) and
+	//   `signingSecret`, which adds `X-Dispatch-Timestamp` and
+	//   `X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
+	// - `slack`: posts a message to a Slack incoming webhook. Secret:
+	//   `webhookUrl` (required).
+	// - `email`: sends an email over SMTP. Config: `host`, `port` (default
+	//   587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
+	//   `none`), `username`, `from`, `to` (a list). Secret: `password`.
+	Kind NotificationKind `json:"kind"`
+	Name Name             `json:"name"`
+
+	// Secrets Secret values by name (see `NotificationKind`). Never returned by the API.
+	Secrets *NotificationSecrets `json:"secrets,omitempty"`
+}
+
+// NotificationTargetList defines model for NotificationTargetList.
+type NotificationTargetList struct {
+	Items []NotificationTarget `json:"items"`
+	Total int                  `json:"total"`
+}
+
+// NotificationTargetUpdate defines model for NotificationTargetUpdate.
+type NotificationTargetUpdate struct {
+	// Config Replaces the config
+	Config      *map[string]interface{} `json:"config,omitempty"`
+	Description *Description            `json:"description,omitempty"`
+	Name        *Name                   `json:"name,omitempty"`
+
+	// Secrets Merged into the existing secrets: those given here are replaced,
+	// others are kept. An empty string removes one.
+	Secrets *NotificationSecrets `json:"secrets,omitempty"`
+}
+
+// NotificationTestResult defines model for NotificationTestResult.
+type NotificationTestResult struct {
+	// Error Why sending failed (empty if it worked)
+	Error string `json:"error"`
+	Ok    bool   `json:"ok"`
+}
+
 // OidcGroups Values of the OIDC groups claim. Users signing in with any of them
 // join the team; those signing in without them leave it again.
 type OidcGroups = []string
@@ -1252,6 +1485,17 @@ type ProjectUpdate struct {
 
 // PullPolicy defines model for PullPolicy.
 type PullPolicy string
+
+// RelaunchRequest defines model for RelaunchRequest.
+type RelaunchRequest struct {
+	// Hosts `failed` reruns a finished Ansible job only against the hosts that
+	// failed or were unreachable (as its `limit`).
+	Hosts *RelaunchRequestHosts `json:"hosts,omitempty"`
+}
+
+// RelaunchRequestHosts `failed` reruns a finished Ansible job only against the hosts that
+// failed or were unreachable (as its `limit`).
+type RelaunchRequestHosts string
 
 // ResourceType defines model for ResourceType.
 type ResourceType string
@@ -1389,6 +1633,105 @@ type RunnerProject struct {
 	Url        string            `json:"url"`
 }
 
+// Schedule defines model for Schedule.
+type Schedule struct {
+	CreatedAt time.Time `json:"createdAt"`
+	CreatedBy *UserRef  `json:"createdBy"`
+
+	// Cron Five fields (minute hour day-of-month month day-of-week, e.g.
+	// `30 2 * * 1-5`) or a descriptor: `@yearly`, `@monthly`, `@weekly`,
+	// `@daily`, `@hourly`, or `@every <duration>` (at least `1m`).
+	//
+	//
+	// Example: 0 3 * * *
+	Cron            CronExpression     `json:"cron"`
+	Description     string             `json:"description"`
+	Enabled         bool               `json:"enabled"`
+	Id              openapi_types.UUID `json:"id"`
+	JobTemplateId   openapi_types.UUID `json:"jobTemplateId"`
+	JobTemplateName string             `json:"jobTemplateName"`
+
+	// LastError Why the last run could not launch a job (empty if it did)
+	LastError string `json:"lastError"`
+
+	// LastJobId The last job it launched, if it still exists
+	LastJobId *openapi_types.UUID `json:"lastJobId"`
+	LastRunAt *time.Time          `json:"lastRunAt"`
+	Name      string              `json:"name"`
+
+	// NextRunAt `null` while disabled
+	NextRunAt *time.Time    `json:"nextRunAt"`
+	Overrides LaunchRequest `json:"overrides"`
+
+	// Timezone IANA time zone the cron expression is read in
+	//
+	// Example: Europe/Berlin
+	Timezone  Timezone  `json:"timezone"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// ScheduleCreate defines model for ScheduleCreate.
+type ScheduleCreate struct {
+	// Cron Five fields (minute hour day-of-month month day-of-week, e.g.
+	// `30 2 * * 1-5`) or a descriptor: `@yearly`, `@monthly`, `@weekly`,
+	// `@daily`, `@hourly`, or `@every <duration>` (at least `1m`).
+	//
+	//
+	// Example: 0 3 * * *
+	Cron          CronExpression     `json:"cron"`
+	Description   *Description       `json:"description,omitempty"`
+	Enabled       *bool              `json:"enabled,omitempty"`
+	JobTemplateId openapi_types.UUID `json:"jobTemplateId"`
+	Name          Name               `json:"name"`
+
+	// Overrides Launch overrides, as in a launch request; the template must allow them
+	Overrides *LaunchRequest `json:"overrides,omitempty"`
+
+	// Timezone IANA time zone the cron expression is read in
+	//
+	// Example: Europe/Berlin
+	Timezone *Timezone `json:"timezone,omitempty"`
+}
+
+// ScheduleList defines model for ScheduleList.
+type ScheduleList struct {
+	Items []Schedule `json:"items"`
+	Total int        `json:"total"`
+}
+
+// SchedulePreview defines model for SchedulePreview.
+type SchedulePreview struct {
+	Runs []time.Time `json:"runs"`
+}
+
+// ScheduleRef defines model for ScheduleRef.
+type ScheduleRef struct {
+	Id   openapi_types.UUID `json:"id"`
+	Name string             `json:"name"`
+}
+
+// ScheduleUpdate defines model for ScheduleUpdate.
+type ScheduleUpdate struct {
+	// Cron Five fields (minute hour day-of-month month day-of-week, e.g.
+	// `30 2 * * 1-5`) or a descriptor: `@yearly`, `@monthly`, `@weekly`,
+	// `@daily`, `@hourly`, or `@every <duration>` (at least `1m`).
+	//
+	//
+	// Example: 0 3 * * *
+	Cron        *CronExpression `json:"cron,omitempty"`
+	Description *Description    `json:"description,omitempty"`
+	Enabled     *bool           `json:"enabled,omitempty"`
+	Name        *Name           `json:"name,omitempty"`
+
+	// Overrides Replaces the overrides
+	Overrides *LaunchRequest `json:"overrides,omitempty"`
+
+	// Timezone IANA time zone the cron expression is read in
+	//
+	// Example: Europe/Berlin
+	Timezone *Timezone `json:"timezone,omitempty"`
+}
+
 // ScmRef Branch, tag or commit to check out
 type ScmRef = string
 
@@ -1456,6 +1799,42 @@ type TeamUpdate struct {
 	// join the team; those signing in without them leave it again.
 	OidcGroups *OidcGroups `json:"oidcGroups,omitempty"`
 }
+
+// TemplateNotification defines model for TemplateNotification.
+type TemplateNotification struct {
+	Events   []NotificationEvent `json:"events"`
+	TargetId openapi_types.UUID  `json:"targetId"`
+
+	// TargetKind - `webhook`: POSTs the event as JSON to `config.url`. Optional
+	//   secrets: `authorization` (sent as the `Authorization` header) and
+	//   `signingSecret`, which adds `X-Dispatch-Timestamp` and
+	//   `X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
+	// - `slack`: posts a message to a Slack incoming webhook. Secret:
+	//   `webhookUrl` (required).
+	// - `email`: sends an email over SMTP. Config: `host`, `port` (default
+	//   587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
+	//   `none`), `username`, `from`, `to` (a list). Secret: `password`.
+	TargetKind NotificationKind `json:"targetKind"`
+	TargetName string           `json:"targetName"`
+}
+
+// TemplateNotificationList defines model for TemplateNotificationList.
+type TemplateNotificationList struct {
+	Items []TemplateNotification `json:"items"`
+}
+
+// TemplateNotificationsUpdate defines model for TemplateNotificationsUpdate.
+type TemplateNotificationsUpdate struct {
+	Items []struct {
+		Events   []NotificationEvent `json:"events"`
+		TargetId openapi_types.UUID  `json:"targetId"`
+	} `json:"items"`
+}
+
+// Timezone IANA time zone the cron expression is read in
+//
+// Example: Europe/Berlin
+type Timezone = string
 
 // TokenScope `read` tokens may only make GET requests; `write` tokens may do anything their user may.
 type TokenScope string
@@ -1555,8 +1934,14 @@ type Offset = int
 // ProjectId defines model for ProjectId.
 type ProjectId = openapi_types.UUID
 
+// ScheduleId defines model for ScheduleId.
+type ScheduleId = openapi_types.UUID
+
 // Search defines model for Search.
 type Search = string
+
+// TargetId defines model for TargetId.
+type TargetId = openapi_types.UUID
 
 // TeamId defines model for TeamId.
 type TeamId = openapi_types.UUID
@@ -1672,6 +2057,7 @@ type ListJobsParams struct {
 	Offset        *Offset             `form:"offset,omitempty" json:"offset,omitempty"`
 	Status        *JobStatus          `form:"status,omitempty" json:"status,omitempty"`
 	JobTemplateId *openapi_types.UUID `form:"jobTemplateId,omitempty" json:"jobTemplateId,omitempty"`
+	ScheduleId    *openapi_types.UUID `form:"scheduleId,omitempty" json:"scheduleId,omitempty"`
 }
 
 // ListJobEventsParams defines parameters for ListJobEvents.
@@ -1688,6 +2074,15 @@ type StreamJobParams struct {
 	// AfterSeq Start after this event. `Last-Event-ID` takes precedence.
 	AfterSeq    *int64  `form:"afterSeq,omitempty" json:"afterSeq,omitempty"`
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
+}
+
+// ListNotificationTargetsParams defines parameters for ListNotificationTargets.
+type ListNotificationTargetsParams struct {
+	Limit  *Limit  `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *Offset `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// Search Case-insensitive substring match on the name
+	Search *Search `form:"search,omitempty" json:"search,omitempty"`
 }
 
 // ListProjectsParams defines parameters for ListProjects.
@@ -1715,6 +2110,23 @@ type ListRoleGrantsParams struct {
 
 // ListRoleGrantsParamsResourceType defines parameters for ListRoleGrants.
 type ListRoleGrantsParamsResourceType string
+
+// PreviewScheduleParams defines parameters for PreviewSchedule.
+type PreviewScheduleParams struct {
+	Cron     CronExpression `form:"cron" json:"cron"`
+	Timezone *Timezone      `form:"timezone,omitempty" json:"timezone,omitempty"`
+	Count    *int           `form:"count,omitempty" json:"count,omitempty"`
+}
+
+// ListSchedulesParams defines parameters for ListSchedules.
+type ListSchedulesParams struct {
+	Limit  *Limit  `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *Offset `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// Search Case-insensitive substring match on the name
+	Search        *Search             `form:"search,omitempty" json:"search,omitempty"`
+	JobTemplateId *openapi_types.UUID `form:"jobTemplateId,omitempty" json:"jobTemplateId,omitempty"`
+}
 
 // ListTeamsParams defines parameters for ListTeams.
 type ListTeamsParams struct {
@@ -1788,6 +2200,18 @@ type UpdateJobTemplateJSONRequestBody = JobTemplateUpdate
 // LaunchJobTemplateJSONRequestBody defines body for LaunchJobTemplate for application/json ContentType.
 type LaunchJobTemplateJSONRequestBody = LaunchRequest
 
+// SetJobTemplateNotificationsJSONRequestBody defines body for SetJobTemplateNotifications for application/json ContentType.
+type SetJobTemplateNotificationsJSONRequestBody = TemplateNotificationsUpdate
+
+// RelaunchJobJSONRequestBody defines body for RelaunchJob for application/json ContentType.
+type RelaunchJobJSONRequestBody = RelaunchRequest
+
+// CreateNotificationTargetJSONRequestBody defines body for CreateNotificationTarget for application/json ContentType.
+type CreateNotificationTargetJSONRequestBody = NotificationTargetCreate
+
+// UpdateNotificationTargetJSONRequestBody defines body for UpdateNotificationTarget for application/json ContentType.
+type UpdateNotificationTargetJSONRequestBody = NotificationTargetUpdate
+
 // CreateProjectJSONRequestBody defines body for CreateProject for application/json ContentType.
 type CreateProjectJSONRequestBody = ProjectCreate
 
@@ -1796,6 +2220,12 @@ type UpdateProjectJSONRequestBody = ProjectUpdate
 
 // CreateRoleGrantJSONRequestBody defines body for CreateRoleGrant for application/json ContentType.
 type CreateRoleGrantJSONRequestBody = RoleGrantCreate
+
+// CreateScheduleJSONRequestBody defines body for CreateSchedule for application/json ContentType.
+type CreateScheduleJSONRequestBody = ScheduleCreate
+
+// UpdateScheduleJSONRequestBody defines body for UpdateSchedule for application/json ContentType.
+type UpdateScheduleJSONRequestBody = ScheduleUpdate
 
 // CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
 type CreateTeamJSONRequestBody = TeamCreate
@@ -1943,6 +2373,12 @@ type ServerInterface interface {
 	// LaunchJobTemplate Launch a job from a template
 	// (POST /api/v1/job-templates/{jobTemplateId}/launch)
 	LaunchJobTemplate(w http.ResponseWriter, r *http.Request, jobTemplateId JobTemplateId)
+	// ListJobTemplateNotifications List the notification targets a template's jobs notify
+	// (GET /api/v1/job-templates/{jobTemplateId}/notifications)
+	ListJobTemplateNotifications(w http.ResponseWriter, r *http.Request, jobTemplateId JobTemplateId)
+	// SetJobTemplateNotifications Replace the notification targets a template's jobs notify
+	// (PUT /api/v1/job-templates/{jobTemplateId}/notifications)
+	SetJobTemplateNotifications(w http.ResponseWriter, r *http.Request, jobTemplateId JobTemplateId)
 	// ListJobs List jobs, newest first
 	// (GET /api/v1/jobs)
 	ListJobs(w http.ResponseWriter, r *http.Request, params ListJobsParams)
@@ -1958,12 +2394,36 @@ type ServerInterface interface {
 	// ListJobHosts Per-host results of an Ansible job
 	// (GET /api/v1/jobs/{jobId}/hosts)
 	ListJobHosts(w http.ResponseWriter, r *http.Request, jobId JobId)
+	// ListJobNotifications List the notifications sent (or being sent) about a job
+	// (GET /api/v1/jobs/{jobId}/notifications)
+	ListJobNotifications(w http.ResponseWriter, r *http.Request, jobId JobId)
+	// RelaunchJob Run a job again
+	// (POST /api/v1/jobs/{jobId}/relaunch)
+	RelaunchJob(w http.ResponseWriter, r *http.Request, jobId JobId)
 	// StreamJob Follow a job's output live (server-sent events)
 	// (GET /api/v1/jobs/{jobId}/stream)
 	StreamJob(w http.ResponseWriter, r *http.Request, jobId JobId, params StreamJobParams)
 	// GetCurrentUser The signed-in user
 	// (GET /api/v1/me)
 	GetCurrentUser(w http.ResponseWriter, r *http.Request)
+	// ListNotificationTargets List notification targets
+	// (GET /api/v1/notification-targets)
+	ListNotificationTargets(w http.ResponseWriter, r *http.Request, params ListNotificationTargetsParams)
+	// CreateNotificationTarget Create a notification target
+	// (POST /api/v1/notification-targets)
+	CreateNotificationTarget(w http.ResponseWriter, r *http.Request)
+	// DeleteNotificationTarget Delete a notification target
+	// (DELETE /api/v1/notification-targets/{targetId})
+	DeleteNotificationTarget(w http.ResponseWriter, r *http.Request, targetId TargetId)
+	// GetNotificationTarget Get a notification target
+	// (GET /api/v1/notification-targets/{targetId})
+	GetNotificationTarget(w http.ResponseWriter, r *http.Request, targetId TargetId)
+	// UpdateNotificationTarget Update a notification target
+	// (PATCH /api/v1/notification-targets/{targetId})
+	UpdateNotificationTarget(w http.ResponseWriter, r *http.Request, targetId TargetId)
+	// TestNotificationTarget Send a test notification
+	// (POST /api/v1/notification-targets/{targetId}/test)
+	TestNotificationTarget(w http.ResponseWriter, r *http.Request, targetId TargetId)
 	// ListProjects List projects (git repositories)
 	// (GET /api/v1/projects)
 	ListProjects(w http.ResponseWriter, r *http.Request, params ListProjectsParams)
@@ -1988,6 +2448,24 @@ type ServerInterface interface {
 	// DeleteRoleGrant Revoke a role
 	// (DELETE /api/v1/role-grants/{grantId})
 	DeleteRoleGrant(w http.ResponseWriter, r *http.Request, grantId openapi_types.UUID)
+	// PreviewSchedule Check a cron expression and list its next run times
+	// (GET /api/v1/schedule-preview)
+	PreviewSchedule(w http.ResponseWriter, r *http.Request, params PreviewScheduleParams)
+	// ListSchedules List schedules
+	// (GET /api/v1/schedules)
+	ListSchedules(w http.ResponseWriter, r *http.Request, params ListSchedulesParams)
+	// CreateSchedule Create a schedule
+	// (POST /api/v1/schedules)
+	CreateSchedule(w http.ResponseWriter, r *http.Request)
+	// DeleteSchedule Delete a schedule
+	// (DELETE /api/v1/schedules/{scheduleId})
+	DeleteSchedule(w http.ResponseWriter, r *http.Request, scheduleId ScheduleId)
+	// GetSchedule Get a schedule
+	// (GET /api/v1/schedules/{scheduleId})
+	GetSchedule(w http.ResponseWriter, r *http.Request, scheduleId ScheduleId)
+	// UpdateSchedule Update a schedule
+	// (PATCH /api/v1/schedules/{scheduleId})
+	UpdateSchedule(w http.ResponseWriter, r *http.Request, scheduleId ScheduleId)
 	// ListTeams List teams
 	// (GET /api/v1/teams)
 	ListTeams(w http.ResponseWriter, r *http.Request, params ListTeamsParams)
@@ -3408,6 +3886,58 @@ func (siw *ServerInterfaceWrapper) LaunchJobTemplate(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// ListJobTemplateNotifications operation middleware
+func (siw *ServerInterfaceWrapper) ListJobTemplateNotifications(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "jobTemplateId" -------------
+	var jobTemplateId JobTemplateId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "jobTemplateId", r.PathValue("jobTemplateId"), &jobTemplateId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "jobTemplateId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListJobTemplateNotifications(w, r, jobTemplateId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetJobTemplateNotifications operation middleware
+func (siw *ServerInterfaceWrapper) SetJobTemplateNotifications(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "jobTemplateId" -------------
+	var jobTemplateId JobTemplateId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "jobTemplateId", r.PathValue("jobTemplateId"), &jobTemplateId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "jobTemplateId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetJobTemplateNotifications(w, r, jobTemplateId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListJobs operation middleware
 func (siw *ServerInterfaceWrapper) ListJobs(w http.ResponseWriter, r *http.Request) {
 
@@ -3465,6 +3995,19 @@ func (siw *ServerInterfaceWrapper) ListJobs(w http.ResponseWriter, r *http.Reque
 			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "jobTemplateId"})
 		} else {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "jobTemplateId", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "scheduleId" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "scheduleId", r.URL.Query(), &params.ScheduleId, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "scheduleId"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "scheduleId", Err: err})
 		}
 		return
 	}
@@ -3626,6 +4169,58 @@ func (siw *ServerInterfaceWrapper) ListJobHosts(w http.ResponseWriter, r *http.R
 	handler.ServeHTTP(w, r)
 }
 
+// ListJobNotifications operation middleware
+func (siw *ServerInterfaceWrapper) ListJobNotifications(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "jobId" -------------
+	var jobId JobId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "jobId", r.PathValue("jobId"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "jobId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListJobNotifications(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RelaunchJob operation middleware
+func (siw *ServerInterfaceWrapper) RelaunchJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "jobId" -------------
+	var jobId JobId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "jobId", r.PathValue("jobId"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "jobId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RelaunchJob(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // StreamJob operation middleware
 func (siw *ServerInterfaceWrapper) StreamJob(w http.ResponseWriter, r *http.Request) {
 
@@ -3694,6 +4289,183 @@ func (siw *ServerInterfaceWrapper) GetCurrentUser(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetCurrentUser(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListNotificationTargets operation middleware
+func (siw *ServerInterfaceWrapper) ListNotificationTargets(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListNotificationTargetsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "search" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "search", r.URL.Query(), &params.Search, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "search"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "search", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListNotificationTargets(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateNotificationTarget operation middleware
+func (siw *ServerInterfaceWrapper) CreateNotificationTarget(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateNotificationTarget(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteNotificationTarget operation middleware
+func (siw *ServerInterfaceWrapper) DeleteNotificationTarget(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "targetId" -------------
+	var targetId TargetId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "targetId", r.PathValue("targetId"), &targetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "targetId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteNotificationTarget(w, r, targetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetNotificationTarget operation middleware
+func (siw *ServerInterfaceWrapper) GetNotificationTarget(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "targetId" -------------
+	var targetId TargetId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "targetId", r.PathValue("targetId"), &targetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "targetId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetNotificationTarget(w, r, targetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateNotificationTarget operation middleware
+func (siw *ServerInterfaceWrapper) UpdateNotificationTarget(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "targetId" -------------
+	var targetId TargetId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "targetId", r.PathValue("targetId"), &targetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "targetId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateNotificationTarget(w, r, targetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// TestNotificationTarget operation middleware
+func (siw *ServerInterfaceWrapper) TestNotificationTarget(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "targetId" -------------
+	var targetId TargetId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "targetId", r.PathValue("targetId"), &targetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "targetId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.TestNotificationTarget(w, r, targetId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -3983,6 +4755,229 @@ func (siw *ServerInterfaceWrapper) DeleteRoleGrant(w http.ResponseWriter, r *htt
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DeleteRoleGrant(w, r, grantId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PreviewSchedule operation middleware
+func (siw *ServerInterfaceWrapper) PreviewSchedule(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PreviewScheduleParams
+
+	// ------------- Required query parameter "cron" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "cron", r.URL.Query(), &params.Cron, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cron"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cron", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "timezone" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "timezone", r.URL.Query(), &params.Timezone, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "timezone"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "timezone", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "count" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "count", r.URL.Query(), &params.Count, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "count"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "count", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PreviewSchedule(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListSchedules operation middleware
+func (siw *ServerInterfaceWrapper) ListSchedules(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListSchedulesParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "search" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "search", r.URL.Query(), &params.Search, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "search"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "search", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "jobTemplateId" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "jobTemplateId", r.URL.Query(), &params.JobTemplateId, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "jobTemplateId"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "jobTemplateId", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListSchedules(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateSchedule operation middleware
+func (siw *ServerInterfaceWrapper) CreateSchedule(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateSchedule(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteSchedule operation middleware
+func (siw *ServerInterfaceWrapper) DeleteSchedule(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "scheduleId" -------------
+	var scheduleId ScheduleId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "scheduleId", r.PathValue("scheduleId"), &scheduleId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "scheduleId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteSchedule(w, r, scheduleId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetSchedule operation middleware
+func (siw *ServerInterfaceWrapper) GetSchedule(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "scheduleId" -------------
+	var scheduleId ScheduleId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "scheduleId", r.PathValue("scheduleId"), &scheduleId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "scheduleId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSchedule(w, r, scheduleId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateSchedule operation middleware
+func (siw *ServerInterfaceWrapper) UpdateSchedule(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "scheduleId" -------------
+	var scheduleId ScheduleId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "scheduleId", r.PathValue("scheduleId"), &scheduleId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "scheduleId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateSchedule(w, r, scheduleId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -4865,12 +5860,28 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/job-templates/{jobTemplateId}", wrapper.GetJobTemplate)
 	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/api/v1/job-templates/{jobTemplateId}", wrapper.UpdateJobTemplate)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/job-templates/{jobTemplateId}/launch", wrapper.LaunchJobTemplate)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/job-templates/{jobTemplateId}/notifications", wrapper.ListJobTemplateNotifications)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/job-templates/{jobTemplateId}/notifications", wrapper.SetJobTemplateNotifications)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs", wrapper.ListJobs)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs/{jobId}", wrapper.GetJob)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/jobs/{jobId}/cancel", wrapper.CancelJob)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs/{jobId}/events", wrapper.ListJobEvents)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs/{jobId}/hosts", wrapper.ListJobHosts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs/{jobId}/stream", wrapper.StreamJob)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/jobs/{jobId}/relaunch", wrapper.RelaunchJob)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs/{jobId}/notifications", wrapper.ListJobNotifications)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/schedules", wrapper.ListSchedules)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/schedules", wrapper.CreateSchedule)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/schedules/{scheduleId}", wrapper.DeleteSchedule)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/schedules/{scheduleId}", wrapper.GetSchedule)
+	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/api/v1/schedules/{scheduleId}", wrapper.UpdateSchedule)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/schedule-preview", wrapper.PreviewSchedule)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/notification-targets", wrapper.ListNotificationTargets)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/notification-targets", wrapper.CreateNotificationTarget)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/notification-targets/{targetId}", wrapper.DeleteNotificationTarget)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/notification-targets/{targetId}", wrapper.GetNotificationTarget)
+	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/api/v1/notification-targets/{targetId}", wrapper.UpdateNotificationTarget)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/notification-targets/{targetId}/test", wrapper.TestNotificationTarget)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/runner/v1/jobs/{jobId}/spec", wrapper.GetRunnerJobSpec)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/runner/v1/jobs/{jobId}/events", wrapper.PostRunnerJobEvents)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/runner/v1/jobs/{jobId}/heartbeat", wrapper.RunnerHeartbeat)
@@ -7550,6 +8561,147 @@ func (response LaunchJobTemplate404ApplicationProblemPlusJSONResponse) VisitLaun
 	return err
 }
 
+type ListJobTemplateNotificationsRequestObject struct {
+	JobTemplateId JobTemplateId `json:"jobTemplateId"`
+}
+
+type ListJobTemplateNotificationsResponseObject interface {
+	VisitListJobTemplateNotificationsResponse(w http.ResponseWriter) error
+}
+
+type ListJobTemplateNotifications200JSONResponse TemplateNotificationList
+
+func (response ListJobTemplateNotifications200JSONResponse) VisitListJobTemplateNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListJobTemplateNotifications401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListJobTemplateNotifications401ApplicationProblemPlusJSONResponse) VisitListJobTemplateNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListJobTemplateNotifications404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response ListJobTemplateNotifications404ApplicationProblemPlusJSONResponse) VisitListJobTemplateNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetJobTemplateNotificationsRequestObject struct {
+	JobTemplateId JobTemplateId `json:"jobTemplateId"`
+	Body          *SetJobTemplateNotificationsJSONRequestBody
+}
+
+type SetJobTemplateNotificationsResponseObject interface {
+	VisitSetJobTemplateNotificationsResponse(w http.ResponseWriter) error
+}
+
+type SetJobTemplateNotifications200JSONResponse TemplateNotificationList
+
+func (response SetJobTemplateNotifications200JSONResponse) VisitSetJobTemplateNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetJobTemplateNotifications400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response SetJobTemplateNotifications400ApplicationProblemPlusJSONResponse) VisitSetJobTemplateNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetJobTemplateNotifications401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response SetJobTemplateNotifications401ApplicationProblemPlusJSONResponse) VisitSetJobTemplateNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetJobTemplateNotifications403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response SetJobTemplateNotifications403ApplicationProblemPlusJSONResponse) VisitSetJobTemplateNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetJobTemplateNotifications404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response SetJobTemplateNotifications404ApplicationProblemPlusJSONResponse) VisitSetJobTemplateNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListJobsRequestObject struct {
 	Params ListJobsParams
 }
@@ -7835,6 +8987,161 @@ func (response ListJobHosts404ApplicationProblemPlusJSONResponse) VisitListJobHo
 	return err
 }
 
+type ListJobNotificationsRequestObject struct {
+	JobId JobId `json:"jobId"`
+}
+
+type ListJobNotificationsResponseObject interface {
+	VisitListJobNotificationsResponse(w http.ResponseWriter) error
+}
+
+type ListJobNotifications200JSONResponse NotificationDeliveryList
+
+func (response ListJobNotifications200JSONResponse) VisitListJobNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListJobNotifications401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListJobNotifications401ApplicationProblemPlusJSONResponse) VisitListJobNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListJobNotifications404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response ListJobNotifications404ApplicationProblemPlusJSONResponse) VisitListJobNotificationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RelaunchJobRequestObject struct {
+	JobId JobId `json:"jobId"`
+	Body  *RelaunchJobJSONRequestBody
+}
+
+type RelaunchJobResponseObject interface {
+	VisitRelaunchJobResponse(w http.ResponseWriter) error
+}
+
+type RelaunchJob201JSONResponse Job
+
+func (response RelaunchJob201JSONResponse) VisitRelaunchJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RelaunchJob400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response RelaunchJob400ApplicationProblemPlusJSONResponse) VisitRelaunchJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RelaunchJob401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response RelaunchJob401ApplicationProblemPlusJSONResponse) VisitRelaunchJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RelaunchJob403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response RelaunchJob403ApplicationProblemPlusJSONResponse) VisitRelaunchJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RelaunchJob404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response RelaunchJob404ApplicationProblemPlusJSONResponse) VisitRelaunchJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RelaunchJob409ApplicationProblemPlusJSONResponse Problem
+
+func (response RelaunchJob409ApplicationProblemPlusJSONResponse) VisitRelaunchJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type StreamJobRequestObject struct {
 	JobId  JobId `json:"jobId"`
 	Params StreamJobParams
@@ -7952,6 +9259,421 @@ func (response GetCurrentUser401ApplicationProblemPlusJSONResponse) VisitGetCurr
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListNotificationTargetsRequestObject struct {
+	Params ListNotificationTargetsParams
+}
+
+type ListNotificationTargetsResponseObject interface {
+	VisitListNotificationTargetsResponse(w http.ResponseWriter) error
+}
+
+type ListNotificationTargets200JSONResponse NotificationTargetList
+
+func (response ListNotificationTargets200JSONResponse) VisitListNotificationTargetsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListNotificationTargets401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListNotificationTargets401ApplicationProblemPlusJSONResponse) VisitListNotificationTargetsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateNotificationTargetRequestObject struct {
+	Body *CreateNotificationTargetJSONRequestBody
+}
+
+type CreateNotificationTargetResponseObject interface {
+	VisitCreateNotificationTargetResponse(w http.ResponseWriter) error
+}
+
+type CreateNotificationTarget201JSONResponse NotificationTarget
+
+func (response CreateNotificationTarget201JSONResponse) VisitCreateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateNotificationTarget400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response CreateNotificationTarget400ApplicationProblemPlusJSONResponse) VisitCreateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateNotificationTarget401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response CreateNotificationTarget401ApplicationProblemPlusJSONResponse) VisitCreateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateNotificationTarget403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response CreateNotificationTarget403ApplicationProblemPlusJSONResponse) VisitCreateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateNotificationTarget409ApplicationProblemPlusJSONResponse struct {
+	ConflictApplicationProblemPlusJSONResponse
+}
+
+func (response CreateNotificationTarget409ApplicationProblemPlusJSONResponse) VisitCreateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteNotificationTargetRequestObject struct {
+	TargetId TargetId `json:"targetId"`
+}
+
+type DeleteNotificationTargetResponseObject interface {
+	VisitDeleteNotificationTargetResponse(w http.ResponseWriter) error
+}
+
+type DeleteNotificationTarget204Response struct {
+}
+
+func (response DeleteNotificationTarget204Response) VisitDeleteNotificationTargetResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteNotificationTarget401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteNotificationTarget401ApplicationProblemPlusJSONResponse) VisitDeleteNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteNotificationTarget403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteNotificationTarget403ApplicationProblemPlusJSONResponse) VisitDeleteNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteNotificationTarget404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteNotificationTarget404ApplicationProblemPlusJSONResponse) VisitDeleteNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetNotificationTargetRequestObject struct {
+	TargetId TargetId `json:"targetId"`
+}
+
+type GetNotificationTargetResponseObject interface {
+	VisitGetNotificationTargetResponse(w http.ResponseWriter) error
+}
+
+type GetNotificationTarget200JSONResponse NotificationTarget
+
+func (response GetNotificationTarget200JSONResponse) VisitGetNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetNotificationTarget401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetNotificationTarget401ApplicationProblemPlusJSONResponse) VisitGetNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetNotificationTarget404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response GetNotificationTarget404ApplicationProblemPlusJSONResponse) VisitGetNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateNotificationTargetRequestObject struct {
+	TargetId TargetId `json:"targetId"`
+	Body     *UpdateNotificationTargetJSONRequestBody
+}
+
+type UpdateNotificationTargetResponseObject interface {
+	VisitUpdateNotificationTargetResponse(w http.ResponseWriter) error
+}
+
+type UpdateNotificationTarget200JSONResponse NotificationTarget
+
+func (response UpdateNotificationTarget200JSONResponse) VisitUpdateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateNotificationTarget400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateNotificationTarget400ApplicationProblemPlusJSONResponse) VisitUpdateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateNotificationTarget401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateNotificationTarget401ApplicationProblemPlusJSONResponse) VisitUpdateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateNotificationTarget403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateNotificationTarget403ApplicationProblemPlusJSONResponse) VisitUpdateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateNotificationTarget404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateNotificationTarget404ApplicationProblemPlusJSONResponse) VisitUpdateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateNotificationTarget409ApplicationProblemPlusJSONResponse struct {
+	ConflictApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateNotificationTarget409ApplicationProblemPlusJSONResponse) VisitUpdateNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestNotificationTargetRequestObject struct {
+	TargetId TargetId `json:"targetId"`
+}
+
+type TestNotificationTargetResponseObject interface {
+	VisitTestNotificationTargetResponse(w http.ResponseWriter) error
+}
+
+type TestNotificationTarget200JSONResponse NotificationTestResult
+
+func (response TestNotificationTarget200JSONResponse) VisitTestNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestNotificationTarget401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response TestNotificationTarget401ApplicationProblemPlusJSONResponse) VisitTestNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestNotificationTarget403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response TestNotificationTarget403ApplicationProblemPlusJSONResponse) VisitTestNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestNotificationTarget404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response TestNotificationTarget404ApplicationProblemPlusJSONResponse) VisitTestNotificationTargetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -8531,6 +10253,405 @@ func (response DeleteRoleGrant404ApplicationProblemPlusJSONResponse) VisitDelete
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewScheduleRequestObject struct {
+	Params PreviewScheduleParams
+}
+
+type PreviewScheduleResponseObject interface {
+	VisitPreviewScheduleResponse(w http.ResponseWriter) error
+}
+
+type PreviewSchedule200JSONResponse SchedulePreview
+
+func (response PreviewSchedule200JSONResponse) VisitPreviewScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewSchedule400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response PreviewSchedule400ApplicationProblemPlusJSONResponse) VisitPreviewScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewSchedule401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response PreviewSchedule401ApplicationProblemPlusJSONResponse) VisitPreviewScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListSchedulesRequestObject struct {
+	Params ListSchedulesParams
+}
+
+type ListSchedulesResponseObject interface {
+	VisitListSchedulesResponse(w http.ResponseWriter) error
+}
+
+type ListSchedules200JSONResponse ScheduleList
+
+func (response ListSchedules200JSONResponse) VisitListSchedulesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListSchedules401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListSchedules401ApplicationProblemPlusJSONResponse) VisitListSchedulesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateScheduleRequestObject struct {
+	Body *CreateScheduleJSONRequestBody
+}
+
+type CreateScheduleResponseObject interface {
+	VisitCreateScheduleResponse(w http.ResponseWriter) error
+}
+
+type CreateSchedule201JSONResponse Schedule
+
+func (response CreateSchedule201JSONResponse) VisitCreateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateSchedule400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response CreateSchedule400ApplicationProblemPlusJSONResponse) VisitCreateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateSchedule401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response CreateSchedule401ApplicationProblemPlusJSONResponse) VisitCreateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateSchedule403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response CreateSchedule403ApplicationProblemPlusJSONResponse) VisitCreateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateSchedule409ApplicationProblemPlusJSONResponse struct {
+	ConflictApplicationProblemPlusJSONResponse
+}
+
+func (response CreateSchedule409ApplicationProblemPlusJSONResponse) VisitCreateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteScheduleRequestObject struct {
+	ScheduleId ScheduleId `json:"scheduleId"`
+}
+
+type DeleteScheduleResponseObject interface {
+	VisitDeleteScheduleResponse(w http.ResponseWriter) error
+}
+
+type DeleteSchedule204Response struct {
+}
+
+func (response DeleteSchedule204Response) VisitDeleteScheduleResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteSchedule401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteSchedule401ApplicationProblemPlusJSONResponse) VisitDeleteScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSchedule403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteSchedule403ApplicationProblemPlusJSONResponse) VisitDeleteScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSchedule404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteSchedule404ApplicationProblemPlusJSONResponse) VisitDeleteScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetScheduleRequestObject struct {
+	ScheduleId ScheduleId `json:"scheduleId"`
+}
+
+type GetScheduleResponseObject interface {
+	VisitGetScheduleResponse(w http.ResponseWriter) error
+}
+
+type GetSchedule200JSONResponse Schedule
+
+func (response GetSchedule200JSONResponse) VisitGetScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSchedule401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetSchedule401ApplicationProblemPlusJSONResponse) VisitGetScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSchedule404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response GetSchedule404ApplicationProblemPlusJSONResponse) VisitGetScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateScheduleRequestObject struct {
+	ScheduleId ScheduleId `json:"scheduleId"`
+	Body       *UpdateScheduleJSONRequestBody
+}
+
+type UpdateScheduleResponseObject interface {
+	VisitUpdateScheduleResponse(w http.ResponseWriter) error
+}
+
+type UpdateSchedule200JSONResponse Schedule
+
+func (response UpdateSchedule200JSONResponse) VisitUpdateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateSchedule400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateSchedule400ApplicationProblemPlusJSONResponse) VisitUpdateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateSchedule401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateSchedule401ApplicationProblemPlusJSONResponse) VisitUpdateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateSchedule403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateSchedule403ApplicationProblemPlusJSONResponse) VisitUpdateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateSchedule404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateSchedule404ApplicationProblemPlusJSONResponse) VisitUpdateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateSchedule409ApplicationProblemPlusJSONResponse struct {
+	ConflictApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateSchedule409ApplicationProblemPlusJSONResponse) VisitUpdateScheduleResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -10249,6 +12370,12 @@ type StrictServerInterface interface {
 	// LaunchJobTemplate Launch a job from a template
 	// (POST /api/v1/job-templates/{jobTemplateId}/launch)
 	LaunchJobTemplate(ctx context.Context, request LaunchJobTemplateRequestObject) (LaunchJobTemplateResponseObject, error)
+	// ListJobTemplateNotifications List the notification targets a template's jobs notify
+	// (GET /api/v1/job-templates/{jobTemplateId}/notifications)
+	ListJobTemplateNotifications(ctx context.Context, request ListJobTemplateNotificationsRequestObject) (ListJobTemplateNotificationsResponseObject, error)
+	// SetJobTemplateNotifications Replace the notification targets a template's jobs notify
+	// (PUT /api/v1/job-templates/{jobTemplateId}/notifications)
+	SetJobTemplateNotifications(ctx context.Context, request SetJobTemplateNotificationsRequestObject) (SetJobTemplateNotificationsResponseObject, error)
 	// ListJobs List jobs, newest first
 	// (GET /api/v1/jobs)
 	ListJobs(ctx context.Context, request ListJobsRequestObject) (ListJobsResponseObject, error)
@@ -10264,12 +12391,36 @@ type StrictServerInterface interface {
 	// ListJobHosts Per-host results of an Ansible job
 	// (GET /api/v1/jobs/{jobId}/hosts)
 	ListJobHosts(ctx context.Context, request ListJobHostsRequestObject) (ListJobHostsResponseObject, error)
+	// ListJobNotifications List the notifications sent (or being sent) about a job
+	// (GET /api/v1/jobs/{jobId}/notifications)
+	ListJobNotifications(ctx context.Context, request ListJobNotificationsRequestObject) (ListJobNotificationsResponseObject, error)
+	// RelaunchJob Run a job again
+	// (POST /api/v1/jobs/{jobId}/relaunch)
+	RelaunchJob(ctx context.Context, request RelaunchJobRequestObject) (RelaunchJobResponseObject, error)
 	// StreamJob Follow a job's output live (server-sent events)
 	// (GET /api/v1/jobs/{jobId}/stream)
 	StreamJob(ctx context.Context, request StreamJobRequestObject) (StreamJobResponseObject, error)
 	// GetCurrentUser The signed-in user
 	// (GET /api/v1/me)
 	GetCurrentUser(ctx context.Context, request GetCurrentUserRequestObject) (GetCurrentUserResponseObject, error)
+	// ListNotificationTargets List notification targets
+	// (GET /api/v1/notification-targets)
+	ListNotificationTargets(ctx context.Context, request ListNotificationTargetsRequestObject) (ListNotificationTargetsResponseObject, error)
+	// CreateNotificationTarget Create a notification target
+	// (POST /api/v1/notification-targets)
+	CreateNotificationTarget(ctx context.Context, request CreateNotificationTargetRequestObject) (CreateNotificationTargetResponseObject, error)
+	// DeleteNotificationTarget Delete a notification target
+	// (DELETE /api/v1/notification-targets/{targetId})
+	DeleteNotificationTarget(ctx context.Context, request DeleteNotificationTargetRequestObject) (DeleteNotificationTargetResponseObject, error)
+	// GetNotificationTarget Get a notification target
+	// (GET /api/v1/notification-targets/{targetId})
+	GetNotificationTarget(ctx context.Context, request GetNotificationTargetRequestObject) (GetNotificationTargetResponseObject, error)
+	// UpdateNotificationTarget Update a notification target
+	// (PATCH /api/v1/notification-targets/{targetId})
+	UpdateNotificationTarget(ctx context.Context, request UpdateNotificationTargetRequestObject) (UpdateNotificationTargetResponseObject, error)
+	// TestNotificationTarget Send a test notification
+	// (POST /api/v1/notification-targets/{targetId}/test)
+	TestNotificationTarget(ctx context.Context, request TestNotificationTargetRequestObject) (TestNotificationTargetResponseObject, error)
 	// ListProjects List projects (git repositories)
 	// (GET /api/v1/projects)
 	ListProjects(ctx context.Context, request ListProjectsRequestObject) (ListProjectsResponseObject, error)
@@ -10294,6 +12445,24 @@ type StrictServerInterface interface {
 	// DeleteRoleGrant Revoke a role
 	// (DELETE /api/v1/role-grants/{grantId})
 	DeleteRoleGrant(ctx context.Context, request DeleteRoleGrantRequestObject) (DeleteRoleGrantResponseObject, error)
+	// PreviewSchedule Check a cron expression and list its next run times
+	// (GET /api/v1/schedule-preview)
+	PreviewSchedule(ctx context.Context, request PreviewScheduleRequestObject) (PreviewScheduleResponseObject, error)
+	// ListSchedules List schedules
+	// (GET /api/v1/schedules)
+	ListSchedules(ctx context.Context, request ListSchedulesRequestObject) (ListSchedulesResponseObject, error)
+	// CreateSchedule Create a schedule
+	// (POST /api/v1/schedules)
+	CreateSchedule(ctx context.Context, request CreateScheduleRequestObject) (CreateScheduleResponseObject, error)
+	// DeleteSchedule Delete a schedule
+	// (DELETE /api/v1/schedules/{scheduleId})
+	DeleteSchedule(ctx context.Context, request DeleteScheduleRequestObject) (DeleteScheduleResponseObject, error)
+	// GetSchedule Get a schedule
+	// (GET /api/v1/schedules/{scheduleId})
+	GetSchedule(ctx context.Context, request GetScheduleRequestObject) (GetScheduleResponseObject, error)
+	// UpdateSchedule Update a schedule
+	// (PATCH /api/v1/schedules/{scheduleId})
+	UpdateSchedule(ctx context.Context, request UpdateScheduleRequestObject) (UpdateScheduleResponseObject, error)
 	// ListTeams List teams
 	// (GET /api/v1/teams)
 	ListTeams(ctx context.Context, request ListTeamsRequestObject) (ListTeamsResponseObject, error)
@@ -11529,6 +13698,65 @@ func (sh *strictHandler) LaunchJobTemplate(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// ListJobTemplateNotifications operation middleware
+func (sh *strictHandler) ListJobTemplateNotifications(w http.ResponseWriter, r *http.Request, jobTemplateId JobTemplateId) {
+	var request ListJobTemplateNotificationsRequestObject
+
+	request.JobTemplateId = jobTemplateId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListJobTemplateNotifications(ctx, request.(ListJobTemplateNotificationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListJobTemplateNotifications")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListJobTemplateNotificationsResponseObject); ok {
+		if err := validResponse.VisitListJobTemplateNotificationsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SetJobTemplateNotifications operation middleware
+func (sh *strictHandler) SetJobTemplateNotifications(w http.ResponseWriter, r *http.Request, jobTemplateId JobTemplateId) {
+	var request SetJobTemplateNotificationsRequestObject
+
+	request.JobTemplateId = jobTemplateId
+
+	var body SetJobTemplateNotificationsJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SetJobTemplateNotifications(ctx, request.(SetJobTemplateNotificationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SetJobTemplateNotifications")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SetJobTemplateNotificationsResponseObject); ok {
+		if err := validResponse.VisitSetJobTemplateNotificationsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // ListJobs operation middleware
 func (sh *strictHandler) ListJobs(w http.ResponseWriter, r *http.Request, params ListJobsParams) {
 	var request ListJobsRequestObject
@@ -11660,6 +13888,68 @@ func (sh *strictHandler) ListJobHosts(w http.ResponseWriter, r *http.Request, jo
 	}
 }
 
+// ListJobNotifications operation middleware
+func (sh *strictHandler) ListJobNotifications(w http.ResponseWriter, r *http.Request, jobId JobId) {
+	var request ListJobNotificationsRequestObject
+
+	request.JobId = jobId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListJobNotifications(ctx, request.(ListJobNotificationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListJobNotifications")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListJobNotificationsResponseObject); ok {
+		if err := validResponse.VisitListJobNotificationsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RelaunchJob operation middleware
+func (sh *strictHandler) RelaunchJob(w http.ResponseWriter, r *http.Request, jobId JobId) {
+	var request RelaunchJobRequestObject
+
+	request.JobId = jobId
+
+	var body RelaunchJobJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RelaunchJob(ctx, request.(RelaunchJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RelaunchJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RelaunchJobResponseObject); ok {
+		if err := validResponse.VisitRelaunchJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // StreamJob operation middleware
 func (sh *strictHandler) StreamJob(w http.ResponseWriter, r *http.Request, jobId JobId, params StreamJobParams) {
 	var request StreamJobRequestObject
@@ -11704,6 +13994,174 @@ func (sh *strictHandler) GetCurrentUser(w http.ResponseWriter, r *http.Request) 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetCurrentUserResponseObject); ok {
 		if err := validResponse.VisitGetCurrentUserResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListNotificationTargets operation middleware
+func (sh *strictHandler) ListNotificationTargets(w http.ResponseWriter, r *http.Request, params ListNotificationTargetsParams) {
+	var request ListNotificationTargetsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListNotificationTargets(ctx, request.(ListNotificationTargetsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListNotificationTargets")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListNotificationTargetsResponseObject); ok {
+		if err := validResponse.VisitListNotificationTargetsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateNotificationTarget operation middleware
+func (sh *strictHandler) CreateNotificationTarget(w http.ResponseWriter, r *http.Request) {
+	var request CreateNotificationTargetRequestObject
+
+	var body CreateNotificationTargetJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateNotificationTarget(ctx, request.(CreateNotificationTargetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateNotificationTarget")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateNotificationTargetResponseObject); ok {
+		if err := validResponse.VisitCreateNotificationTargetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteNotificationTarget operation middleware
+func (sh *strictHandler) DeleteNotificationTarget(w http.ResponseWriter, r *http.Request, targetId TargetId) {
+	var request DeleteNotificationTargetRequestObject
+
+	request.TargetId = targetId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteNotificationTarget(ctx, request.(DeleteNotificationTargetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteNotificationTarget")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteNotificationTargetResponseObject); ok {
+		if err := validResponse.VisitDeleteNotificationTargetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetNotificationTarget operation middleware
+func (sh *strictHandler) GetNotificationTarget(w http.ResponseWriter, r *http.Request, targetId TargetId) {
+	var request GetNotificationTargetRequestObject
+
+	request.TargetId = targetId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetNotificationTarget(ctx, request.(GetNotificationTargetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetNotificationTarget")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetNotificationTargetResponseObject); ok {
+		if err := validResponse.VisitGetNotificationTargetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdateNotificationTarget operation middleware
+func (sh *strictHandler) UpdateNotificationTarget(w http.ResponseWriter, r *http.Request, targetId TargetId) {
+	var request UpdateNotificationTargetRequestObject
+
+	request.TargetId = targetId
+
+	var body UpdateNotificationTargetJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateNotificationTarget(ctx, request.(UpdateNotificationTargetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateNotificationTarget")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateNotificationTargetResponseObject); ok {
+		if err := validResponse.VisitUpdateNotificationTargetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// TestNotificationTarget operation middleware
+func (sh *strictHandler) TestNotificationTarget(w http.ResponseWriter, r *http.Request, targetId TargetId) {
+	var request TestNotificationTargetRequestObject
+
+	request.TargetId = targetId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.TestNotificationTarget(ctx, request.(TestNotificationTargetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "TestNotificationTarget")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(TestNotificationTargetResponseObject); ok {
+		if err := validResponse.VisitTestNotificationTargetResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -11929,6 +14387,174 @@ func (sh *strictHandler) DeleteRoleGrant(w http.ResponseWriter, r *http.Request,
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(DeleteRoleGrantResponseObject); ok {
 		if err := validResponse.VisitDeleteRoleGrantResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PreviewSchedule operation middleware
+func (sh *strictHandler) PreviewSchedule(w http.ResponseWriter, r *http.Request, params PreviewScheduleParams) {
+	var request PreviewScheduleRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PreviewSchedule(ctx, request.(PreviewScheduleRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PreviewSchedule")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PreviewScheduleResponseObject); ok {
+		if err := validResponse.VisitPreviewScheduleResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListSchedules operation middleware
+func (sh *strictHandler) ListSchedules(w http.ResponseWriter, r *http.Request, params ListSchedulesParams) {
+	var request ListSchedulesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListSchedules(ctx, request.(ListSchedulesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListSchedules")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListSchedulesResponseObject); ok {
+		if err := validResponse.VisitListSchedulesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateSchedule operation middleware
+func (sh *strictHandler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
+	var request CreateScheduleRequestObject
+
+	var body CreateScheduleJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateSchedule(ctx, request.(CreateScheduleRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateSchedule")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateScheduleResponseObject); ok {
+		if err := validResponse.VisitCreateScheduleResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteSchedule operation middleware
+func (sh *strictHandler) DeleteSchedule(w http.ResponseWriter, r *http.Request, scheduleId ScheduleId) {
+	var request DeleteScheduleRequestObject
+
+	request.ScheduleId = scheduleId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteSchedule(ctx, request.(DeleteScheduleRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteSchedule")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteScheduleResponseObject); ok {
+		if err := validResponse.VisitDeleteScheduleResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetSchedule operation middleware
+func (sh *strictHandler) GetSchedule(w http.ResponseWriter, r *http.Request, scheduleId ScheduleId) {
+	var request GetScheduleRequestObject
+
+	request.ScheduleId = scheduleId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetSchedule(ctx, request.(GetScheduleRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetSchedule")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetScheduleResponseObject); ok {
+		if err := validResponse.VisitGetScheduleResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdateSchedule operation middleware
+func (sh *strictHandler) UpdateSchedule(w http.ResponseWriter, r *http.Request, scheduleId ScheduleId) {
+	var request UpdateScheduleRequestObject
+
+	request.ScheduleId = scheduleId
+
+	var body UpdateScheduleJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateSchedule(ctx, request.(UpdateScheduleRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateSchedule")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateScheduleResponseObject); ok {
+		if err := validResponse.VisitUpdateScheduleResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -12591,225 +15217,270 @@ func (sh *strictHandler) GetRunnerJobSpec(w http.ResponseWriter, r *http.Request
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"ywQDmFT6CH9O+BWA5v8/AA==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

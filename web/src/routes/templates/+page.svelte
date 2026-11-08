@@ -74,7 +74,7 @@
 					{#each templates as t (t.id)}
 						<tr>
 							<td>
-								{t.name}
+								<a href="/templates/{t.id}">{t.name}</a>
 								{#if t.description}<div class="muted small">{t.description}</div>{/if}
 							</td>
 							<td>{t.jobType}</td>
