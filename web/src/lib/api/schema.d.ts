@@ -1961,6 +1961,10 @@ export interface components {
              *     `hostName`) and `playbook_stats`.
              */
             type: string;
+            /**
+             * @description One line of output. It may contain ANSI escape sequences, such
+             *     as the colors in the output of Ansible jobs.
+             */
             stdout: string;
             hostName: string | null;
             data: {

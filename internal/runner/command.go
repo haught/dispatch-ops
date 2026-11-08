@@ -160,9 +160,8 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 		// Job pods start without known hosts.
 		"ANSIBLE_HOST_KEY_CHECKING=False",
 		"ANSIBLE_RETRY_FILES_ENABLED=False",
-		// The log is plain text.
-		"ANSIBLE_NOCOLOR=True",
-		"ANSIBLE_FORCE_COLOR=False",
+		// Output is a pipe, not a terminal; the web log renders ANSI colors.
+		"ANSIBLE_FORCE_COLOR=True",
 		// Writable places, whatever the image's home directory is.
 		"ANSIBLE_LOCAL_TEMP="+tmp,
 		"ANSIBLE_SSH_CONTROL_PATH_DIR="+ws.path("ansible", "cp"),

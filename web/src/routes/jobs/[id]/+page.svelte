@@ -12,6 +12,7 @@
 		type JobHostSummary,
 		type NotificationDelivery
 	} from '#lib/api/client.js';
+	import { parseAnsi } from '#lib/ansi.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import { fmtDuration, fmtTime } from '#lib/format.js';
 
@@ -397,7 +398,11 @@
 																	<StatusBadge status={outcome(e)} />
 																	{#if e.data?.ignored}<span class="muted small">ignored</span>{/if}
 																</td>
-																<td class="msg">{e.data?.msg ?? e.data?.stderr ?? ''}</td>
+																<td class="msg"
+																	>{#each parseAnsi(String(e.data?.msg ?? e.data?.stderr ?? '')) as seg, i (i)}<span
+																			class={seg.cls}>{seg.text}</span
+																		>{/each}</td
+																>
 															</tr>
 														{/each}
 													</tbody>
@@ -462,7 +467,9 @@
 
 	<section class="card log-card">
 		<pre class="log" bind:this={logEl} onscroll={onScroll}>{#each lines as line (line.seq)}<span
-					class="line {line.type}">{line.stdout}</span
+					class="line {line.type}"
+					>{#each parseAnsi(line.stdout) as seg, i (i)}<span class={seg.cls}>{seg.text}</span
+						>{/each}</span
 				>{'\n'}{:else}<span class="muted">{finished ? 'No output.' : 'Waiting for output…'}</span
 				>{/each}</pre>
 		{#if !follow && live}

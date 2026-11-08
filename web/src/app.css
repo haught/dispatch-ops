@@ -11,6 +11,23 @@
 	--ok: #1e8e3e;
 	--warn: #a15c00;
 	--radius: 8px;
+	/* ANSI colors in job output. */
+	--ansi-black: #1c2127;
+	--ansi-red: #c0392b;
+	--ansi-green: #1e8e3e;
+	--ansi-yellow: #a15c00;
+	--ansi-blue: #2563eb;
+	--ansi-magenta: #a626a4;
+	--ansi-cyan: #0e7c86;
+	--ansi-white: #5f6b7a;
+	--ansi-bright-black: #6b7280;
+	--ansi-bright-red: #e0443a;
+	--ansi-bright-green: #2da44e;
+	--ansi-bright-yellow: #b7791f;
+	--ansi-bright-blue: #3b82f6;
+	--ansi-bright-magenta: #c026d3;
+	--ansi-bright-cyan: #0891b2;
+	--ansi-bright-white: #1c2127;
 	font-family:
 		system-ui,
 		-apple-system,
@@ -31,6 +48,22 @@
 		--danger: #ff6b5b;
 		--ok: #4cc26a;
 		--warn: #f0a33a;
+		--ansi-black: #6b7280;
+		--ansi-red: #ff6b5b;
+		--ansi-green: #4cc26a;
+		--ansi-yellow: #f0a33a;
+		--ansi-blue: #4f8cff;
+		--ansi-magenta: #d67bd8;
+		--ansi-cyan: #38c3cf;
+		--ansi-white: #c9ced6;
+		--ansi-bright-black: #8b949e;
+		--ansi-bright-red: #ff8a7e;
+		--ansi-bright-green: #6fdc8c;
+		--ansi-bright-yellow: #ffc66d;
+		--ansi-bright-blue: #79a8ff;
+		--ansi-bright-magenta: #e99be9;
+		--ansi-bright-cyan: #6ee0ea;
+		--ansi-bright-white: #ffffff;
 	}
 }
 
@@ -283,4 +316,150 @@ input[type='checkbox'] {
 .details dd {
 	margin: 0;
 	overflow-wrap: anywhere;
+}
+
+/* ANSI styles in job output (see lib/ansi.ts). */
+
+.ansi-fg-black {
+	color: var(--ansi-black);
+}
+
+.ansi-fg-red {
+	color: var(--ansi-red);
+}
+
+.ansi-fg-green {
+	color: var(--ansi-green);
+}
+
+.ansi-fg-yellow {
+	color: var(--ansi-yellow);
+}
+
+.ansi-fg-blue {
+	color: var(--ansi-blue);
+}
+
+.ansi-fg-magenta {
+	color: var(--ansi-magenta);
+}
+
+.ansi-fg-cyan {
+	color: var(--ansi-cyan);
+}
+
+.ansi-fg-white {
+	color: var(--ansi-white);
+}
+
+.ansi-fg-bright-black {
+	color: var(--ansi-bright-black);
+}
+
+.ansi-fg-bright-red {
+	color: var(--ansi-bright-red);
+}
+
+.ansi-fg-bright-green {
+	color: var(--ansi-bright-green);
+}
+
+.ansi-fg-bright-yellow {
+	color: var(--ansi-bright-yellow);
+}
+
+.ansi-fg-bright-blue {
+	color: var(--ansi-bright-blue);
+}
+
+.ansi-fg-bright-magenta {
+	color: var(--ansi-bright-magenta);
+}
+
+.ansi-fg-bright-cyan {
+	color: var(--ansi-bright-cyan);
+}
+
+.ansi-fg-bright-white {
+	color: var(--ansi-bright-white);
+}
+
+.ansi-bg-black {
+	background: color-mix(in srgb, var(--ansi-black) 25%, transparent);
+}
+
+.ansi-bg-red {
+	background: color-mix(in srgb, var(--ansi-red) 25%, transparent);
+}
+
+.ansi-bg-green {
+	background: color-mix(in srgb, var(--ansi-green) 25%, transparent);
+}
+
+.ansi-bg-yellow {
+	background: color-mix(in srgb, var(--ansi-yellow) 25%, transparent);
+}
+
+.ansi-bg-blue {
+	background: color-mix(in srgb, var(--ansi-blue) 25%, transparent);
+}
+
+.ansi-bg-magenta {
+	background: color-mix(in srgb, var(--ansi-magenta) 25%, transparent);
+}
+
+.ansi-bg-cyan {
+	background: color-mix(in srgb, var(--ansi-cyan) 25%, transparent);
+}
+
+.ansi-bg-white {
+	background: color-mix(in srgb, var(--ansi-white) 25%, transparent);
+}
+
+.ansi-bg-bright-black {
+	background: color-mix(in srgb, var(--ansi-bright-black) 25%, transparent);
+}
+
+.ansi-bg-bright-red {
+	background: color-mix(in srgb, var(--ansi-bright-red) 25%, transparent);
+}
+
+.ansi-bg-bright-green {
+	background: color-mix(in srgb, var(--ansi-bright-green) 25%, transparent);
+}
+
+.ansi-bg-bright-yellow {
+	background: color-mix(in srgb, var(--ansi-bright-yellow) 25%, transparent);
+}
+
+.ansi-bg-bright-blue {
+	background: color-mix(in srgb, var(--ansi-bright-blue) 25%, transparent);
+}
+
+.ansi-bg-bright-magenta {
+	background: color-mix(in srgb, var(--ansi-bright-magenta) 25%, transparent);
+}
+
+.ansi-bg-bright-cyan {
+	background: color-mix(in srgb, var(--ansi-bright-cyan) 25%, transparent);
+}
+
+.ansi-bg-bright-white {
+	background: color-mix(in srgb, var(--ansi-bright-white) 25%, transparent);
+}
+
+.ansi-bold {
+	font-weight: 600;
+}
+
+.ansi-dim {
+	opacity: 0.7;
+}
+
+.ansi-italic {
+	font-style: italic;
+}
+
+.ansi-underline {
+	text-decoration: underline;
 }
