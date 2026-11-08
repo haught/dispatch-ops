@@ -427,6 +427,27 @@ host (Ansible's own recap once the playbook ends), and
 `GET /api/v1/jobs/{id}/events?hostName=…` lists one host's task results. The
 job page shows both.
 
+#### Roles and collections
+
+Before the playbook starts, the runner installs what the project's
+requirements files list, with `ansible-galaxy`, in this order:
+
+| File | Command |
+|---|---|
+| `roles/requirements.yml` | `ansible-galaxy role install -r …` |
+| `collections/requirements.yml` | `ansible-galaxy collection install -r …` |
+| `requirements.yml` | `ansible-galaxy install -r …` (roles and collections) |
+
+Each may also end in `.yaml`. They install into the job's workspace, which
+`ANSIBLE_COLLECTIONS_PATH` and `ANSIBLE_ROLES_PATH` put ahead of Ansible's
+default directories (this replaces `collections_path` and `roles_path` in the
+project's `ansible.cfg`; playbook-adjacent `collections/` and `roles/`
+directories still work). The installs use the project's `scm` credential, so
+Git sources on the same server as the project need no extra setup. The
+output goes to the job log, and the job fails if an install fails. The
+timeout covers the installs too. Collections baked into the EE image are
+still found, so an image can make a requirements file unnecessary.
+
 ### What the command sees
 
 | Variable | |

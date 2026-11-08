@@ -132,6 +132,21 @@ func (e *emitter) consume(r io.Reader, marker string) {
 	}
 }
 
+// lineWriter returns a writer whose lines become stdout events, and a
+// function that ends it and waits until its last line is queued.
+func (e *emitter) lineWriter() (io.Writer, func()) {
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		e.consume(pr, "")
+		close(done)
+	}()
+	return pw, func() {
+		pw.Close()
+		<-done
+	}
+}
+
 // splitLines is bufio.ScanLines, except that lines longer than
 // maxEventBytes are returned in pieces instead of failing the scan.
 func splitLines(data []byte, atEOF bool) (int, []byte, error) {

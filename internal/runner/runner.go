@@ -269,6 +269,17 @@ func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev 
 		if err != nil {
 			return fail("Could not check out the project: " + err.Error())
 		}
+		if spec.JobType == runnerapi.Ansible {
+			out, flush := ev.lineWriter()
+			err := installRequirements(stopCtx, cfg, ws, spec.Project, spec.Verbosity, ev.runner, out)
+			flush()
+			if r := stop.reason(); r != stopNone {
+				return stopped(result, r, timeout, ev)
+			}
+			if err != nil {
+				return fail("Could not install the project's requirements: " + err.Error())
+			}
+		}
 	}
 	c, err := buildCommand(spec, ws)
 	if err != nil {
@@ -417,6 +428,10 @@ type workspace struct {
 	inventory  string // the inventory file, or "" if the job has none
 	vars       string // the extra vars file
 	projectDir string // where the project is checked out, or "" if none
+	// ansibleEnv is extra environment for ansible-playbook: the search
+	// paths of the roles and collections installed from the project's
+	// requirements files.
+	ansibleEnv []string
 }
 
 // path returns a path inside the workspace's private directory, which the

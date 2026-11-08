@@ -168,6 +168,7 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 		"ANSIBLE_SSH_CONTROL_PATH_DIR="+ws.path("ansible", "cp"),
 		"PYTHONUNBUFFERED=1",
 	)
+	env = append(env, ws.ansibleEnv...)
 	return command{argv: argv, dir: ws.projectDir, env: env, eventMarker: marker}, nil
 }
 
