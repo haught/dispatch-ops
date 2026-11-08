@@ -48,7 +48,7 @@
 			<p class="error" role="alert">{error}</p>
 		{/if}
 		<button type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
-		<p class="muted hint">Single sign-on (OIDC) arrives in a later milestone.</p>
+		<p class="muted hint">Single sign-on (OIDC) is not available yet.</p>
 	</form>
 </div>
 

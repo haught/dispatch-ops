@@ -15,7 +15,7 @@
 		{ href: '/templates', label: 'Job templates' },
 		{ href: '/tokens', label: 'API tokens' }
 	];
-	// Managed through the API until their pages arrive; projects come with milestone 3.
+	// Managed through the API until their pages arrive; projects are not implemented yet.
 	const upcoming = ['Inventories', 'Credentials', 'Execution environments', 'Projects'];
 
 	const isLogin = $derived(page.url.pathname === '/login');

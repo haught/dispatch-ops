@@ -1,4 +1,4 @@
--- Core domain schema. API endpoints for these arrive in milestone 2+.
+-- Core domain schema.
 
 CREATE TABLE inventories (
     id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),

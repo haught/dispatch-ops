@@ -1,4 +1,4 @@
--- Columns and notifications used to run jobs (milestone 2).
+-- Columns and notifications used to run jobs.
 
 ALTER TABLE jobs
     -- SHA-256 of the one-time token the job's runner authenticates with.

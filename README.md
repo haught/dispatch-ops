@@ -1,11 +1,10 @@
 # Dispatch Ops
 
 A Kubernetes-native automation platform for running Ansible playbooks, scripts
-and container commands as jobs. See [PLAN.md](PLAN.md) for the design and
-roadmap.
+and container commands as jobs.
 
-**Status:** milestone 2 (run something). Container jobs run on Kubernetes
-with live logs. Inventories, credentials, execution environments and job
+**Status:** early development. Container jobs run on Kubernetes with live
+logs; Ansible and script jobs (with git projects) are not supported yet. Inventories, credentials, execution environments and job
 templates are managed through the API; the UI lists jobs and templates,
 launches templates and streams job output.
 
@@ -55,8 +54,8 @@ make task-manager  # in another terminal, next to `make run`
 ```
 
 Job pods reach the API on the host at `http://host.docker.internal:8080`
-(`DISPATCH_RUNNER_API_URL`). If your `.env` predates milestone 2, copy the
-new variables from `.env.example`.
+(`DISPATCH_RUNNER_API_URL`). If your `.env` is older than
+`.env.example`, copy the variables it is missing.
 
 Then register the image and create a template, e.g. with an API token:
 
@@ -113,8 +112,8 @@ task manager against a fake Kubernetes client.
 - **Runners:** each job gets a one-time token (`doj_…`) that only works on
   `/runner/v1/jobs/<its id>/…`, and stops working when the job ends.
 
-OIDC sign-in and RBAC arrive in milestone 4. Until then, every signed-in user
-can manage every resource and launch any template.
+OIDC sign-in and role-based access control are not implemented yet: every
+signed-in user can manage every resource and launch any template.
 
 ## How a job runs
 
