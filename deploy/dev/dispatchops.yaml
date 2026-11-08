@@ -27,6 +27,4 @@ spec:
   # stay readable.
   encryptionKeySecret:
     name: dispatch-ops-dev-encryption-key
-  # Reached with kubectl port-forward over plain HTTP.
-  secureCookies: false
   logLevel: debug

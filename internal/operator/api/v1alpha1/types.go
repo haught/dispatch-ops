@@ -161,6 +161,29 @@ type APISpec struct {
 	// Ingress, if set, exposes the API server and UI.
 	// +optional
 	Ingress *IngressSpec `json:"ingress,omitempty"`
+	// TLS configures the HTTPS the API server serves, on port 8443 (or plain
+	// HTTP on 8080 when disabled).
+	// +kubebuilder:default={}
+	// +optional
+	TLS APITLSSpec `json:"tls,omitempty"`
+}
+
+// APITLSSpec configures the API server's certificate.
+type APITLSSpec struct {
+	// Enabled serves HTTPS. Turn it off only where something else encrypts
+	// traffic to the pods, such as a service mesh.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// SecretName is a kubernetes.io/tls Secret (tls.crt, tls.key and
+	// optionally ca.crt) to serve, such as one cert-manager keeps renewed;
+	// the server picks up a renewed certificate without a restart. Job pods
+	// reach the API at <name>-api.<namespace>.svc and trust its ca.crt (or
+	// tls.crt), so the certificate must be valid for that name. Without it,
+	// the operator generates a self-signed ECDSA P-384 certificate in
+	// <name>-api-tls; delete that Secret to have it generated again.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
 }
 
 // IngressSpec configures an Ingress for the API server.

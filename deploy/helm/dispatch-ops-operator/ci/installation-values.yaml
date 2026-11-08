@@ -19,6 +19,9 @@ installation:
     usernameClaim: preferred_username
     groupsClaim: groups
     displayName: Corp SSO
+  tls:
+    enabled: true
+    existingSecret: dispatch-ops-api-tls
   spec:
     api:
       replicas: 2

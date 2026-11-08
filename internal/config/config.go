@@ -17,8 +17,17 @@ import (
 type Config struct {
 	// DatabaseURL is a PostgreSQL connection string (DISPATCH_DATABASE_URL).
 	DatabaseURL string
-	// ListenAddr is the address the API server binds to (DISPATCH_LISTEN_ADDR).
+	// ListenAddr is the address the API server binds to
+	// (DISPATCH_LISTEN_ADDR): :8443 by default, or :8080 without TLS.
 	ListenAddr string
+	// TLS serves HTTPS (DISPATCH_TLS, default true).
+	TLS bool
+	// TLSCertFile and TLSKeyFile are a PEM key pair to serve
+	// (DISPATCH_TLS_CERT_FILE, DISPATCH_TLS_KEY_FILE), reloaded when they
+	// change. Without them, serve makes a self-signed ECDSA P-384
+	// certificate at startup.
+	TLSCertFile string
+	TLSKeyFile  string
 	// SecureCookies marks the session cookie Secure; turn off only for plain-HTTP
 	// local development (DISPATCH_SECURE_COOKIES).
 	SecureCookies bool
@@ -91,8 +100,12 @@ type TaskManager struct {
 	// cluster (DISPATCH_KUBE_CONTEXT). In a pod, the in-cluster config is used.
 	KubeContext string
 	// RunnerAPIURL is the API server's base URL as job pods reach it
-	// (DISPATCH_RUNNER_API_URL), e.g. http://dispatch-ops.dispatch-system.svc:8080.
+	// (DISPATCH_RUNNER_API_URL), e.g. https://dispatch-ops.dispatch-system.svc:8443.
 	RunnerAPIURL string
+	// RunnerAPITLSDir is a directory holding the API server's certificate
+	// Secret (DISPATCH_RUNNER_API_TLS_DIR). Job pods trust its ca.crt, or
+	// its tls.crt when there is no ca.crt, besides the system's roots.
+	RunnerAPITLSDir string
 	// MaxConcurrentJobs limits jobs waiting or running at once
 	// (DISPATCH_MAX_CONCURRENT_JOBS).
 	MaxConcurrentJobs int
@@ -128,7 +141,8 @@ func (c Config) MetricsAddrOr(def string) string {
 func Load() (Config, error) {
 	c := Config{
 		DatabaseURL:   os.Getenv("DISPATCH_DATABASE_URL"),
-		ListenAddr:    getenv("DISPATCH_LISTEN_ADDR", ":8080"),
+		TLSCertFile:   os.Getenv("DISPATCH_TLS_CERT_FILE"),
+		TLSKeyFile:    os.Getenv("DISPATCH_TLS_KEY_FILE"),
 		LogLevel:      getenv("DISPATCH_LOG_LEVEL", "info"),
 		LogFormat:     getenv("DISPATCH_LOG_FORMAT", "json"),
 		EncryptionKey: os.Getenv("DISPATCH_ENCRYPTION_KEY"),
@@ -143,9 +157,10 @@ func Load() (Config, error) {
 			DisplayName:   getenv("DISPATCH_OIDC_DISPLAY_NAME", "Single sign-on"),
 		},
 		TaskManager: TaskManager{
-			Namespace:    getenv("DISPATCH_JOB_NAMESPACE", "dispatch-jobs"),
-			KubeContext:  os.Getenv("DISPATCH_KUBE_CONTEXT"),
-			RunnerAPIURL: strings.TrimRight(os.Getenv("DISPATCH_RUNNER_API_URL"), "/"),
+			Namespace:       getenv("DISPATCH_JOB_NAMESPACE", "dispatch-jobs"),
+			KubeContext:     os.Getenv("DISPATCH_KUBE_CONTEXT"),
+			RunnerAPIURL:    strings.TrimRight(os.Getenv("DISPATCH_RUNNER_API_URL"), "/"),
+			RunnerAPITLSDir: os.Getenv("DISPATCH_RUNNER_API_TLS_DIR"),
 		},
 	}
 	c.MetricsAddr, c.metricsAddrSet = os.LookupEnv("DISPATCH_METRICS_ADDR")
@@ -160,6 +175,13 @@ func Load() (Config, error) {
 		}
 	}
 	var err error
+	c.TLS, err = getbool("DISPATCH_TLS", true)
+	collect(err)
+	if c.TLS {
+		c.ListenAddr = getenv("DISPATCH_LISTEN_ADDR", ":8443")
+	} else {
+		c.ListenAddr = getenv("DISPATCH_LISTEN_ADDR", ":8080")
+	}
 	c.SecureCookies, err = getbool("DISPATCH_SECURE_COOKIES", true)
 	collect(err)
 	c.AutoMigrate, err = getbool("DISPATCH_AUTO_MIGRATE", false)
@@ -182,6 +204,9 @@ func Load() (Config, error) {
 
 	if c.DatabaseURL == "" {
 		errs = append(errs, errors.New("DISPATCH_DATABASE_URL is required"))
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		errs = append(errs, errors.New("set both DISPATCH_TLS_CERT_FILE and DISPATCH_TLS_KEY_FILE, or neither"))
 	}
 	if c.ExternalURL != "" {
 		if u, err := url.Parse(c.ExternalURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

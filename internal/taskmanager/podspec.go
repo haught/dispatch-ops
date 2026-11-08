@@ -27,6 +27,7 @@ const (
 const (
 	tokenDir     = "/var/run/dispatch-ops"
 	tokenFile    = tokenDir + "/token"
+	apiCAFile    = tokenDir + "/ca.crt"
 	workDir      = "/runner"
 	secretsDir   = workDir + "/secrets"
 	containerApp = "runner"
@@ -50,12 +51,17 @@ func labelsFor(job store.Job) map[string]string {
 	}
 }
 
-// buildTokenSecret holds the job's one-time runner token.
-func buildTokenSecret(job store.Job, namespace, token string) *corev1.Secret {
+// buildTokenSecret holds the job's one-time runner token and, if not empty,
+// the certificates the runner trusts to reach the API (ca.crt).
+func buildTokenSecret(job store.Job, namespace, token string, ca []byte) *corev1.Secret {
+	data := map[string][]byte{"token": []byte(token)}
+	if len(ca) > 0 {
+		data["ca.crt"] = ca
+	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: tokenSecretName(job.ID.String()), Namespace: namespace, Labels: labelsFor(job)},
 		Type:       corev1.SecretTypeOpaque,
-		Data:       map[string][]byte{"token": []byte(token)},
+		Data:       data,
 	}
 }
 
@@ -80,8 +86,8 @@ func buildPullSecret(job store.Job, namespace string, inputs map[string]string) 
 
 // buildJob returns the Kubernetes Job that runs a dispatch-ops job: one pod,
 // never retried, running the execution environment image, whose entrypoint
-// is the runner.
-func buildJob(job store.Job, cfg Config, withPullSecret bool) *batchv1.Job {
+// is the runner. withCA means the token Secret holds ca.crt.
+func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.Job {
 	id := job.ID.String()
 	ee := job.Config.ExecutionEnvironment
 	labels := labelsFor(job)
@@ -132,6 +138,10 @@ func buildJob(job store.Job, cfg Config, withPullSecret bool) *batchv1.Job {
 				Medium: corev1.StorageMediumMemory, SizeLimit: &secretsSize,
 			}}},
 		},
+	}
+	if withCA {
+		c := &pod.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: "DISPATCH_API_CA_FILE", Value: apiCAFile})
 	}
 	if withPullSecret {
 		pod.ImagePullSecrets = []corev1.LocalObjectReference{{Name: pullSecretName(id)}}

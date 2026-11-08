@@ -38,7 +38,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}"
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/dispatch-ops /usr/local/bin/dispatch-ops
-EXPOSE 8080
+EXPOSE 8443
 # distroless's nonroot user, by number so Kubernetes can enforce runAsNonRoot.
 USER 65532:65532
 ENTRYPOINT ["dispatch-ops"]

@@ -106,6 +106,20 @@ installation:
     groupsClaim: ""
     displayName: ""
 
+  # The API server serves HTTPS on port 8443. Without existingSecret, the
+  # operator generates a self-signed ECDSA P-384 certificate in
+  # <name>-api-tls.
+  tls:
+    # Serve plain HTTP on 8080 instead; only where something else encrypts
+    # traffic to the pods, such as a service mesh.
+    enabled: true
+    # A kubernetes.io/tls Secret to serve instead, such as a cert-manager
+    # Certificate's secretName. Renewals are picked up without a restart.
+    # Job pods reach the API at <name>-api.<namespace>.svc, so the
+    # Certificate's dnsNames must include that name, and they trust its
+    # ca.crt (or, without one, tls.crt and the system's roots).
+    existingSecret: ""
+
   # Any other DispatchOps spec fields (image, api, taskManager, retention,
   # secureCookies, ...); the settings above take precedence.
   # `kubectl explain dispatchops.spec` documents them.

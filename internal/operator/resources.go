@@ -3,8 +3,10 @@ package operator
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -16,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"dispatch-ops/internal/operator/api/v1alpha1"
+	"dispatch-ops/internal/tlscert"
 )
 
 // Components, used in names and labels.
@@ -27,12 +30,19 @@ const (
 )
 
 const (
-	apiPort       = 8080
+	apiHTTPSPort  = 8443
+	apiHTTPPort   = 8080
 	metricsPort   = 9090
 	postgresPort  = 5432
 	postgresUser  = "dispatch"
 	postgresDB    = "dispatch"
 	adminPassPath = "/var/run/dispatch-ops/admin"
+	// Where the API certificate Secret is mounted: in the API server, which
+	// serves it, and in the task manager, which hands its CA to job pods.
+	apiTLSPath   = "/var/run/dispatch-ops/tls"
+	runnerCAPath = "/var/run/dispatch-ops/api-tls"
+	// selfSignedValidity is how long the generated certificate is valid.
+	selfSignedValidity = 10 * 365 * 24 * time.Hour
 	// ManagedBy is the app.kubernetes.io/managed-by label of every object
 	// the operator creates. (Job pods, which the task manager creates, are
 	// labeled managed-by=dispatch-ops instead.)
@@ -122,6 +132,82 @@ func (in install) generatedSecret(component, name string, data map[string]string
 	s := &corev1.Secret{ObjectMeta: in.meta(component, name), Type: corev1.SecretTypeOpaque, StringData: data}
 	s.Annotations = map[string]string{"dispatch-ops.io/generated": "true"}
 	return s
+}
+
+// --- API certificate -------------------------------------------------------------
+
+func (in install) tlsEnabled() bool {
+	return in.Spec.API.TLS.Enabled == nil || *in.Spec.API.TLS.Enabled
+}
+
+// apiTLSSecretName is the Secret the API server serves: the user's, or the
+// one the operator generates.
+func (in install) apiTLSSecretName() string {
+	if n := in.Spec.API.TLS.SecretName; n != "" {
+		return n
+	}
+	return in.name(componentAPI) + "-tls"
+}
+
+func (in install) apiPort() int32 {
+	if in.tlsEnabled() {
+		return apiHTTPSPort
+	}
+	return apiHTTPPort
+}
+
+// apiPortName is the API's container and Service port name. Some ingress
+// controllers (Traefik) use HTTPS to a backend port named https.
+func (in install) apiPortName() string {
+	if in.tlsEnabled() {
+		return "https"
+	}
+	return "http"
+}
+
+// apiCertHosts are the names the generated certificate is valid for: the
+// Service's, which job pods use, localhost (for port-forwarding), and the
+// ingress and external hosts.
+func (in install) apiCertHosts() []string {
+	svc := in.name(componentAPI)
+	hosts := []string{
+		svc + "." + in.Namespace + ".svc", svc, svc + "." + in.Namespace,
+		svc + "." + in.Namespace + ".svc.cluster.local", "localhost", "127.0.0.1",
+	}
+	if ing := in.Spec.API.Ingress; ing != nil && ing.Host != "" {
+		hosts = append(hosts, ing.Host)
+	}
+	if u, err := url.Parse(in.Spec.ExternalURL); err == nil && u.Hostname() != "" {
+		hosts = append(hosts, u.Hostname())
+	}
+	return hosts
+}
+
+// generatedTLSSecret is a new self-signed ECDSA P-384 certificate for the
+// API server. Like the other generated Secrets, it is never changed.
+func (in install) generatedTLSSecret() (*corev1.Secret, error) {
+	certPEM, keyPEM, err := tlscert.SelfSigned(in.apiCertHosts(), selfSignedValidity)
+	if err != nil {
+		return nil, err
+	}
+	s := &corev1.Secret{
+		ObjectMeta: in.meta(componentAPI, in.apiTLSSecretName()),
+		Type:       corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			corev1.TLSCertKey:       certPEM,
+			corev1.TLSPrivateKeyKey: keyPEM,
+			// Self-signed: the certificate is its own CA.
+			"ca.crt": certPEM,
+		},
+	}
+	s.Annotations = map[string]string{"dispatch-ops.io/generated": "true"}
+	return s, nil
+}
+
+func (in install) apiTLSVolume(name string) corev1.Volume {
+	return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+		SecretName: in.apiTLSSecretName(),
+	}}}
 }
 
 // --- Server containers ---------------------------------------------------------
@@ -244,9 +330,16 @@ func (in install) migrationJob(image string) *batchv1.Job {
 
 func (in install) apiEnv() []corev1.EnvVar {
 	env := append(in.commonEnv(),
-		corev1.EnvVar{Name: "DISPATCH_LISTEN_ADDR", Value: ":" + strconv.Itoa(apiPort)},
+		corev1.EnvVar{Name: "DISPATCH_LISTEN_ADDR", Value: ":" + strconv.Itoa(int(in.apiPort()))},
 		corev1.EnvVar{Name: "DISPATCH_SECURE_COOKIES", Value: strconv.FormatBool(in.Spec.SecureCookies == nil || *in.Spec.SecureCookies)},
+		corev1.EnvVar{Name: "DISPATCH_TLS", Value: strconv.FormatBool(in.tlsEnabled())},
 	)
+	if in.tlsEnabled() {
+		env = append(env,
+			corev1.EnvVar{Name: "DISPATCH_TLS_CERT_FILE", Value: apiTLSPath + "/" + corev1.TLSCertKey},
+			corev1.EnvVar{Name: "DISPATCH_TLS_KEY_FILE", Value: apiTLSPath + "/" + corev1.TLSPrivateKeyKey},
+		)
+	}
 	if d := in.Spec.SessionTTL; d != nil {
 		env = append(env, corev1.EnvVar{Name: "DISPATCH_SESSION_TTL", Value: d.Duration.String()})
 	}
@@ -276,9 +369,16 @@ func (in install) apiEnv() []corev1.EnvVar {
 }
 
 func (in install) apiDeployment() *appsv1.Deployment {
+	scheme := corev1.URISchemeHTTP
+	if in.tlsEnabled() {
+		// The kubelet doesn't verify probe certificates.
+		scheme = corev1.URISchemeHTTPS
+	}
 	probe := func(path string) *corev1.Probe {
 		return &corev1.Probe{
-			ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: path, Port: intstr.FromString("http")}},
+			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path: path, Port: intstr.FromString(in.apiPortName()), Scheme: scheme,
+			}},
 			PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3,
 		}
 	}
@@ -286,12 +386,18 @@ func (in install) apiDeployment() *appsv1.Deployment {
 		Name:           componentAPI,
 		Args:           []string{"serve"},
 		Env:            in.apiEnv(),
-		Ports:          []corev1.ContainerPort{{Name: "http", ContainerPort: apiPort, Protocol: corev1.ProtocolTCP}},
+		Ports:          []corev1.ContainerPort{{Name: in.apiPortName(), ContainerPort: in.apiPort(), Protocol: corev1.ProtocolTCP}},
 		ReadinessProbe: probe("/readyz"),
 		LivenessProbe:  probe("/healthz"),
 		Resources:      in.Spec.API.Resources,
 	}
+	if in.tlsEnabled() {
+		c.VolumeMounts = []corev1.VolumeMount{{Name: "tls", MountPath: apiTLSPath, ReadOnly: true}}
+	}
 	pod := in.serverPod(componentAPI, []corev1.Container{c}, nil)
+	if in.tlsEnabled() {
+		pod.Spec.Volumes = []corev1.Volume{in.apiTLSVolume("tls")}
+	}
 	in.withMetrics(&pod)
 	return &appsv1.Deployment{
 		ObjectMeta: in.meta(componentAPI, in.name(componentAPI)),
@@ -314,7 +420,7 @@ func (in install) apiService() *corev1.Service {
 			Type:     t,
 			Selector: in.selector(componentAPI),
 			Ports: []corev1.ServicePort{{
-				Name: "http", Port: apiPort, TargetPort: intstr.FromString("http"), Protocol: corev1.ProtocolTCP,
+				Name: in.apiPortName(), Port: in.apiPort(), TargetPort: intstr.FromString(in.apiPortName()), Protocol: corev1.ProtocolTCP,
 			}},
 		},
 	}
@@ -322,8 +428,15 @@ func (in install) apiService() *corev1.Service {
 
 // apiURL is the API's address inside the cluster, which job pods use.
 func (in install) apiURL() string {
-	return "http://" + in.name(componentAPI) + "." + in.Namespace + ".svc:" + strconv.Itoa(apiPort)
+	scheme := "http://"
+	if in.tlsEnabled() {
+		scheme = "https://"
+	}
+	return scheme + in.name(componentAPI) + "." + in.Namespace + ".svc:" + strconv.Itoa(int(in.apiPort()))
 }
+
+// backendProtocolAnnotation tells ingress-nginx to use HTTPS to the pods.
+const backendProtocolAnnotation = "nginx.ingress.kubernetes.io/backend-protocol"
 
 func (in install) ingress() *networkingv1.Ingress {
 	spec := in.Spec.API.Ingress
@@ -338,7 +451,7 @@ func (in install) ingress() *networkingv1.Ingress {
 					Paths: []networkingv1.HTTPIngressPath{{
 						Path: "/", PathType: &pathType,
 						Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
-							Name: in.name(componentAPI), Port: networkingv1.ServiceBackendPort{Name: "http"},
+							Name: in.name(componentAPI), Port: networkingv1.ServiceBackendPort{Name: in.apiPortName()},
 						}},
 					}},
 				}},
@@ -346,6 +459,15 @@ func (in install) ingress() *networkingv1.Ingress {
 		},
 	}
 	ing.Annotations = spec.Annotations
+	if in.tlsEnabled() {
+		if _, set := ing.Annotations[backendProtocolAnnotation]; !set {
+			ing.Annotations = make(map[string]string, len(spec.Annotations)+1)
+			for k, v := range spec.Annotations {
+				ing.Annotations[k] = v
+			}
+			ing.Annotations[backendProtocolAnnotation] = "HTTPS"
+		}
+	}
 	if spec.TLSSecretName != "" {
 		ing.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{spec.Host}, SecretName: spec.TLSSecretName}}
 	}
@@ -414,7 +536,15 @@ func (in install) taskManagerDeployment() *appsv1.Deployment {
 		env = append(env, corev1.EnvVar{Name: "DISPATCH_AUDIT_RETENTION", Value: r.Duration.String()})
 	}
 	c := corev1.Container{Name: componentTaskManager, Args: []string{"task-manager"}, Env: env, Resources: tm.Resources}
+	if in.tlsEnabled() {
+		// Job pods trust the API's certificate; see tlscert.ReadTrustBundle.
+		c.Env = append(c.Env, corev1.EnvVar{Name: "DISPATCH_RUNNER_API_TLS_DIR", Value: runnerCAPath})
+		c.VolumeMounts = []corev1.VolumeMount{{Name: "api-tls", MountPath: runnerCAPath, ReadOnly: true}}
+	}
 	pod := in.serverPod(componentTaskManager, []corev1.Container{c}, nil)
+	if in.tlsEnabled() {
+		pod.Spec.Volumes = []corev1.Volume{in.apiTLSVolume("api-tls")}
+	}
 	in.withMetrics(&pod)
 	pod.Spec.ServiceAccountName = in.name(componentTaskManager)
 	pod.Spec.AutomountServiceAccountToken = new(true)

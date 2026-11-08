@@ -1,6 +1,7 @@
 # Development loop: everything runs in the kind cluster, through the operator.
 # Start it with `make dev` (or `make kind-up` then `tilt up`); the Tilt UI is
-# at http://localhost:10350 and the app at http://localhost:8080.
+# at http://localhost:10350 and the app at https://localhost:8443 (a
+# self-signed certificate the operator generated, so expect a browser warning).
 #
 # Changing a file rebuilds only what depends on it:
 #   web/**              -> web-build -> server-compile -> server image
@@ -172,8 +173,8 @@ k8s_resource(
 # restart it.
 local_resource(
     'api-port-forward',
-    serve_cmd='while true; do kubectl --context %s -n %s port-forward svc/dispatch-ops-api 8080:8080; sleep 2; done' % (CONTEXT, NAMESPACE),
+    serve_cmd='while true; do kubectl --context %s -n %s port-forward svc/dispatch-ops-api 8443:8443; sleep 2; done' % (CONTEXT, NAMESPACE),
     resource_deps=['dispatch-ops'],
-    links=[link('http://localhost:8080', 'Dispatch Ops')],
+    links=[link('https://localhost:8443', 'Dispatch Ops')],
     labels=['cluster'],
 )

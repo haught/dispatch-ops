@@ -12,6 +12,12 @@ spec:
       host: dispatch.example.com
       className: nginx
       tlsSecretName: dispatch-ops-tls
+    # The API server serves HTTPS itself too (the ingress uses HTTPS to
+    # reach it). Without this, the operator generates a self-signed
+    # certificate; here a cert-manager Certificate keeps it renewed. See
+    # README.md ("TLS").
+    tls:
+      secretName: dispatch-ops-api-tls
   taskManager:
     replicas: 2
     jobNamespace: dispatch-jobs

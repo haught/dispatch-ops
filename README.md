@@ -65,8 +65,10 @@ make db-init     # create the role and the dispatch + dispatch_test databases (o
 make dev         # kind cluster + `tilt up`
 ```
 
-Then open http://localhost:8080 (Dispatch Ops) and http://localhost:10350
-(Tilt: build status and logs for every part). On a new database, the operator
+Then open https://localhost:8443 (Dispatch Ops) and http://localhost:10350
+(Tilt: build status and logs for every part). The API serves HTTPS with a
+self-signed certificate the operator generated, so the browser warns about it
+once. On a new database, the operator
 creates the user `admin`; `make admin-password` prints its password.
 
 What a change rebuilds:
@@ -98,9 +100,9 @@ environments*, then *Job templates* → *New job template*) or with an API
 token:
 
 ```sh
-curl -s localhost:8080/api/v1/execution-environments -H "Authorization: Bearer $TOKEN" \
+curl -sk https://localhost:8443/api/v1/execution-environments -H "Authorization: Bearer $TOKEN" \
   -d '{"name": "ee-shell", "image": "dispatch-ops/ee-shell:dev"}'
-curl -s localhost:8080/api/v1/job-templates -H "Authorization: Bearer $TOKEN" \
+curl -sk https://localhost:8443/api/v1/job-templates -H "Authorization: Bearer $TOKEN" \
   -d '{"name": "hello", "jobType": "container", "executionEnvironmentId": "<ee id>",
        "command": ["bash", "-c", "echo hello from $(hostname)"]}'
 ```
@@ -109,9 +111,9 @@ and launch it from the *Job templates* page. For a playbook, register
 `dispatch-ops/ee-ansible:dev` and a project, then make an `ansible` template:
 
 ```sh
-curl -s localhost:8080/api/v1/projects -H "Authorization: Bearer $TOKEN" \
+curl -sk https://localhost:8443/api/v1/projects -H "Authorization: Bearer $TOKEN" \
   -d '{"name": "ops", "scmUrl": "https://github.com/acme/ops.git", "scmRef": "main"}'
-curl -s localhost:8080/api/v1/job-templates -H "Authorization: Bearer $TOKEN" \
+curl -sk https://localhost:8443/api/v1/job-templates -H "Authorization: Bearer $TOKEN" \
   -d '{"name": "site", "jobType": "ansible", "executionEnvironmentId": "<ee id>",
        "projectId": "<project id>", "entrypoint": "site.yml", "inventoryId": "<inventory id>",
        "credentialIds": ["<ssh credential id>"], "allowOverrides": ["limit", "tags"]}'
@@ -135,7 +137,7 @@ Inside it:
 - `make kind-up` also joins the container to the `kind` network and writes a
   kubeconfig with the cluster's internal address. After rebuilding the
   container, run `make kind-join` to do that again for an existing cluster.
-- Ports 8080 (Dispatch Ops), 10350 (Tilt) and 5173 (Vite) are forwarded to
+- Ports 8443 (Dispatch Ops), 10350 (Tilt) and 5173 (Vite) are forwarded to
   the host.
 - `web/node_modules` is a Docker volume, so the container's Linux packages
   don't replace the host's. Run `make deps` once after creating the container.
@@ -494,7 +496,9 @@ plus git, ssh and sshpass).
 | Variable | Default | |
 |---|---|---|
 | `DISPATCH_DATABASE_URL` | (required) | PostgreSQL URL |
-| `DISPATCH_LISTEN_ADDR` | `:8080` | |
+| `DISPATCH_LISTEN_ADDR` | `:8443`, or `:8080` without TLS | |
+| `DISPATCH_TLS` | `true` | Serve HTTPS. Set `false` only where something else encrypts traffic to the server |
+| `DISPATCH_TLS_CERT_FILE`, `DISPATCH_TLS_KEY_FILE` | | A PEM certificate (chain) and key to serve, reloaded when the files change. Without them, `serve` makes a self-signed ECDSA P-384 certificate at startup, held only in memory |
 | `DISPATCH_SECURE_COOKIES` | `true` | Set `false` only for plain-HTTP development |
 | `DISPATCH_SESSION_TTL` | `12h` | Browser session lifetime |
 | `DISPATCH_AUTO_MIGRATE` | `false` | Apply migrations when `serve` starts |
@@ -517,6 +521,7 @@ Task manager only:
 | Variable | Default | |
 |---|---|---|
 | `DISPATCH_RUNNER_API_URL` | (required) | The API URL as job pods reach it |
+| `DISPATCH_RUNNER_API_TLS_DIR` | | A directory holding the API's certificate Secret (`ca.crt` or `tls.crt`). Job pods trust it, besides the system's roots, to reach an `https` API URL |
 | `DISPATCH_JOB_NAMESPACE` | `dispatch-jobs` | Namespace for job pods (and the leader Lease) |
 | `DISPATCH_KUBE_CONTEXT` | | kubeconfig context; empty uses the in-cluster config if available |
 | `DISPATCH_MAX_CONCURRENT_JOBS` | `10` | Jobs waiting or running at once |
@@ -615,12 +620,12 @@ For an installation named `<name>`, the operator creates:
 
 | Object | |
 |---|---|
-| `<name>-api` Deployment and Service | The API server and UI on port 8080. Jobs reach it at `http://<name>-api.<namespace>.svc:8080` |
+| `<name>-api` Deployment and Service | The API server and UI, HTTPS on port 8443 (`https`). Jobs reach it at `https://<name>-api.<namespace>.svc:8443` |
 | `<name>-task-manager` Deployment, ServiceAccount, Role and RoleBinding | The task manager, with the permissions it needs in the job namespace |
 | `<name>-postgres` StatefulSet and Service | The managed database (unless `spec.database.external`) |
 | `<name>-migrate-<hash>` Job | Database migrations for one image, then the administrator if missing |
 | `<name>` Ingress | If `spec.api.ingress` is set |
-| `<name>-encryption-key`, `<name>-admin-password`, `<name>-postgres` Secrets | Generated unless the spec names your own |
+| `<name>-encryption-key`, `<name>-admin-password`, `<name>-postgres`, `<name>-api-tls` Secrets | Generated unless the spec names your own |
 
 Installing or changing `spec.image` (or upgrading the chart, for
 installations without one) first runs the new image's migrations in a Job;
@@ -642,14 +647,73 @@ stored credentials can't be decrypted. The managed database has no backups
 or replication; use `spec.database.external` where that matters.
 
 Changes to Secrets the operator reads (e.g. the OIDC client secret) take
-effect when the pods restart (`kubectl rollout restart`).
+effect when the pods restart (`kubectl rollout restart`), except the API
+certificate (below).
+
+### TLS
+
+The API server serves HTTPS on port 8443. By default the operator generates
+a self-signed ECDSA P-384 certificate, valid for 10 years, in the
+`<name>-api-tls` Secret. It is valid for the Service's names, `localhost`, and
+the ingress and `externalURL` hosts as they were when it was generated; delete
+the Secret to have it generated again. Every installation gets its own key;
+none is built into the image. Job pods trust the certificate (the task manager
+hands them the Secret's `ca.crt`), and an Ingress gets
+`nginx.ingress.kubernetes.io/backend-protocol: HTTPS` unless you set that
+annotation yourself. Other ingress controllers may need to be told to use
+HTTPS to the `https` Service port; Traefik does so by the port's name.
+
+To serve your own certificate, such as one cert-manager keeps renewed, name
+its `kubernetes.io/tls` Secret in `spec.api.tls.secretName`
+(`installation.tls.existingSecret` in the chart):
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dispatch-ops-api
+  namespace: dispatch-ops
+spec:
+  secretName: dispatch-ops-api-tls
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+  dnsNames:
+    - dispatch-ops-api.dispatch-ops.svc   # job pods use this name: required
+    - dispatch.example.com
+  issuerRef:
+    name: internal-ca
+    kind: ClusterIssuer
+---
+apiVersion: dispatch-ops.io/v1alpha1
+kind: DispatchOps
+metadata:
+  name: dispatch-ops
+  namespace: dispatch-ops
+spec:
+  api:
+    tls:
+      secretName: dispatch-ops-api-tls
+```
+
+The API server reloads the certificate when cert-manager renews it, with no
+restart, and new jobs trust the Secret's `ca.crt`, or its `tls.crt` and the
+system's roots when it has no `ca.crt` (as with a public CA). The API pods
+don't start until the Secret exists.
+
+`spec.api.tls.enabled: false` serves plain HTTP on port 8080 instead; use it
+only where something else, such as a service mesh, encrypts traffic to the
+pods. Metrics (port 9090) are always plain HTTP.
 
 ## Container images
 
 ```sh
 make docker
-docker run --rm -e DISPATCH_DATABASE_URL=… -p 8080:8080 dispatch-ops:dev
+docker run --rm -e DISPATCH_DATABASE_URL=… -p 8443:8443 dispatch-ops:dev
 ```
 
 builds `dispatch-ops` (the server) and `dispatch-ops-operator`. Health
-probes: `/healthz` (liveness) and `/readyz` (checks the database).
+probes: `/healthz` (liveness) and `/readyz` (checks the database). The server
+serves HTTPS on 8443 with a self-signed ECDSA P-384 certificate it makes at
+startup; mount your own and set `DISPATCH_TLS_CERT_FILE` and
+`DISPATCH_TLS_KEY_FILE` to replace it.

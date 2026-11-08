@@ -22,6 +22,16 @@ The operator generates the encryption key in the
 {{ .Values.installation.name }}-encryption-key Secret. Back it up: without it, stored
 credentials can't be decrypted.
 {{- end }}
+{{- $tls := .Values.installation.tls | default dict }}
+{{- if ne ($tls.enabled | toString) "false" }}
+
+The API serves HTTPS on port 8443 ({{ .Values.installation.name }}-api Service).
+{{- if $tls.existingSecret }} It serves the certificate in the {{ $tls.existingSecret }} Secret.
+{{- else }} Its certificate is self-signed, generated in
+the {{ .Values.installation.name }}-api-tls Secret; set installation.tls.existingSecret to
+serve your own, such as a cert-manager Certificate's.
+{{- end }}
+{{- end }}
 {{- if not .Values.installation.spec.admin }}
 
 The administrator's password is in the {{ .Values.installation.name }}-admin-password Secret.

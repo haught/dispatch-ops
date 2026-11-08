@@ -238,15 +238,33 @@ func (r *Reconciler) ensureSecrets(ctx context.Context, in install) error {
 			map[string]string{"password": pw, "url": in.postgresURL(pw)}))
 	}
 	for _, s := range want {
-		var existing corev1.Secret
-		err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(s), &existing)
-		if apierrors.IsNotFound(err) {
-			log.FromContext(ctx).Info("generating secret", "secret", s.Name)
+		if err := r.ensureSecret(ctx, s.Name, in.Namespace, func() (*corev1.Secret, error) { return s, nil }); err != nil {
+			return err
+		}
+	}
+	// Making a certificate costs more than the others, so only when needed.
+	if in.tlsEnabled() && in.Spec.API.TLS.SecretName == "" {
+		if err := r.ensureSecret(ctx, in.apiTLSSecretName(), in.Namespace, in.generatedTLSSecret); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureSecret creates the Secret that generate returns, unless one with its
+// name exists.
+func (r *Reconciler) ensureSecret(ctx context.Context, name, namespace string, generate func() (*corev1.Secret, error)) error {
+	var existing corev1.Secret
+	err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &existing)
+	if apierrors.IsNotFound(err) {
+		var s *corev1.Secret
+		if s, err = generate(); err == nil {
+			log.FromContext(ctx).Info("generating secret", "secret", name)
 			err = r.Create(ctx, s)
 		}
-		if err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("secret %s: %w", s.Name, err)
-		}
+	}
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("secret %s: %w", name, err)
 	}
 	return nil
 }

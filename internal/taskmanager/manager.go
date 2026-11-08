@@ -27,12 +27,18 @@ import (
 	"dispatch-ops/internal/metrics"
 	"dispatch-ops/internal/notify"
 	"dispatch-ops/internal/store"
+	"dispatch-ops/internal/tlscert"
 )
 
 // Config holds the task manager's settings.
 type Config struct {
-	Namespace         string
-	RunnerAPIURL      string
+	Namespace    string
+	RunnerAPIURL string
+	// RunnerAPITLSDir holds the API server's certificate Secret; job pods
+	// trust what tlscert.ReadTrustBundle reads from it. Read for each job,
+	// so a renewed certificate reaches new jobs. Empty means job pods trust
+	// only the system's roots.
+	RunnerAPITLSDir   string
 	MaxConcurrentJobs int
 	JobTTL            time.Duration
 	StartTimeout      time.Duration
@@ -193,7 +199,14 @@ func (m *Manager) dispatch(ctx context.Context) error {
 // own the Secrets so they are deleted with it.
 func (m *Manager) launch(ctx context.Context, j store.Job, token string) error {
 	ns := m.Config.Namespace
-	secrets := []*corev1.Secret{buildTokenSecret(j, ns, token)}
+	var ca []byte
+	if dir := m.Config.RunnerAPITLSDir; dir != "" {
+		var err error
+		if ca, err = tlscert.ReadTrustBundle(dir); err != nil {
+			return fmt.Errorf("read the API server's certificate for the runner: %w", err)
+		}
+	}
+	secrets := []*corev1.Secret{buildTokenSecret(j, ns, token, ca)}
 	if credID := j.Config.ExecutionEnvironment.RegistryCredentialID; credID != nil {
 		creds, err := m.Store.GetCredentials(ctx, []uuid.UUID{*credID})
 		if errors.Is(err, store.ErrNotFound) {
@@ -227,7 +240,7 @@ func (m *Manager) launch(ctx context.Context, j store.Job, token string) error {
 		created = append(created, s.Name)
 	}
 
-	kj, err := m.Kube.BatchV1().Jobs(ns).Create(ctx, buildJob(j, m.Config, len(secrets) > 1), metav1.CreateOptions{})
+	kj, err := m.Kube.BatchV1().Jobs(ns).Create(ctx, buildJob(j, m.Config, len(secrets) > 1, len(ca) > 0), metav1.CreateOptions{})
 	if err != nil {
 		cleanup()
 		return fmt.Errorf("create job: %w", err)

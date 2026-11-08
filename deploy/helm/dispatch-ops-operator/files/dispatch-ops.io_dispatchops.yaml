@@ -196,6 +196,29 @@ spec:
                     - NodePort
                     - LoadBalancer
                     type: string
+                  tls:
+                    default: {}
+                    description: |-
+                      TLS configures the HTTPS the API server serves, on port 8443 (or plain
+                      HTTP on 8080 when disabled).
+                    properties:
+                      enabled:
+                        default: true
+                        description: |-
+                          Enabled serves HTTPS. Turn it off only where something else encrypts
+                          traffic to the pods, such as a service mesh.
+                        type: boolean
+                      secretName:
+                        description: |-
+                          SecretName is a kubernetes.io/tls Secret (tls.crt, tls.key and
+                          optionally ca.crt) to serve, such as one cert-manager keeps renewed;
+                          the server picks up a renewed certificate without a restart. Job pods
+                          reach the API at <name>-api.<namespace>.svc and trust its ca.crt (or
+                          tls.crt), so the certificate must be valid for that name. Without it,
+                          the operator generates a self-signed ECDSA P-384 certificate in
+                          <name>-api-tls; delete that Secret to have it generated again.
+                        type: string
+                    type: object
                 type: object
               database:
                 default:

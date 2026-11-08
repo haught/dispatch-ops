@@ -102,7 +102,7 @@ admin-password: ## Print the password the operator generated for "admin" (used o
 	@kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) get secret dispatch-ops-admin-password -o jsonpath='{.data.password}' | base64 -d; echo
 
 .PHONY: web-dev
-web-dev: ## Run the Vite dev server with hot reload (proxies /api to the in-cluster API on :8080)
+web-dev: ## Run the Vite dev server with hot reload (proxies /api to the in-cluster API on :8443)
 	cd web && npm run dev
 
 # --- Dev cluster and execution environments ----------------------------------

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +42,7 @@ func testJob() store.Job {
 
 func TestBuildJob(t *testing.T) {
 	j := testJob()
-	kj := buildJob(j, Config{Namespace: ns, RunnerAPIURL: "http://api:8080", JobTTL: time.Hour, StartTimeout: 10 * time.Minute}, true)
+	kj := buildJob(j, Config{Namespace: ns, RunnerAPIURL: "http://api:8080", JobTTL: time.Hour, StartTimeout: 10 * time.Minute}, true, true)
 
 	if kj.Name != "dispatch-job-"+j.ID.String() || kj.Labels[LabelJobID] != j.ID.String() {
 		t.Errorf("metadata = %+v", kj.ObjectMeta)
@@ -60,8 +62,14 @@ func TestBuildJob(t *testing.T) {
 	for _, e := range c.Env {
 		env[e.Name] = e.Value
 	}
-	if env["DISPATCH_API_URL"] != "http://api:8080" || env["DISPATCH_JOB_ID"] != j.ID.String() || env["DISPATCH_JOB_TOKEN_FILE"] != tokenFile {
+	if env["DISPATCH_API_URL"] != "http://api:8080" || env["DISPATCH_JOB_ID"] != j.ID.String() || env["DISPATCH_JOB_TOKEN_FILE"] != tokenFile ||
+		env["DISPATCH_API_CA_FILE"] != apiCAFile {
 		t.Errorf("env = %v", env)
+	}
+	for _, e := range buildJob(j, Config{}, false, false).Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "DISPATCH_API_CA_FILE" {
+			t.Error("DISPATCH_API_CA_FILE set without a CA")
+		}
 	}
 	if len(pod.ImagePullSecrets) != 1 || pod.ImagePullSecrets[0].Name != pullSecretName(j.ID.String()) {
 		t.Errorf("imagePullSecrets = %v", pod.ImagePullSecrets)
@@ -226,6 +234,43 @@ func TestDispatchRespectsConcurrencyAndCreatesObjects(t *testing.T) {
 	}
 }
 
+func TestAPICertificateReachesJobPods(t *testing.T) {
+	e := newEnv(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tls.crt"), []byte("LEAF"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ca.crt"), []byte("CA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.m.Config.RunnerAPITLSDir = dir
+	j := e.launch(60)
+	e.m.Tick(e.ctx)
+	tok, err := e.kube.CoreV1().Secrets(ns).Get(e.ctx, tokenSecretName(j.ID.String()), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tok.Data["ca.crt"]) != "CA" {
+		t.Errorf("token secret ca.crt = %q", tok.Data["ca.crt"])
+	}
+	found := false
+	for _, v := range e.k8sJob(j.ID).Spec.Template.Spec.Containers[0].Env {
+		found = found || (v.Name == "DISPATCH_API_CA_FILE" && v.Value == apiCAFile)
+	}
+	if !found {
+		t.Error("job pod has no DISPATCH_API_CA_FILE")
+	}
+
+	// Without a readable certificate, the job fails rather than running a
+	// runner that can't reach the API.
+	e.m.Config.RunnerAPITLSDir = filepath.Join(dir, "missing")
+	j2 := e.launch(60)
+	e.m.Tick(e.ctx)
+	if got := e.job(j2.ID).Status; got != store.JobError {
+		t.Errorf("job without the API certificate = %s, want error", got)
+	}
+}
+
 func TestRegistryCredentialBecomesPullSecret(t *testing.T) {
 	e := newEnv(t)
 	cred := store.Credential{ID: uuid.New(), Name: "reg-" + uuid.NewString()[:8], Kind: "registry"}
@@ -378,7 +423,7 @@ func TestOrphanedKubernetesJobsAreDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A Kubernetes Job for a job the database doesn't know.
-	stray := buildJob(store.Job{ID: uuid.New(), Config: j.Config}, e.m.Config, false)
+	stray := buildJob(store.Job{ID: uuid.New(), Config: j.Config}, e.m.Config, false, false)
 	if _, err := e.kube.BatchV1().Jobs(ns).Create(e.ctx, stray, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}

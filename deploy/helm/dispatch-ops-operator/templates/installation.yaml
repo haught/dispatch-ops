@@ -64,6 +64,16 @@ kind: Helm can't create it in the same install that first creates the CRD.
 {{- $_ := set $spec "oidc" $oidc }}
 {{- end }}
 
+{{- $tls := $i.tls | default dict }}
+{{- if or $tls.existingSecret (eq ($tls.enabled | toString) "false") }}
+{{- $api := get $spec "api" | default dict }}
+{{- $apiTLS := get $api "tls" | default dict }}
+{{- with $tls.existingSecret }}{{ $_ := set $apiTLS "secretName" . }}{{ end }}
+{{- if eq ($tls.enabled | toString) "false" }}{{ $_ := set $apiTLS "enabled" false }}{{ end }}
+{{- $_ := set $api "tls" $apiTLS }}
+{{- $_ := set $spec "api" $api }}
+{{- end }}
+
 {{- if $i.database.url }}
 ---
 apiVersion: v1

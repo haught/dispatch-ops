@@ -40,3 +40,35 @@ func TestMetricsAddr(t *testing.T) {
 		t.Errorf("set = %q", got)
 	}
 }
+
+func TestTLS(t *testing.T) {
+	t.Setenv("DISPATCH_DATABASE_URL", "postgres://x")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.TLS || c.ListenAddr != ":8443" {
+		t.Errorf("default: TLS %t on %q, want true on :8443", c.TLS, c.ListenAddr)
+	}
+
+	t.Setenv("DISPATCH_TLS", "false")
+	c, _ = Load()
+	if c.TLS || c.ListenAddr != ":8080" {
+		t.Errorf("TLS off: TLS %t on %q, want false on :8080", c.TLS, c.ListenAddr)
+	}
+	t.Setenv("DISPATCH_LISTEN_ADDR", ":9000")
+	c, _ = Load()
+	if c.ListenAddr != ":9000" {
+		t.Errorf("explicit listen address = %q", c.ListenAddr)
+	}
+
+	t.Setenv("DISPATCH_TLS", "true")
+	t.Setenv("DISPATCH_TLS_CERT_FILE", "/tls/tls.crt")
+	if _, err := Load(); err == nil {
+		t.Error("cert without key: want an error")
+	}
+	t.Setenv("DISPATCH_TLS_KEY_FILE", "/tls/tls.key")
+	if c, err = Load(); err != nil || c.TLSCertFile != "/tls/tls.crt" || c.TLSKeyFile != "/tls/tls.key" {
+		t.Errorf("cert and key: %+v, %v", c, err)
+	}
+}

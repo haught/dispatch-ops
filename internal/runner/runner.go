@@ -25,10 +25,13 @@ import (
 // Config is how the task manager tells the runner what to do, through
 // environment variables on the job pod.
 type Config struct {
-	APIURL    string    // DISPATCH_API_URL
-	JobID     uuid.UUID // DISPATCH_JOB_ID
-	Token     string    // read from DISPATCH_JOB_TOKEN_FILE
-	WorkDir   string    // DISPATCH_WORKDIR
+	APIURL string    // DISPATCH_API_URL
+	JobID  uuid.UUID // DISPATCH_JOB_ID
+	Token  string    // read from DISPATCH_JOB_TOKEN_FILE
+	// APICA holds PEM certificates to trust, besides the system's roots,
+	// when reaching the API (read from DISPATCH_API_CA_FILE).
+	APICA     []byte
+	WorkDir   string // DISPATCH_WORKDIR
 	Version   string
 	Stdout    io.Writer // the pod log
 	Heartbeat time.Duration
@@ -67,6 +70,11 @@ func ConfigFromEnv(version string) (Config, error) {
 	} else {
 		c.Token = strings.TrimSpace(string(b))
 	}
+	if caFile := os.Getenv("DISPATCH_API_CA_FILE"); caFile != "" {
+		if c.APICA, err = os.ReadFile(caFile); err != nil {
+			errs = append(errs, fmt.Errorf("read the API's CA certificates: %w", err))
+		}
+	}
 	if c.WorkDir == "" {
 		c.WorkDir, _ = os.Getwd()
 	}
@@ -81,7 +89,7 @@ func ConfigFromEnv(version string) (Config, error) {
 //
 // Canceling ctx (the pod is being terminated) stops the command.
 func Run(ctx context.Context, cfg Config) error {
-	client, err := newClient(cfg.APIURL, cfg.Token, cfg.Version)
+	client, err := newClient(cfg.APIURL, cfg.Token, cfg.Version, cfg.APICA)
 	if err != nil {
 		return err
 	}

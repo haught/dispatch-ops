@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"dispatch-ops/internal/runner/runnerapi"
+	"dispatch-ops/internal/tlscert"
 )
 
 // errJobOver means the API no longer accepts reports for this job: the token
@@ -67,10 +69,17 @@ func retry(ctx context.Context, maxElapsed time.Duration, fn func(context.Contex
 	}
 }
 
-// newClient returns an API client that authenticates with the job token.
-func newClient(apiURL, token, version string) (*runnerapi.ClientWithResponses, error) {
+// newClient returns an API client that authenticates with the job token,
+// trusting the system's roots and the PEM certificates in ca.
+func newClient(apiURL, token, version string, ca []byte) (*runnerapi.ClientWithResponses, error) {
+	roots, err := tlscert.TrustPool(ca)
+	if err != nil {
+		return nil, fmt.Errorf("the API's CA certificates: %w", err)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	return runnerapi.NewClientWithResponses(apiURL,
-		runnerapi.WithHTTPClient(&http.Client{Timeout: 30 * time.Second}),
+		runnerapi.WithHTTPClient(&http.Client{Timeout: 30 * time.Second, Transport: transport}),
 		runnerapi.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
 			req.Header.Set("Authorization", "Bearer "+token)
 			req.Header.Set("User-Agent", "dispatch-runner/"+version)

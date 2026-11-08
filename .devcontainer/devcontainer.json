@@ -30,9 +30,9 @@
 	],
 	// The app (Tilt's port-forward to the in-cluster API), the Tilt UI, and
 	// the Vite dev server (`make web-dev`).
-	"forwardPorts": [8080, 10350, 5173],
+	"forwardPorts": [8443, 10350, 5173],
 	"portsAttributes": {
-		"8080": { "label": "Dispatch Ops" },
+		"8443": { "label": "Dispatch Ops", "protocol": "https" },
 		"10350": { "label": "Tilt" },
 		"5173": { "label": "Vite dev server" }
 	},

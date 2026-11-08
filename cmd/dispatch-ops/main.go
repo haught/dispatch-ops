@@ -5,14 +5,17 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,6 +38,7 @@ import (
 	"dispatch-ops/internal/server"
 	"dispatch-ops/internal/store"
 	"dispatch-ops/internal/taskmanager"
+	"dispatch-ops/internal/tlscert"
 	"dispatch-ops/web"
 )
 
@@ -174,6 +178,11 @@ func serve() error {
 		IdleTimeout:       120 * time.Second,
 		// No WriteTimeout: job log streams (SSE) are long-lived.
 	}
+	if cfg.TLS {
+		if srv.TLSConfig, err = serverTLS(cfg, log); err != nil {
+			return err
+		}
+	}
 
 	go cleanupExpiredTokens(ctx, st, log)
 	if addr := cfg.MetricsAddrOr(":9090"); addr != "" {
@@ -182,8 +191,12 @@ func serve() error {
 
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", cfg.ListenAddr, "version", version)
-		errc <- srv.ListenAndServe()
+		log.Info("listening", "addr", cfg.ListenAddr, "tls", cfg.TLS, "version", version)
+		if cfg.TLS {
+			errc <- srv.ListenAndServeTLS("", "")
+		} else {
+			errc <- srv.ListenAndServe()
+		}
 	}()
 
 	select {
@@ -195,6 +208,50 @@ func serve() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// serverTLS serves DISPATCH_TLS_CERT_FILE and DISPATCH_TLS_KEY_FILE,
+// reloading them when they change, or else a self-signed ECDSA P-384
+// certificate made now, which is never written to disk.
+func serverTLS(cfg config.Config, log *slog.Logger) (*tls.Config, error) {
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.TLSCertFile != "" {
+		r, err := tlscert.NewReloader(cfg.TLSCertFile, cfg.TLSKeyFile, log)
+		if err != nil {
+			return nil, err
+		}
+		tc.GetCertificate = r.GetCertificate
+		log.Info("serving the TLS certificate from files", "cert_file", cfg.TLSCertFile, "sha256", tlscert.Fingerprint(r.Certificate()))
+		return tc, nil
+	}
+
+	var hosts []string
+	add := func(h string) {
+		if h != "" && !slices.Contains(hosts, h) {
+			hosts = append(hosts, h)
+		}
+	}
+	if u, err := url.Parse(cfg.ExternalURL); err == nil {
+		add(u.Hostname())
+	}
+	for _, h := range []string{"localhost", "127.0.0.1", "::1"} {
+		add(h)
+	}
+	if h, err := os.Hostname(); err == nil {
+		add(h)
+	}
+	certPEM, keyPEM, err := tlscert.SelfSigned(hosts, 365*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, err
+	}
+	tc.Certificates = []tls.Certificate{cert}
+	log.Warn("serving a self-signed TLS certificate made at startup; set DISPATCH_TLS_CERT_FILE and DISPATCH_TLS_KEY_FILE to use your own",
+		"hosts", hosts, "sha256", tlscert.Fingerprint(&cert))
+	return tc, nil
 }
 
 func runTaskManager() error {
@@ -244,6 +301,7 @@ func runTaskManager() error {
 		Config: taskmanager.Config{
 			Namespace:         tm.Namespace,
 			RunnerAPIURL:      tm.RunnerAPIURL,
+			RunnerAPITLSDir:   tm.RunnerAPITLSDir,
 			MaxConcurrentJobs: tm.MaxConcurrentJobs,
 			JobTTL:            tm.JobTTL,
 			StartTimeout:      tm.StartTimeout,

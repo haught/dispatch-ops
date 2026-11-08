@@ -4,6 +4,11 @@ import (
 	"time"
 
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"strings"
 	"testing"
 
@@ -212,7 +217,7 @@ func TestInstallAndUpgrade(t *testing.T) {
 	if api.Spec.Template.Spec.Containers[0].Image != "dispatch-ops:1.0" || *api.Spec.Replicas != 2 {
 		t.Errorf("api deployment: image %s replicas %d", api.Spec.Template.Spec.Containers[0].Image, *api.Spec.Replicas)
 	}
-	if v, _ := envValue(tm.Spec.Template.Spec.Containers[0], "DISPATCH_RUNNER_API_URL"); v.Value != "http://dops-api.ops.svc:8080" {
+	if v, _ := envValue(tm.Spec.Template.Spec.Containers[0], "DISPATCH_RUNNER_API_URL"); v.Value != "https://dops-api.ops.svc:8443" {
 		t.Errorf("runner API URL = %q", v.Value)
 	}
 	if v, _ := envValue(api.Spec.Template.Spec.Containers[0], "DISPATCH_DATABASE_URL"); v.ValueFrom.SecretKeyRef.Name != "dops-postgres" {
@@ -393,6 +398,143 @@ func TestExternalDatabaseAndSettings(t *testing.T) {
 		t.Error("no ingress")
 	} else if len(ing.Spec.TLS) != 1 || ing.Spec.TLS[0].SecretName != "tls" {
 		t.Errorf("ingress TLS = %+v", ing.Spec.TLS)
+	}
+}
+
+// deploy reconciles a new installation with a managed database until its
+// servers are deployed.
+func (e *env) deploy() {
+	e.t.Helper()
+	e.reconcile()
+	e.databaseReady()
+	e.reconcile()
+	e.finishMigration("dispatch-ops:1.0", true)
+	e.reconcile()
+}
+
+func TestAPIServesTLS(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
+		ExternalURL: "https://dispatch.example.com",
+		API:         v1alpha1.APISpec{Ingress: &v1alpha1.IngressSpec{Host: "ui.example.com", Annotations: map[string]string{"a": "b"}}},
+	}})
+	e.deploy()
+
+	// A self-signed P-384 certificate for the Service and public names.
+	var s corev1.Secret
+	if !e.get("dops-api-tls", &s) {
+		t.Fatal("no generated TLS Secret")
+	}
+	if s.Type != corev1.SecretTypeTLS || len(s.OwnerReferences) != 0 || string(s.Data["ca.crt"]) != string(s.Data["tls.crt"]) {
+		t.Errorf("TLS Secret: type %s, owners %v", s.Type, s.OwnerReferences)
+	}
+	block, _ := pem.Decode(s.Data["tls.crt"])
+	if block == nil {
+		t.Fatal("tls.crt is not PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pub, ok := cert.PublicKey.(*ecdsa.PublicKey); !ok || pub.Curve != elliptic.P384() {
+		t.Errorf("key is %T, want ECDSA P-384", cert.PublicKey)
+	}
+	for _, host := range []string{"dops-api.ops.svc", "dops-api.ops.svc.cluster.local", "localhost", "ui.example.com", "dispatch.example.com"} {
+		if err := cert.VerifyHostname(host); err != nil {
+			t.Errorf("certificate: %v", err)
+		}
+	}
+	if _, err := tls.X509KeyPair(s.Data["tls.crt"], s.Data["tls.key"]); err != nil {
+		t.Errorf("key pair: %v", err)
+	}
+
+	var api, tm appsv1.Deployment
+	e.get("dops-api", &api)
+	c := api.Spec.Template.Spec.Containers[0]
+	for name, want := range map[string]string{
+		"DISPATCH_TLS": "true", "DISPATCH_LISTEN_ADDR": ":8443",
+		"DISPATCH_TLS_CERT_FILE": "/var/run/dispatch-ops/tls/tls.crt", "DISPATCH_TLS_KEY_FILE": "/var/run/dispatch-ops/tls/tls.key",
+	} {
+		if v, _ := envValue(c, name); v.Value != want {
+			t.Errorf("%s = %q, want %q", name, v.Value, want)
+		}
+	}
+	if p, _ := portNamed(c, "https"); p != 8443 {
+		t.Errorf("https port = %d", p)
+	}
+	if g := c.ReadinessProbe.HTTPGet; g.Scheme != corev1.URISchemeHTTPS || g.Port.StrVal != "https" {
+		t.Errorf("readiness probe = %+v", g)
+	}
+	if vols := api.Spec.Template.Spec.Volumes; len(vols) != 1 || vols[0].Secret.SecretName != "dops-api-tls" || len(c.VolumeMounts) != 1 {
+		t.Errorf("API volumes = %+v, mounts %+v", vols, c.VolumeMounts)
+	}
+
+	e.get("dops-task-manager", &tm)
+	tc := tm.Spec.Template.Spec.Containers[0]
+	if v, _ := envValue(tc, "DISPATCH_RUNNER_API_TLS_DIR"); v.Value != "/var/run/dispatch-ops/api-tls" {
+		t.Errorf("DISPATCH_RUNNER_API_TLS_DIR = %q", v.Value)
+	}
+	if vols := tm.Spec.Template.Spec.Volumes; len(vols) != 1 || vols[0].Secret.SecretName != "dops-api-tls" {
+		t.Errorf("task manager volumes = %+v", vols)
+	}
+
+	var svc corev1.Service
+	e.get("dops-api", &svc)
+	if p := svc.Spec.Ports[0]; p.Name != "https" || p.Port != 8443 {
+		t.Errorf("Service port = %+v", p)
+	}
+	var ing networkingv1.Ingress
+	e.get("dops", &ing)
+	if ing.Annotations["nginx.ingress.kubernetes.io/backend-protocol"] != "HTTPS" || ing.Annotations["a"] != "b" {
+		t.Errorf("ingress annotations = %v", ing.Annotations)
+	}
+	if b := ing.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port.Name; b != "https" {
+		t.Errorf("ingress backend port = %q", b)
+	}
+
+	// A certificate of your own (from cert-manager, say) replaces it.
+	cur := e.cr()
+	cur.Spec.API.TLS.SecretName = "from-cert-manager"
+	if err := e.c.Update(e.ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	e.get("dops-api", &api)
+	e.get("dops-task-manager", &tm)
+	if api.Spec.Template.Spec.Volumes[0].Secret.SecretName != "from-cert-manager" ||
+		tm.Spec.Template.Spec.Volumes[0].Secret.SecretName != "from-cert-manager" {
+		t.Errorf("volumes don't use the given Secret: %+v / %+v", api.Spec.Template.Spec.Volumes, tm.Spec.Template.Spec.Volumes)
+	}
+}
+
+func TestAPIWithoutTLS(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
+		API: v1alpha1.APISpec{TLS: v1alpha1.APITLSSpec{Enabled: new(false)}, Ingress: &v1alpha1.IngressSpec{Host: "ui.example.com"}},
+	}})
+	e.deploy()
+	var s corev1.Secret
+	if e.get("dops-api-tls", &s) {
+		t.Error("generated a certificate with TLS off")
+	}
+	var api, tm appsv1.Deployment
+	e.get("dops-api", &api)
+	c := api.Spec.Template.Spec.Containers[0]
+	if v, _ := envValue(c, "DISPATCH_TLS"); v.Value != "false" {
+		t.Errorf("DISPATCH_TLS = %q", v.Value)
+	}
+	if p, _ := portNamed(c, "http"); p != 8080 || c.ReadinessProbe.HTTPGet.Scheme != corev1.URISchemeHTTP {
+		t.Errorf("http port %d, probe %+v", p, c.ReadinessProbe.HTTPGet)
+	}
+	if len(api.Spec.Template.Spec.Volumes) != 0 {
+		t.Errorf("volumes = %+v", api.Spec.Template.Spec.Volumes)
+	}
+	e.get("dops-task-manager", &tm)
+	if v, _ := envValue(tm.Spec.Template.Spec.Containers[0], "DISPATCH_RUNNER_API_URL"); v.Value != "http://dops-api.ops.svc:8080" {
+		t.Errorf("runner API URL = %q", v.Value)
+	}
+	var ing networkingv1.Ingress
+	e.get("dops", &ing)
+	if _, ok := ing.Annotations["nginx.ingress.kubernetes.io/backend-protocol"]; ok {
+		t.Errorf("ingress annotations = %v", ing.Annotations)
 	}
 }
 

@@ -4,10 +4,11 @@ import { defineConfig, loadEnv } from 'vite';
 
 // The UI is a single-page app embedded in the Go binary (see web.go). In
 // development, `npm run dev` proxies API calls to the Go server at
-// DISPATCH_API_URL (default http://localhost:8080).
+// DISPATCH_API_URL (default https://localhost:8443). The server's certificate
+// is self-signed by default, so the proxy doesn't verify it.
 export default defineConfig(({ mode }) => {
 	const env = loadEnv(mode, '.', 'DISPATCH_');
-	const apiTarget = env.DISPATCH_API_URL || 'http://localhost:8080';
+	const apiTarget = env.DISPATCH_API_URL || 'https://localhost:8443';
 
 	return {
 		plugins: [
@@ -23,9 +24,9 @@ export default defineConfig(({ mode }) => {
 		],
 		server: {
 			proxy: {
-				'/api': { target: apiTarget },
-				'/healthz': { target: apiTarget },
-				'/readyz': { target: apiTarget }
+				'/api': { target: apiTarget, secure: false },
+				'/healthz': { target: apiTarget, secure: false },
+				'/readyz': { target: apiTarget, secure: false }
 			}
 		}
 	};

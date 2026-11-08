@@ -4,7 +4,7 @@
 # .tilt-build/server.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY dispatch-ops /usr/local/bin/dispatch-ops
-EXPOSE 8080
+EXPOSE 8443
 USER 65532:65532
 ENTRYPOINT ["dispatch-ops"]
 CMD ["serve"]
