@@ -1,0 +1,47 @@
+// Dev container for dispatch-ops. Nothing is started automatically: use the
+// Makefile (`make help`) as on the host. Docker commands (`make db-up`,
+// `make kind-up`, `make images`) run against the host's Docker daemon.
+{
+	"name": "dispatch-ops",
+	"build": { "dockerfile": "Dockerfile" },
+	"features": {
+		"ghcr.io/devcontainers/features/go:1": { "version": "1.27" },
+		"ghcr.io/devcontainers/features/node:1": { "version": "25" },
+		// Mounts the host's Docker socket and installs the Docker CLI + compose.
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": { "moby": false },
+		"ghcr.io/devcontainers/features/kubectl-helm-minikube:1": { "helm": "none", "minikube": "none" }
+	},
+	"remoteUser": "vscode",
+	"containerEnv": {
+		// The Makefile adjusts host addresses for the dev container when set.
+		"DISPATCH_DEVCONTAINER": "true"
+	},
+	// host.docker.internal on Linux hosts (Docker Desktop provides it already).
+	"runArgs": ["--add-host=host.docker.internal:host-gateway"],
+	// Publish the API on the host so job pods in kind reach it at
+	// host.docker.internal:8080, as when `make run` runs on the host.
+	"appPort": ["127.0.0.1:8080:8080"],
+	"forwardPorts": [5173],
+	"portsAttributes": {
+		"8080": { "label": "API", "onAutoForward": "ignore" },
+		"5173": { "label": "Vite dev server" }
+	},
+	// Keep Linux node_modules out of the host checkout (native esbuild/rollup
+	// binaries differ between macOS and Linux).
+	"mounts": [
+		"source=dispatch-ops-node-modules,target=${containerWorkspaceFolder}/web/node_modules,type=volume"
+	],
+	// A new volume is root-owned; let `make deps` write to it.
+	"postCreateCommand": "sudo chown vscode:vscode web/node_modules",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go",
+				"svelte.svelte-vscode",
+				"esbenp.prettier-vscode",
+				"ms-kubernetes-tools.vscode-kubernetes-tools",
+				"ms-azuretools.vscode-containers"
+			]
+		}
+	}
+}
