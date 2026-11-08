@@ -6,7 +6,11 @@ export
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 BIN := bin/dispatch-ops
-TEST_DATABASE_URL := postgres://dispatch:dispatch@localhost:5433/dispatch_test?sslmode=disable
+# The test database sits next to DISPATCH_DATABASE_URL's, with a _test suffix.
+TEST_DATABASE_URL := $(subst /dispatch?,/dispatch_test?,$(DISPATCH_DATABASE_URL))
+# The Postgres container that `make db-init` sets up, and its superuser.
+PG_CONTAINER ?= postgresql
+PG_SUPERUSER ?= postgres
 
 IMAGE_TAG ?= dev
 KIND_VERSION := v0.33.0
@@ -16,9 +20,11 @@ CHART := deploy/helm/dispatch-ops-operator
 KIND_CLUSTER := dispatch-ops
 KUBE_CONTEXT := kind-$(KIND_CLUSTER)
 DISPATCH_JOB_NAMESPACE ?= dispatch-jobs
+DEV_NAMESPACE := dispatch-ops
 
 # In the dev container (.devcontainer), Docker runs on the host, so Postgres's
-# published port is on host.docker.internal rather than localhost.
+# published port is on host.docker.internal rather than localhost. (Pods in
+# kind reach it there too; the Tiltfile rewrites the URL the same way.)
 ifdef DISPATCH_DEVCONTAINER
 DISPATCH_DATABASE_URL := $(subst @localhost:,@host.docker.internal:,$(DISPATCH_DATABASE_URL))
 TEST_DATABASE_URL := $(subst @localhost:,@host.docker.internal:,$(TEST_DATABASE_URL))
@@ -53,13 +59,21 @@ manifests: ## Regenerate the DispatchOps CRD and its deepcopy code from internal
 
 # --- Database ----------------------------------------------------------------
 
-.PHONY: db-up
-db-up: ## Start Postgres in Docker (host port 5433)
-	docker compose up -d --wait postgres
-
-.PHONY: db-down
-db-down: ## Stop Postgres (data is kept)
-	docker compose down
+# The database runs outside the cluster, in your own Postgres container
+# ($(PG_CONTAINER)); DISPATCH_DATABASE_URL in .env says how to reach it.
+.PHONY: db-init
+db-init: ## Create DISPATCH_DATABASE_URL's role, database and _test database in your Postgres container (PG_CONTAINER)
+	@url='$(DISPATCH_DATABASE_URL)'; \
+	user=$$(echo "$$url" | sed -E 's#^[a-z]+://([^:@/]+).*#\1#'); \
+	pass=$$(echo "$$url" | sed -nE 's#^[a-z]+://[^:@/]+:([^@]*)@.*#\1#p'); \
+	db=$$(echo "$$url" | sed -E 's#^[a-z]+://[^/]*/([^?]*).*#\1#'); \
+	printf '%s\n' \
+		"SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'user', :'pass') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'user') \gexec" \
+		"SELECT format('ALTER ROLE %I CREATEDB', :'user') \gexec" \
+		"SELECT format('CREATE DATABASE %I OWNER %I', d, :'user') FROM unnest(ARRAY[:'db', :'db' || '_test']) AS d WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = d) \gexec" \
+	| docker exec -i $(PG_CONTAINER) psql -q -v ON_ERROR_STOP=1 -U $(PG_SUPERUSER) -d postgres \
+		-v user="$$user" -v pass="$$pass" -v db="$$db" \
+	&& echo "$(PG_CONTAINER): role $$user can create databases; $$db and $${db}_test exist"
 
 .PHONY: migrate
 migrate: ## Apply pending migrations
@@ -75,16 +89,20 @@ admin: ## Create an "admin" user with a generated password
 
 # --- Run ---------------------------------------------------------------------
 
-.PHONY: run
-run: ## Run the API server (serves the last UI build)
-	go run -ldflags "-X main.version=$(VERSION)" ./cmd/dispatch-ops serve
+.PHONY: dev
+dev: kind-up ## Run everything in the kind cluster with Tilt, rebuilding on changes (Tilt UI: localhost:10350)
+	tilt up
 
-.PHONY: task-manager
-task-manager: ## Run the task manager (runs jobs on the kind cluster; see kind-up)
-	go run -ldflags "-X main.version=$(VERSION)" ./cmd/dispatch-ops task-manager
+.PHONY: dev-down
+dev-down: ## Remove what `make dev` deployed (the cluster, namespaces and database are kept)
+	tilt down
+
+.PHONY: admin-password
+admin-password: ## Print the password the operator generated for "admin" (used only if the database had no admin)
+	@kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) get secret dispatch-ops-admin-password -o jsonpath='{.data.password}' | base64 -d; echo
 
 .PHONY: web-dev
-web-dev: ## Run the Vite dev server with hot reload (proxies /api to :8080)
+web-dev: ## Run the Vite dev server with hot reload (proxies /api to the in-cluster API on :8080)
 	cd web && npm run dev
 
 # --- Dev cluster and execution environments ----------------------------------
@@ -121,34 +139,6 @@ images: ## Build the runner-base image and the starter EEs (ee-shell, ee-python,
 kind-load: images ## Build the images and load them into the kind cluster
 	$(KIND) load docker-image --name $(KIND_CLUSTER) dispatch-ops/runner-base:$(IMAGE_TAG) $(foreach ee,$(EES),dispatch-ops/$(ee):$(IMAGE_TAG))
 
-# --- Operator on the dev cluster ---------------------------------------------
-
-DEV_NAMESPACE := dispatch-ops
-
-.PHONY: kind-operator
-kind-operator: ## Build the server and operator images and install the operator on the kind cluster
-	docker build --build-arg VERSION=$(VERSION) -t dispatch-ops:$(IMAGE_TAG) .
-	docker build --build-arg VERSION=$(VERSION) --target operator -t dispatch-ops-operator:$(IMAGE_TAG) .
-	$(KIND) load docker-image --name $(KIND_CLUSTER) dispatch-ops:$(IMAGE_TAG) dispatch-ops-operator:$(IMAGE_TAG)
-	helm upgrade --install dispatch-ops-operator $(CHART) --kube-context $(KUBE_CONTEXT) \
-		--namespace dispatch-ops-system --create-namespace \
-		--set image.tag=$(IMAGE_TAG) --set serverImage.tag=$(IMAGE_TAG) --set image.pullPolicy=Never
-	kubectl --context $(KUBE_CONTEXT) -n dispatch-ops-system rollout restart deployment/dispatch-ops-operator
-	kubectl --context $(KUBE_CONTEXT) -n dispatch-ops-system rollout status deployment/dispatch-ops-operator --timeout=3m
-
-.PHONY: kind-install
-kind-install: ## Create the dev DispatchOps on the kind cluster (after kind-operator and kind-load)
-	@kubectl --context $(KUBE_CONTEXT) get namespace $(DEV_NAMESPACE) >/dev/null 2>&1 \
-		|| kubectl --context $(KUBE_CONTEXT) create namespace $(DEV_NAMESPACE)
-	kubectl --context $(KUBE_CONTEXT) apply -f deploy/dev/dispatchops.yaml
-	kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) wait dispatchops/dispatch-ops --for=condition=Ready --timeout=5m
-	@echo "admin password: $$(kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) get secret dispatch-ops-admin-password -o jsonpath='{.data.password}' | base64 -d)"
-	@echo "UI: kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) port-forward svc/dispatch-ops-api 8090:8080, then http://localhost:8090"
-
-.PHONY: kind-uninstall
-kind-uninstall: ## Delete the dev DispatchOps (its database volume and secrets are kept)
-	kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) delete dispatchops/dispatch-ops --ignore-not-found
-
 .PHONY: runner
 runner: ## Build static dispatch-runner binaries (linux amd64/arm64) for custom EE images
 	for arch in amd64 arm64; do \
@@ -171,10 +161,7 @@ test: ## Run Go tests (DB tests are skipped unless DISPATCH_TEST_DATABASE_URL is
 	go test ./...
 
 .PHONY: test-db
-test-db: ## Run Go tests including DB tests, against a dispatch_test database in the dev Postgres
-	@docker compose exec -T postgres psql -U dispatch -d dispatch -tAc \
-		"SELECT 1 FROM pg_database WHERE datname = 'dispatch_test'" | grep -q 1 \
-		|| docker compose exec -T postgres createdb -U dispatch dispatch_test
+test-db: ## Run Go tests including DB tests, against dispatch_test* databases (see db-init)
 	DISPATCH_TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -count=1 ./...
 
 .PHONY: check

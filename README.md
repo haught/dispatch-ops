@@ -49,32 +49,51 @@ Kubernetes.
 
 ## Development
 
-Requires Go 1.27+, Node 25+, Docker (Docker Desktop on macOS) and kubectl.
-kind is run through `go run`, so it doesn't need installing.
+Everything runs in a local kind cluster: the operator, the API server, the
+task manager and job pods. [Tilt](https://tilt.dev) rebuilds and redeploys
+whatever a change affects. The database is your own Postgres, outside the
+cluster.
+
+Requires Go 1.27+, Node 25+, Docker (Docker Desktop on macOS), kubectl, Helm 3,
+kind and Tilt (the dev container has them all), and a Postgres you can reach
+at `localhost` (by default a container named `postgresql`).
 
 ```sh
-make setup-env   # create .env from .env.example
+make setup-env   # create .env from .env.example; set DISPATCH_DATABASE_URL
 make deps        # Go modules + npm packages
-make db-up       # Postgres on localhost:5433
-make migrate     # apply migrations
-make admin       # create user "admin"; prints a generated password
-make web         # build the UI (embedded by the Go build)
-make run         # http://localhost:8080
+make db-init     # create the role and the dispatch + dispatch_test databases (once)
+make dev         # kind cluster + `tilt up`
 ```
 
-To run jobs, also:
+Then open http://localhost:8080 (Dispatch Ops) and http://localhost:10350
+(Tilt: build status and logs for every part). On a new database, the operator
+creates the user `admin`; `make admin-password` prints its password.
 
-```sh
-make kind-up       # kind cluster "dispatch-ops" with the dispatch-jobs namespace
-make kind-load     # build runner-base and the starter EEs, load them into kind
-make task-manager  # in another terminal, next to `make run`
-```
+What a change rebuilds:
 
-Job pods reach the API on the host at `http://host.docker.internal:8080`
-(`DISPATCH_RUNNER_API_URL`). If your `.env` is older than
-`.env.example`, copy the variables it is missing.
+| You change | Tilt runs | Then |
+|---|---|---|
+| `web/` | `npm run build`, then the Go build (the UI is embedded) | as below |
+| `cmd/dispatch-ops`, `internal/` | Go build, server image | the operator migrates the database, then rolls the API server and task manager |
+| `cmd/dispatch-operator`, `internal/operator`, the chart | Go build, operator image | the operator rolls |
+| `cmd/dispatch-runner`, `internal/runner`, `images/` | `make kind-load` | the next job uses the new EE images |
+| `deploy/dev/dispatchops.yaml`, `.env` | — | re-applies the `DispatchOps` (edit the `Tiltfile` to change how) |
 
-Then register the image and create a template, from the UI (*Execution
+A server change takes some 15–30 seconds to go live. For quick UI work, run
+`make web-dev` next to `make dev` and open http://localhost:5173: Vite
+hot-reloads the UI and proxies `/api` to the API in the cluster.
+
+The `DispatchOps` the operator runs is `deploy/dev/dispatchops.yaml`. The
+`Tiltfile` adds the server image it built and Secrets made from `.env`: the
+database URL (with `localhost` changed to `host.docker.internal`, where pods
+reach your Postgres), the encryption key and the OIDC client secret. Edit the
+`DispatchOps`, not the Deployments: the operator reverts changes to what it
+created.
+
+`make dev-down` (`tilt down`) removes the deployment; `make kind-down` deletes
+the cluster. The database is untouched either way.
+
+To run jobs, register an image and create a template, from the UI (*Execution
 environments*, then *Job templates* → *New job template*) or with an API
 token:
 
@@ -102,38 +121,22 @@ curl -s localhost:8080/api/v1/job-templates -H "Authorization: Bearer $TOKEN" \
 `PATH` (e.g. `pip install ansible-core` in a virtualenv); otherwise that test
 is skipped.
 
-To run the whole system in the kind cluster through the operator instead:
-
-```sh
-make kind-up kind-load  # cluster, job namespace and execution environments
-make kind-operator      # build the server and operator images, helm install the operator
-make kind-install       # apply deploy/dev/dispatchops.yaml and wait until it's ready
-```
-
-`make kind-install` prints the administrator's password and how to reach the
-UI with `kubectl port-forward`. Rerun `make kind-operator` after changing the
-server or the operator. `make kind-uninstall` deletes the installation but
-keeps its database.
-
-For UI work, run `make run` and `make web-dev` together, then open
-http://localhost:5173. Vite hot-reloads the UI and proxies `/api` to the Go
-server.
-
 `make help` lists all targets.
 
 ### Dev container
 
-`.devcontainer/` has everything above (Go, Node, the Docker CLI and compose,
-kubectl, psql, ansible-core) and uses the host's Docker daemon through its
-socket. It starts nothing by itself; use the same `make` targets. Inside it:
+`.devcontainer/` has everything above (Go, Node, the Docker CLI, kubectl,
+Helm, kind, Tilt, psql, ansible-core) and uses the host's Docker daemon
+through its socket. It starts nothing by itself; use the same `make` targets.
+Inside it:
 
-- `make db-up` starts Postgres on the host; the Makefile points
-  `DISPATCH_DATABASE_URL` at `host.docker.internal` instead of `localhost`.
+- The Makefile points `DISPATCH_DATABASE_URL` at `host.docker.internal`
+  instead of `localhost`.
 - `make kind-up` also joins the container to the `kind` network and writes a
   kubeconfig with the cluster's internal address. After rebuilding the
   container, run `make kind-join` to do that again for an existing cluster.
-- Port 8080 is published on the host, so job pods still reach the API at
-  `http://host.docker.internal:8080`.
+- Ports 8080 (Dispatch Ops), 10350 (Tilt) and 5173 (Vite) are forwarded to
+  the host.
 - `web/node_modules` is a Docker volume, so the container's Linux packages
   don't replace the host's. Run `make deps` once after creating the container.
 
@@ -161,7 +164,7 @@ with `h.audit` (`internal/api/audit.go`).
 
 ```sh
 make test      # unit tests; database tests are skipped
-make test-db   # all tests, against dispatch_test_* databases in the dev Postgres
+make test-db   # all tests, against dispatch_test_* databases in your Postgres (see db-init)
 make check     # go vet, gofmt, svelte-check, prettier
 ```
 

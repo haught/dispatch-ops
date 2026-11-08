@@ -1,0 +1,7 @@
+# The operator image for `tilt up`: the binary Tilt compiles in the dev
+# container, on the same base as the release image (the `operator` stage of
+# the repository's Dockerfile). Build context: .tilt-build/operator.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY dispatch-operator /usr/local/bin/dispatch-operator
+USER 65532:65532
+ENTRYPOINT ["dispatch-operator"]

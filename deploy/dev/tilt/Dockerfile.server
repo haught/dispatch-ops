@@ -1,0 +1,10 @@
+# The server image for `tilt up`: the binary Tilt compiles in the dev
+# container (with a warm Go cache), on the same base as the release image
+# (the last stage of the repository's Dockerfile). Build context:
+# .tilt-build/server.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY dispatch-ops /usr/local/bin/dispatch-ops
+EXPOSE 8080
+USER 65532:65532
+ENTRYPOINT ["dispatch-ops"]
+CMD ["serve"]

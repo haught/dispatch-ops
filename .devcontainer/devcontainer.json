@@ -1,6 +1,6 @@
 // Dev container for dispatch-ops. Nothing is started automatically: use the
-// Makefile (`make help`) as on the host. Docker commands (`make db-up`,
-// `make kind-up`, `make images`) run against the host's Docker daemon.
+// Makefile (`make help`) as on the host. Docker commands (`make kind-up`,
+// `make dev`, `make images`) run against the host's Docker daemon.
 {
 	"name": "dispatch-ops",
 	"build": { "dockerfile": "Dockerfile" },
@@ -28,12 +28,12 @@
 		// Docker Desktop's socket is root:root 660; group 0 lets vscode open it.
 		"--group-add=0"
 	],
-	// Publish the API on the host so job pods in kind reach it at
-	// host.docker.internal:8080, as when `make run` runs on the host.
-	"appPort": ["127.0.0.1:8080:8080"],
-	"forwardPorts": [5173],
+	// The app (Tilt's port-forward to the in-cluster API), the Tilt UI, and
+	// the Vite dev server (`make web-dev`).
+	"forwardPorts": [8080, 10350, 5173],
 	"portsAttributes": {
-		"8080": { "label": "API", "onAutoForward": "ignore" },
+		"8080": { "label": "Dispatch Ops" },
+		"10350": { "label": "Tilt" },
 		"5173": { "label": "Vite dev server" }
 	},
 	"mounts": [

@@ -93,8 +93,14 @@ func mapErr(err error) error {
 }
 
 // mapDeleteErr is mapErr for deletes, where a foreign key violation means
-// another row still references the one being deleted.
+// another row still references the one being deleted. PostgreSQL 18 reports
+// an ON DELETE RESTRICT violation as restrict_violation (23001); earlier
+// versions as foreign_key_violation (23503).
 func mapDeleteErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23001" {
+		return ErrInUse
+	}
 	err = mapErr(err)
 	if errors.Is(err, ErrInvalidReference) {
 		return ErrInUse

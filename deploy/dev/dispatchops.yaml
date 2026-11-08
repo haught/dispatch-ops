@@ -1,22 +1,32 @@
-# A Dispatch Ops installation on the kind dev cluster (`make kind-install`),
-# run by the operator from `make kind-operator`. Jobs run in the
-# dispatch-jobs namespace that `make kind-up` creates.
+# The Dispatch Ops installation on the kind dev cluster, run by the operator.
+# `tilt up` (`make dev`) applies it and fills in what comes from .env: the
+# server image it builds (spec.image), the Secrets below, and, when
+# DISPATCH_OIDC_ISSUER is set, spec.externalURL and spec.oidc. Jobs run in the
+# dispatch-jobs namespace.
 apiVersion: dispatch-ops.io/v1alpha1
 kind: DispatchOps
 metadata:
   name: dispatch-ops
   namespace: dispatch-ops
 spec:
-  # Images loaded with `kind load` must not be pulled.
+  # Images Tilt loads into kind must not be pulled.
   imagePullPolicy: Never
   api:
     replicas: 1
   taskManager:
     jobNamespace: dispatch-jobs
     maxConcurrentJobs: 5
+  # The Postgres outside the cluster that DISPATCH_DATABASE_URL names (see
+  # `make db-init`). The Tiltfile creates this Secret from .env.
   database:
-    managed:
-      storageSize: 1Gi
+    external:
+      urlSecret:
+        name: dispatch-ops-dev-db
+        key: url
+  # DISPATCH_ENCRYPTION_KEY from .env, so credentials stored in that database
+  # stay readable.
+  encryptionKeySecret:
+    name: dispatch-ops-dev-encryption-key
   # Reached with kubectl port-forward over plain HTTP.
   secureCookies: false
   logLevel: debug

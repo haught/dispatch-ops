@@ -1,5 +1,7 @@
-# Local Kubernetes cluster for development (`make kind-up`). Job pods run
-# here; the API server and task manager run on the host.
+# Local Kubernetes cluster for development (`make kind-up`, or `make dev`
+# which runs it first). Tilt runs the operator, the API server and the task
+# manager here, and job pods run here too. The database is outside it (see
+# DISPATCH_DATABASE_URL in .env).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: dispatch-ops
