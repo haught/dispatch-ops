@@ -1,0 +1,16 @@
+The Dispatch Ops operator is running in {{ .Release.Namespace }}. It runs
+{{ .Values.serverImage.repository }}:{{ .Values.serverImage.tag | default .Chart.AppVersion }} for DispatchOps resources that don't name an image.
+
+Create an installation, e.g. with an operator-managed database:
+
+  kubectl apply -f - <<YAML
+  apiVersion: dispatch-ops.io/v1alpha1
+  kind: DispatchOps
+  metadata:
+    name: dispatch-ops
+    namespace: dispatch-ops
+  spec: {}
+  YAML
+
+and follow it with `kubectl get dispatchops -n dispatch-ops -w`. The
+administrator's password is in the <name>-admin-password Secret.

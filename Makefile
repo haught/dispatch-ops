@@ -11,6 +11,8 @@ TEST_DATABASE_URL := postgres://dispatch:dispatch@localhost:5433/dispatch_test?s
 IMAGE_TAG ?= dev
 KIND_VERSION := v0.33.0
 KIND := go run sigs.k8s.io/kind@$(KIND_VERSION)
+CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
+CHART := deploy/helm/dispatch-ops-operator
 KIND_CLUSTER := dispatch-ops
 KUBE_CONTEXT := kind-$(KIND_CLUSTER)
 DISPATCH_JOB_NAMESPACE ?= dispatch-jobs
@@ -40,9 +42,14 @@ deps: ## Install Go and npm dependencies
 # --- Code generation ---------------------------------------------------------
 
 .PHONY: generate
-generate: ## Regenerate Go server and TS client from api/openapi.yaml
+generate: manifests ## Regenerate Go server and TS client from api/openapi.yaml, and the CRD
 	go generate ./internal/api/apigen/ ./internal/runner/runnerapi/
 	cd web && npm run gen:api
+
+.PHONY: manifests
+manifests: ## Regenerate the DispatchOps CRD and its deepcopy code from internal/operator/api
+	$(CONTROLLER_GEN) object paths=./internal/operator/api/... \
+		crd paths=./internal/operator/api/... output:crd:dir=$(CHART)/files
 
 # --- Database ----------------------------------------------------------------
 
@@ -114,6 +121,34 @@ images: ## Build the runner-base image and the starter EEs (ee-shell, ee-python,
 kind-load: images ## Build the images and load them into the kind cluster
 	$(KIND) load docker-image --name $(KIND_CLUSTER) dispatch-ops/runner-base:$(IMAGE_TAG) $(foreach ee,$(EES),dispatch-ops/$(ee):$(IMAGE_TAG))
 
+# --- Operator on the dev cluster ---------------------------------------------
+
+DEV_NAMESPACE := dispatch-ops
+
+.PHONY: kind-operator
+kind-operator: ## Build the server and operator images and install the operator on the kind cluster
+	docker build --build-arg VERSION=$(VERSION) -t dispatch-ops:$(IMAGE_TAG) .
+	docker build --build-arg VERSION=$(VERSION) --target operator -t dispatch-ops-operator:$(IMAGE_TAG) .
+	$(KIND) load docker-image --name $(KIND_CLUSTER) dispatch-ops:$(IMAGE_TAG) dispatch-ops-operator:$(IMAGE_TAG)
+	helm upgrade --install dispatch-ops-operator $(CHART) --kube-context $(KUBE_CONTEXT) \
+		--namespace dispatch-ops-system --create-namespace \
+		--set image.tag=$(IMAGE_TAG) --set serverImage.tag=$(IMAGE_TAG) --set image.pullPolicy=Never
+	kubectl --context $(KUBE_CONTEXT) -n dispatch-ops-system rollout restart deployment/dispatch-ops-operator
+	kubectl --context $(KUBE_CONTEXT) -n dispatch-ops-system rollout status deployment/dispatch-ops-operator --timeout=3m
+
+.PHONY: kind-install
+kind-install: ## Create the dev DispatchOps on the kind cluster (after kind-operator and kind-load)
+	@kubectl --context $(KUBE_CONTEXT) get namespace $(DEV_NAMESPACE) >/dev/null 2>&1 \
+		|| kubectl --context $(KUBE_CONTEXT) create namespace $(DEV_NAMESPACE)
+	kubectl --context $(KUBE_CONTEXT) apply -f deploy/dev/dispatchops.yaml
+	kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) wait dispatchops/dispatch-ops --for=condition=Ready --timeout=5m
+	@echo "admin password: $$(kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) get secret dispatch-ops-admin-password -o jsonpath='{.data.password}' | base64 -d)"
+	@echo "UI: kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) port-forward svc/dispatch-ops-api 8090:8080, then http://localhost:8090"
+
+.PHONY: kind-uninstall
+kind-uninstall: ## Delete the dev DispatchOps (its database volume and secrets are kept)
+	kubectl --context $(KUBE_CONTEXT) -n $(DEV_NAMESPACE) delete dispatchops/dispatch-ops --ignore-not-found
+
 .PHONY: runner
 runner: ## Build static dispatch-runner binaries (linux amd64/arm64) for custom EE images
 	for arch in amd64 arm64; do \
@@ -149,5 +184,10 @@ check: ## Vet/format-check Go and type-check/lint the UI
 	cd web && npm run check && npm run lint
 
 .PHONY: docker
-docker: ## Build the container image
+docker: ## Build the server and operator container images
 	docker build --build-arg VERSION=$(VERSION) -t dispatch-ops:$(VERSION) .
+	docker build --build-arg VERSION=$(VERSION) --target operator -t dispatch-ops-operator:$(VERSION) .
+
+.PHONY: helm-lint
+helm-lint: ## Lint the operator's Helm chart
+	helm lint $(CHART)

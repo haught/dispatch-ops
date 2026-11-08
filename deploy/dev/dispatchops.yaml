@@ -1,0 +1,22 @@
+# A Dispatch Ops installation on the kind dev cluster (`make kind-install`),
+# run by the operator from `make kind-operator`. Jobs run in the
+# dispatch-jobs namespace that `make kind-up` creates.
+apiVersion: dispatch-ops.io/v1alpha1
+kind: DispatchOps
+metadata:
+  name: dispatch-ops
+  namespace: dispatch-ops
+spec:
+  # Images loaded with `kind load` must not be pulled.
+  imagePullPolicy: Never
+  api:
+    replicas: 1
+  taskManager:
+    jobNamespace: dispatch-jobs
+    maxConcurrentJobs: 5
+  database:
+    managed:
+      storageSize: 1Gi
+  # Reached with kubectl port-forward over plain HTTP.
+  secureCookies: false
+  logLevel: debug

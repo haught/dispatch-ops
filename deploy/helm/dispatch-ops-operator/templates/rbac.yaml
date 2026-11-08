@@ -1,0 +1,58 @@
+# What the operator does in the namespaces it manages. It holds every
+# permission it grants the task manager in the job namespace, since
+# Kubernetes only lets it grant those.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dispatch-ops-operator.fullname" . }}
+  labels:
+    {{- include "dispatch-ops-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [dispatch-ops.io]
+    resources: [dispatchops]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [dispatch-ops.io]
+    resources: [dispatchops/status]
+    verbs: [get, update, patch]
+  - apiGroups: [dispatch-ops.io]
+    resources: [dispatchops/finalizers]
+    verbs: [update]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [services, serviceaccounts, secrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["", events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dispatch-ops-operator.fullname" . }}
+  labels:
+    {{- include "dispatch-ops-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dispatch-ops-operator.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dispatch-ops-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

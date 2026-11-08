@@ -1,0 +1,35 @@
+# A production-style Dispatch Ops installation. Create the Secrets it
+# names first; see README.md ("Installing on Kubernetes").
+apiVersion: dispatch-ops.io/v1alpha1
+kind: DispatchOps
+metadata:
+  name: dispatch-ops
+  namespace: dispatch-ops
+spec:
+  api:
+    replicas: 2
+    ingress:
+      host: dispatch.example.com
+      className: nginx
+      tlsSecretName: dispatch-ops-tls
+  taskManager:
+    replicas: 2
+    jobNamespace: dispatch-jobs
+    maxConcurrentJobs: 20
+  database:
+    external:
+      urlSecret:
+        name: dispatch-ops-database
+        key: url
+  # Back this Secret up: without it, stored credentials can't be decrypted.
+  encryptionKeySecret:
+    name: dispatch-ops-encryption-key
+  externalURL: https://dispatch.example.com
+  oidc:
+    issuer: https://idp.example.com/realms/corp
+    clientID: dispatch-ops
+    clientSecret:
+      name: dispatch-ops-oidc
+      key: client-secret
+    scopes: [profile, email, groups]
+    displayName: Corp SSO

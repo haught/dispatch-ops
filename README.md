@@ -11,7 +11,8 @@ teams control who can see, use, change and launch what; every change is
 audited. Inventories, credentials, execution environments, projects and job
 templates are managed through the API; the UI lists jobs and templates,
 launches templates, streams job output, shows per-host results, and manages
-users, teams, roles and API tokens.
+users, teams, roles and API tokens. An operator installs and upgrades it on
+Kubernetes.
 
 ## Layout
 
@@ -20,6 +21,7 @@ users, teams, roles and API tokens.
 | `api/openapi.yaml` | The API contract. The Go server and the TS client are generated from it. |
 | `cmd/dispatch-ops` | The binary: `serve`, `task-manager`, `migrate`, `user create`, `user grant-admin`, `gen-key` |
 | `cmd/dispatch-runner` | The runner: the entrypoint of every execution environment image |
+| `cmd/dispatch-operator` | The Kubernetes operator |
 | `internal/api` | HTTP handlers (one file per resource) and request pipeline (`router.go`) |
 | `internal/api/apigen` | Generated server code. Do not edit by hand. |
 | `internal/auth` | Password hashing, tokens, request principal |
@@ -33,8 +35,11 @@ users, teams, roles and API tokens.
 | `internal/runner` | Runner logic; `runnerapi` is its generated API client, `callback` the Ansible callback plugin it embeds |
 | `internal/db` | Connection pool and embedded SQL migrations |
 | `internal/server` | Top-level HTTP handler: API, runner API, health probes, embedded UI |
+| `internal/operator` | The operator's reconciler and the objects it creates; `api/v1alpha1` is the `DispatchOps` resource |
 | `images/` | `runner-base` and the starter execution environments `ee-shell`, `ee-python` and `ee-ansible` |
-| `deploy/dev/` | kind cluster config for development |
+| `deploy/dev/` | kind cluster config and the `DispatchOps` for development |
+| `deploy/helm/dispatch-ops-operator` | Helm chart that installs the operator and the CRD (`files/` is generated) |
+| `deploy/examples/` | A production-style `DispatchOps` |
 | `web/` | SvelteKit 3 / Svelte 5 single-page app, embedded into the binary |
 
 ## Development
@@ -90,6 +95,19 @@ curl -s localhost:8080/api/v1/job-templates -H "Authorization: Bearer $TOKEN" \
 `PATH` (e.g. `pip install ansible-core` in a virtualenv); otherwise that test
 is skipped.
 
+To run the whole system in the kind cluster through the operator instead:
+
+```sh
+make kind-up kind-load  # cluster, job namespace and execution environments
+make kind-operator      # build the server and operator images, helm install the operator
+make kind-install       # apply deploy/dev/dispatchops.yaml and wait until it's ready
+```
+
+`make kind-install` prints the administrator's password and how to reach the
+UI with `kubectl port-forward`. Rerun `make kind-operator` after changing the
+server or the operator. `make kind-uninstall` deletes the installation but
+keeps its database.
+
 For UI work, run `make run` and `make web-dev` together, then open
 http://localhost:5173. Vite hot-reloads the UI and proxies `/api` to the Go
 server.
@@ -111,6 +129,12 @@ socket. It starts nothing by itself; use the same `make` targets. Inside it:
   `http://host.docker.internal:8080`.
 - `web/node_modules` is a Docker volume, so the container's Linux packages
   don't replace the host's. Run `make deps` once after creating the container.
+
+### Changing the DispatchOps resource
+
+Edit `internal/operator/api/v1alpha1/types.go` (kubebuilder markers set
+validation and defaults) and run `make manifests`, which regenerates the
+deepcopy code and the CRD in the Helm chart. `make generate` does it too.
 
 ### Changing the API
 
@@ -375,11 +399,79 @@ Task manager only:
 | `DISPATCH_JOB_TTL` | `1h` | How long finished Kubernetes Jobs are kept |
 | `DISPATCH_LEADER_ELECTION` | `true` | Elect one active task manager with a Lease |
 
-## Container image
+## Installing on Kubernetes
+
+The operator runs Dispatch Ops from `DispatchOps` resources (group
+`dispatch-ops.io`, short name `dops`), one per installation. Install it with
+its Helm chart:
+
+```sh
+helm install dispatch-ops-operator deploy/helm/dispatch-ops-operator \
+  --namespace dispatch-ops-system --create-namespace
+```
+
+The chart installs the CRD too (kept on uninstall, so installations
+survive). `serverImage` sets the server image that installations without
+`spec.image` run, and `watchNamespaces` limits the operator to some
+namespaces. Then create an installation:
+
+```yaml
+apiVersion: dispatch-ops.io/v1alpha1
+kind: DispatchOps
+metadata:
+  name: dispatch-ops
+  namespace: dispatch-ops
+spec: {}
+```
+
+`spec: {}` runs a PostgreSQL the operator manages, two API replicas and one
+task manager running jobs in the same namespace. `kubectl get dops` shows
+whether it is ready and the image it runs; the conditions
+(`DatabaseReady`, `Migrated`, `APIReady`, `TaskManagerReady`, `Ready`) say
+what it is waiting for. `deploy/examples/dispatchops.yaml` shows the
+options for production: an external database, an encryption key you
+provide, an Ingress, single sign-on and a separate job namespace. `kubectl
+explain dispatchops.spec` documents every field.
+
+For an installation named `<name>`, the operator creates:
+
+| Object | |
+|---|---|
+| `<name>-api` Deployment and Service | The API server and UI on port 8080. Jobs reach it at `http://<name>-api.<namespace>.svc:8080` |
+| `<name>-task-manager` Deployment, ServiceAccount, Role and RoleBinding | The task manager, with the permissions it needs in the job namespace |
+| `<name>-postgres` StatefulSet and Service | The managed database (unless `spec.database.external`) |
+| `<name>-migrate-<hash>` Job | Database migrations for one image, then the administrator if missing |
+| `<name>` Ingress | If `spec.api.ingress` is set |
+| `<name>-encryption-key`, `<name>-admin-password`, `<name>-postgres` Secrets | Generated unless the spec names your own |
+
+Installing or changing `spec.image` (or upgrading the chart, for
+installations without one) first runs the new image's migrations in a Job;
+the API server and task manager keep running the old image until the
+migrations succeed, then roll out. If they fail, the installation stays on
+the old image with `Migrated=False`; fix the cause and delete the Job to
+retry. Migrations only go forward, so going back to an older image after an
+upgrade is not supported.
+
+The administrator (`spec.admin.username`, default `admin`) is created by the
+first migration Job with the password in `<name>-admin-password`, unless a
+user of that name exists. Changing the Secret later doesn't change the
+password.
+
+Deleting a `DispatchOps` deletes what the operator runs but keeps the
+database volume and the generated Secrets, so recreating it with the same
+name picks up the same data. Back up the encryption key Secret: without it,
+stored credentials can't be decrypted. The managed database has no backups
+or replication; use `spec.database.external` where that matters.
+
+Changes to Secrets the operator reads (e.g. the OIDC client secret) take
+effect when the pods restart (`kubectl rollout restart`).
+
+## Container images
 
 ```sh
 make docker
 docker run --rm -e DISPATCH_DATABASE_URL=… -p 8080:8080 dispatch-ops:dev
 ```
 
-Health probes: `/healthz` (liveness) and `/readyz` (checks the database).
+builds `dispatch-ops` (the server) and `dispatch-ops-operator`. Health
+probes: `/healthz` (liveness) and `/readyz` (checks the database).

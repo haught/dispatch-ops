@@ -1,0 +1,8 @@
+apiVersion: v2
+name: dispatch-ops-operator
+description: Installs the Dispatch Ops operator, which runs Dispatch Ops from DispatchOps resources.
+type: application
+version: 0.1.0
+# The operator and server image tag. Development builds use "dev".
+appVersion: dev
+kubeVersion: ">=1.30.0-0"

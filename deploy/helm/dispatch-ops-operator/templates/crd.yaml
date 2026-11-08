@@ -1,0 +1,7 @@
+{{- if .Values.crds.install }}
+{{- $crd := .Files.Get "files/dispatch-ops.io_dispatchops.yaml" }}
+{{- if .Values.crds.keep }}
+{{- $crd = $crd | replace "\nmetadata:\n  annotations:\n" "\nmetadata:\n  annotations:\n    helm.sh/resource-policy: keep\n" }}
+{{- end }}
+{{ $crd }}
+{{- end }}

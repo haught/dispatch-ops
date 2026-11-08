@@ -1,0 +1,47 @@
+# The operator image.
+image:
+  repository: dispatch-ops-operator
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The dispatch-ops server image that DispatchOps resources without
+# spec.image run. Upgrading the chart upgrades them to its version.
+serverImage:
+  repository: dispatch-ops
+  # Defaults to the chart's appVersion.
+  tag: ""
+
+imagePullSecrets: []
+
+# Replicas elect one active operator.
+replicaCount: 1
+
+# Namespaces whose DispatchOps resources the operator manages. Empty means
+# all namespaces.
+watchNamespaces: []
+
+crds:
+  # Install and upgrade the DispatchOps CRD with the chart.
+  install: true
+  # Keep the CRD (and so every DispatchOps) when the chart is uninstalled.
+  keep: true
+
+serviceAccount:
+  # Defaults to the release's full name.
+  name: ""
+  annotations: {}
+
+logLevel: info
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

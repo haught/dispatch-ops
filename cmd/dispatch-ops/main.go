@@ -321,6 +321,8 @@ func createUser(args []string) error {
 	email := fs.String("email", "", "email address")
 	admin := fs.Bool("admin", false, "grant system administrator rights")
 	passwordStdin := fs.Bool("password-stdin", false, "read the password from standard input instead of generating one")
+	passwordFile := fs.String("password-file", "", "read the password from this file instead of generating one")
+	ifMissing := fs.Bool("if-missing", false, "do nothing, successfully, if the username is taken")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -329,7 +331,21 @@ func createUser(args []string) error {
 		return errors.New("-username is required")
 	}
 
-	password, generated, err := readOrGeneratePassword(*passwordStdin, os.Stdin)
+	var in io.Reader
+	switch {
+	case *passwordStdin && *passwordFile != "":
+		return errors.New("use only one of -password-stdin and -password-file")
+	case *passwordStdin:
+		in = os.Stdin
+	case *passwordFile != "":
+		f, err := os.Open(*passwordFile)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		in = f
+	}
+	password, generated, err := readOrGeneratePassword(in)
 	if err != nil {
 		return err
 	}
@@ -350,6 +366,14 @@ func createUser(args []string) error {
 	defer pool.Close()
 
 	st := store.New(pool)
+	if *ifMissing {
+		if _, err := st.GetUserByUsername(ctx, *username); err == nil {
+			fmt.Printf("user %s already exists\n", *username)
+			return nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+	}
 	u, err := st.CreateLocalUser(ctx, store.NewLocalUser{
 		Username: *username, DisplayName: *displayName, Email: *email, PasswordHash: hash, IsAdmin: *admin,
 	})
@@ -404,11 +428,13 @@ func grantAdmin(username string) error {
 	return nil
 }
 
-func readOrGeneratePassword(fromStdin bool, stdin io.Reader) (password string, generated bool, err error) {
-	if !fromStdin {
+// readOrGeneratePassword reads the first line of in, or generates a
+// password if in is nil.
+func readOrGeneratePassword(in io.Reader) (password string, generated bool, err error) {
+	if in == nil {
 		return rand.Text(), true, nil
 	}
-	line, err := bufio.NewReader(stdin).ReadString('\n')
+	line, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", false, err
 	}
