@@ -116,6 +116,344 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sign-in methods the server offers */
+        get: operations["getAuthConfig"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/oidc/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Start single sign-on (OIDC)
+         * @description Redirects the browser to the OIDC provider (authorization code flow
+         *     with PKCE). The provider sends it back to `/api/v1/auth/oidc/callback`.
+         */
+        get: operations["oidcLogin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/oidc/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Finish single sign-on (OIDC)
+         * @description The OIDC provider redirects the browser here. On success the user is
+         *     created or updated from the ID token's claims, their OIDC-mapped team
+         *     memberships are synced, a session cookie is set, and the browser is
+         *     sent to the page it started from. On failure the browser is sent to
+         *     `/login?error=<message>`.
+         */
+        get: operations["oidcCallback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List users
+         * @description Any signed-in user may list users, to choose who to grant roles to.
+         */
+        get: operations["listUsers"];
+        put?: never;
+        /**
+         * Create a local user
+         * @description System administrators only. Local users sign in with a password; they
+         *     are mainly for automation (service accounts). OIDC users are created
+         *     when they first sign in.
+         */
+        post: operations["createUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        /** Get a user */
+        get: operations["getUser"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a user
+         * @description System administrators only. Removes the user's tokens, team
+         *     memberships and roles. Jobs they launched are kept. You cannot delete
+         *     yourself.
+         */
+        delete: operations["deleteUser"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a user
+         * @description System administrators only. Deactivating a user ends their sessions;
+         *     their API tokens stop working until they are reactivated. OIDC
+         *     users' username, display name and email are updated from the
+         *     provider at each sign-in.
+         */
+        patch: operations["updateUser"];
+        trace?: never;
+    };
+    "/api/v1/users/{userId}/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List a user's API tokens
+         * @description System administrators and auditors only.
+         */
+        get: operations["listUserApiTokens"];
+        put?: never;
+        /**
+         * Create an API token for a user
+         * @description System administrators only, from a browser session. Gives a service
+         *     account a token without signing in as it. The secret is returned only
+         *     in this response.
+         */
+        post: operations["createUserApiToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{userId}/tokens/{tokenId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+                tokenId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke a user's API token
+         * @description System administrators only.
+         */
+        delete: operations["deleteUserApiToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List teams */
+        get: operations["listTeams"];
+        put?: never;
+        /**
+         * Create a team
+         * @description System administrators only.
+         */
+        post: operations["createTeam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/teams/{teamId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+            };
+            cookie?: never;
+        };
+        /** Get a team */
+        get: operations["getTeam"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a team
+         * @description System administrators only. The roles granted to the team are revoked.
+         */
+        delete: operations["deleteTeam"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a team
+         * @description System administrators only. Changes to `oidcGroups` apply to each
+         *     member the next time they sign in.
+         */
+        patch: operations["updateTeam"];
+        trace?: never;
+    };
+    "/api/v1/teams/{teamId}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+            };
+            cookie?: never;
+        };
+        /** List a team's members */
+        get: operations["listTeamMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/teams/{teamId}/members/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Add a user to a team
+         * @description System administrators only. Members added here stay members whatever
+         *     their OIDC groups.
+         */
+        put: operations["addTeamMember"];
+        post?: never;
+        /**
+         * Remove a user from a team
+         * @description System administrators only. A member from an OIDC group joins again
+         *     at their next sign-in unless the team's `oidcGroups` change.
+         */
+        delete: operations["removeTeamMember"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/role-grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List role grants
+         * @description System administrators and auditors see every grant. Others must
+         *     filter by a resource they administer (`resourceType` and
+         *     `resourceId`), or by themselves (`userId`, which includes the grants
+         *     to their teams).
+         */
+        get: operations["listRoleGrants"];
+        put?: never;
+        /**
+         * Grant a role
+         * @description Grants a role to a user or a team. System administrators can grant
+         *     anything. A resource's admins can grant roles on that resource.
+         */
+        post: operations["createRoleGrant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/role-grants/{grantId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                grantId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke a role
+         * @description System administrators, or an admin of the grant's resource.
+         */
+        delete: operations["deleteRoleGrant"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/audit-log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List audit log entries, newest first
+         * @description System administrators and auditors only.
+         */
+        get: operations["listAuditLog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/inventories": {
         parameters: {
             query?: never;
@@ -725,7 +1063,12 @@ export interface components {
             email: string;
             /** @enum {string} */
             authSource: "local" | "oidc";
+            /** @description Holds the system_admin role, directly or through a team */
             isAdmin: boolean;
+            /** @description Holds the auditor role, directly or through a team */
+            isAuditor: boolean;
+            /** @description Inactive users can't sign in, and their API tokens don't work */
+            isActive: boolean;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -735,6 +1078,7 @@ export interface components {
             /** Format: uuid */
             id: string;
             name: string;
+            scope: components["schemas"]["TokenScope"];
             /** @description First characters of the token, to help tell tokens apart */
             prefix: string;
             /** Format: date-time */
@@ -748,10 +1092,190 @@ export interface components {
             name: string;
             /** @description Omit for a token that never expires */
             expiresInDays?: number;
+            /** @default write */
+            scope: components["schemas"]["TokenScope"];
         };
         CreatedApiToken: components["schemas"]["ApiToken"] & {
             /** @description The token secret. Shown only once. */
             token: string;
+        };
+        AuthConfig: {
+            /** @description Whether single sign-on (`GET /api/v1/auth/oidc/login`) is configured */
+            oidcEnabled: boolean;
+            /** @description Name of the sign-on provider, for the sign-in button */
+            oidcDisplayName: string;
+        };
+        UserList: {
+            items: components["schemas"]["User"][];
+            total: number;
+        };
+        Username: string;
+        Password: string;
+        UserCreate: {
+            username: components["schemas"]["Username"];
+            displayName?: string;
+            email?: string;
+            password: components["schemas"]["Password"];
+        };
+        UserUpdate: {
+            /** @description Local users only */
+            username?: components["schemas"]["Username"];
+            displayName?: string;
+            email?: string;
+            isActive?: boolean;
+            /** @description Local users only */
+            password?: components["schemas"]["Password"];
+        };
+        ApiTokenList: {
+            items: components["schemas"]["ApiToken"][];
+        };
+        /**
+         * @description `read` tokens may only make GET requests; `write` tokens may do anything their user may.
+         * @enum {string}
+         */
+        TokenScope: "read" | "write";
+        TeamRef: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        /**
+         * @description Values of the OIDC groups claim. Users signing in with any of them
+         *     join the team; those signing in without them leave it again.
+         */
+        OidcGroups: string[];
+        Team: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            description: string;
+            oidcGroups: string[];
+            memberCount: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        TeamCreate: {
+            name: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            oidcGroups?: components["schemas"]["OidcGroups"];
+        };
+        TeamUpdate: {
+            name?: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            oidcGroups?: components["schemas"]["OidcGroups"];
+        };
+        TeamList: {
+            items: components["schemas"]["Team"][];
+            total: number;
+        };
+        TeamMember: {
+            user: components["schemas"]["UserRef"];
+            displayName: string;
+            /**
+             * @description `manual`: added through the API. `oidc`: from the OIDC groups claim at sign-in.
+             * @enum {string}
+             */
+            source: "manual" | "oidc";
+            /** Format: date-time */
+            addedAt: string;
+        };
+        TeamMemberList: {
+            items: components["schemas"]["TeamMember"][];
+        };
+        /**
+         * @description On a resource: `admin` (edit, delete, grant roles on it; includes
+         *     the others), `use` (reference it from a job template; inventories,
+         *     credentials and projects), `execute` (launch it; job templates) and
+         *     `read`. Global: `system_admin` (everything) and `auditor` (read
+         *     everything, including the audit log).
+         * @enum {string}
+         */
+        Role: "admin" | "use" | "execute" | "read" | "system_admin" | "auditor";
+        /** @enum {string} */
+        ResourceType: "inventory" | "credential" | "project" | "job_template";
+        RoleGrant: {
+            /** Format: uuid */
+            id: string;
+            role: components["schemas"]["Role"];
+            /** @description `null` for a global role */
+            resourceType: components["schemas"]["ResourceType"] | null;
+            /**
+             * Format: uuid
+             * @description `null` for a global role, or a role on every resource of the type
+             */
+            resourceId: string | null;
+            resourceName: string;
+            /** @description The user holding the role, if granted to a user */
+            user: components["schemas"]["UserRef"] | null;
+            /** @description The team holding the role, if granted to a team */
+            team: components["schemas"]["TeamRef"] | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /**
+         * @description Give exactly one of `userId` and `teamId`. Omit `resourceType` for a
+         *     global role. Omit `resourceId` to grant the role on every resource of
+         *     the type; `admin` on a type also allows creating resources of it.
+         */
+        RoleGrantCreate: {
+            role: components["schemas"]["Role"];
+            resourceType?: components["schemas"]["ResourceType"];
+            /** Format: uuid */
+            resourceId?: string;
+            /** Format: uuid */
+            userId?: string;
+            /** Format: uuid */
+            teamId?: string;
+        };
+        RoleGrantList: {
+            items: components["schemas"]["RoleGrant"][];
+            total: number;
+        };
+        /** @enum {string} */
+        AuditAction: "create" | "update" | "delete" | "launch" | "cancel" | "login" | "grant" | "revoke" | "add_member" | "remove_member";
+        /** @enum {string} */
+        AuditResourceType: "inventory" | "host" | "group" | "credential" | "execution_environment" | "project" | "job_template" | "job" | "user" | "team" | "api_token";
+        AuditEntry: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            time: string;
+            /** @description `null` if the user has since been deleted */
+            actor: components["schemas"]["UserRef"] | null;
+            /** @description The actor's username at the time */
+            actorName: string;
+            /**
+             * @description How the actor authenticated: `session`, `api_token`, `password`
+             *     or `oidc` (sign-ins), or `cli` (`dispatch-ops user create` and
+             *     `user grant-admin`)
+             */
+            authMethod: string;
+            action: components["schemas"]["AuditAction"];
+            resourceType: components["schemas"]["AuditResourceType"];
+            /** Format: uuid */
+            resourceId: string | null;
+            resourceName: string;
+            /**
+             * @description The resource before the change (as the API shows it, so never
+             *     secrets). For updates, only the fields that changed.
+             */
+            before: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * @description The resource after the change. For updates, only the fields that
+             *     changed. Role grants, team membership changes and launches record
+             *     what was granted, added or launched here.
+             */
+            after: {
+                [key: string]: unknown;
+            } | null;
+        };
+        AuditEntryList: {
+            items: components["schemas"]["AuditEntry"][];
+            total: number;
         };
         Name: string;
         Description: string;
@@ -1388,6 +1912,8 @@ export interface components {
         ProjectId: string;
         JobTemplateId: string;
         JobId: string;
+        UserId: string;
+        TeamId: string;
     };
     requestBodies: never;
     headers: never;
@@ -1509,9 +2035,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        items: components["schemas"]["ApiToken"][];
-                    };
+                    "application/json": components["schemas"]["ApiTokenList"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -1566,6 +2090,613 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
+    getAuthConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sign-in configuration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthConfig"];
+                };
+            };
+        };
+    };
+    oidcLogin: {
+        parameters: {
+            query?: {
+                /** @description UI path to return to after signing in */
+                next?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the OIDC provider */
+            302: {
+                headers: {
+                    Location?: string;
+                    /** @description Short-lived cookie holding the login state */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    oidcCallback: {
+        parameters: {
+            query?: {
+                code?: string;
+                state?: string;
+                error?: string;
+                error_description?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                /** @description The login state set by `GET /api/v1/auth/oidc/login` */
+                dispatch_oidc?: string;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect into the UI */
+            302: {
+                headers: {
+                    Location?: string;
+                    /** @description Session cookie */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listUsers: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on username, display name or email */
+                search?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of users */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserCreate"];
+            };
+        };
+        responses: {
+            /** @description User created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listUserApiTokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The user's API tokens (secrets are never returned) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiTokenList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createUserApiToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateApiTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description Token created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedApiToken"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteUserApiToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: components["parameters"]["UserId"];
+                tokenId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listTeams: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+                /** @description Only teams this user is a member of */
+                userId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of teams */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeamList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TeamCreate"];
+            };
+        };
+        responses: {
+            /** @description Team created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Team"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The team */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Team"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TeamUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated team */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Team"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listTeamMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The team's members, by username */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeamMemberList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    addTeamMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The user is a member */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    removeTeamMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: components["parameters"]["TeamId"];
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listRoleGrants: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description `global` for system_admin and auditor grants */
+                resourceType?: "global" | "inventory" | "credential" | "project" | "job_template";
+                resourceId?: string;
+                /** @description Grants that apply to this user, directly or through a team */
+                userId?: string;
+                teamId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of grants */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoleGrantList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createRoleGrant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RoleGrantCreate"];
+            };
+        };
+        responses: {
+            /** @description Role granted */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoleGrant"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    deleteRoleGrant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                grantId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listAuditLog: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                resourceType?: components["schemas"]["AuditResourceType"];
+                resourceId?: string;
+                actorId?: string;
+                action?: components["schemas"]["AuditAction"];
+                since?: string;
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditEntryList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
     listInventories: {
         parameters: {
             query?: {
@@ -1616,6 +2747,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -1662,6 +2794,7 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description A job template still uses the inventory */
             409: {
@@ -1700,6 +2833,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -1785,6 +2919,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -1832,6 +2967,7 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -1861,6 +2997,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -1920,6 +3057,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -1967,6 +3105,7 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -1996,6 +3135,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -2074,6 +3214,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -2120,6 +3261,7 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description A job template still uses the credential */
             409: {
@@ -2158,6 +3300,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -2212,6 +3355,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -2258,6 +3402,7 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description A job template still uses the execution environment */
             409: {
@@ -2296,6 +3441,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -2350,6 +3496,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -2396,6 +3543,7 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description A job template still uses the project */
             409: {
@@ -2434,6 +3582,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -2488,6 +3637,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -2534,6 +3684,7 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -2563,6 +3714,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -2593,6 +3745,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -2667,6 +3820,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description The job has already finished */
             409: {

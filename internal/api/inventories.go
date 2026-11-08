@@ -2,8 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
+
+	"github.com/google/uuid"
 
 	"dispatch-ops/internal/api/apigen"
+	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
 )
 
@@ -36,7 +40,8 @@ func vars(v *apigen.Variables) map[string]any {
 }
 
 func (h *Handlers) ListInventories(ctx context.Context, req apigen.ListInventoriesRequestObject) (apigen.ListInventoriesResponseObject, error) {
-	items, total, err := h.Store.ListInventories(ctx, deref(req.Params.Search), pageOf(req.Params.Limit, req.Params.Offset))
+	p := req.Params
+	items, total, err := h.Store.ListInventories(ctx, deref(p.Search), readableBy(ctx), pageOf(p.Limit, p.Offset))
 	if err != nil {
 		return nil, err
 	}
@@ -48,16 +53,30 @@ func (h *Handlers) ListInventories(ctx context.Context, req apigen.ListInventori
 }
 
 func (h *Handlers) CreateInventory(ctx context.Context, req apigen.CreateInventoryRequestObject) (apigen.CreateInventoryResponseObject, error) {
+	if err := h.authorizeCreate(ctx, rbac.Inventory); err != nil {
+		return nil, err
+	}
 	inv, err := h.Store.CreateInventory(ctx, store.InventoryFields{
 		Name: req.Body.Name, Description: deref(req.Body.Description), Variables: vars(req.Body.Variables),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return apigen.CreateInventory201JSONResponse(toAPIInventory(inv)), nil
+	if err := h.grantCreator(ctx, rbac.Inventory, inv.ID); err != nil {
+		return nil, err
+	}
+	out := toAPIInventory(inv)
+	h.audit(ctx, auditRecord{
+		Action: apigen.Create, ResourceType: apigen.AuditResourceTypeInventory, ResourceID: inv.ID, ResourceName: inv.Name,
+		After: inventoryAudit(out),
+	})
+	return apigen.CreateInventory201JSONResponse(out), nil
 }
 
 func (h *Handlers) GetInventory(ctx context.Context, req apigen.GetInventoryRequestObject) (apigen.GetInventoryResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Read); err != nil {
+		return nil, err
+	}
 	inv, err := h.Store.GetInventory(ctx, req.InventoryId)
 	if err != nil {
 		return nil, orNotFound(err, "Inventory")
@@ -66,8 +85,13 @@ func (h *Handlers) GetInventory(ctx context.Context, req apigen.GetInventoryRequ
 }
 
 func (h *Handlers) UpdateInventory(ctx context.Context, req apigen.UpdateInventoryRequestObject) (apigen.UpdateInventoryResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Admin); err != nil {
+		return nil, err
+	}
 	b := req.Body
+	var before store.Inventory
 	inv, err := h.Store.UpdateInventory(ctx, req.InventoryId, func(f *store.InventoryFields) error {
+		before = store.Inventory{Name: f.Name, Description: f.Description, Variables: f.Variables}
 		setIf(&f.Name, b.Name)
 		setIf(&f.Description, b.Description)
 		if b.Variables != nil {
@@ -78,17 +102,37 @@ func (h *Handlers) UpdateInventory(ctx context.Context, req apigen.UpdateInvento
 	if err != nil {
 		return nil, orNotFound(err, "Inventory")
 	}
-	return apigen.UpdateInventory200JSONResponse(toAPIInventory(inv)), nil
+	out := toAPIInventory(inv)
+	before.ID, before.CreatedAt = inv.ID, inv.CreatedAt
+	h.audit(ctx, auditRecord{
+		Action: apigen.Update, ResourceType: apigen.AuditResourceTypeInventory, ResourceID: inv.ID, ResourceName: inv.Name,
+		Before: inventoryAudit(toAPIInventory(before)), After: inventoryAudit(out),
+	})
+	return apigen.UpdateInventory200JSONResponse(out), nil
 }
 
 func (h *Handlers) DeleteInventory(ctx context.Context, req apigen.DeleteInventoryRequestObject) (apigen.DeleteInventoryResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Admin); err != nil {
+		return nil, err
+	}
+	inv, err := h.Store.GetInventory(ctx, req.InventoryId)
+	if err != nil {
+		return nil, orNotFound(err, "Inventory")
+	}
 	if err := h.Store.DeleteInventory(ctx, req.InventoryId); err != nil {
 		return nil, orNotFound(err, "Inventory")
 	}
+	h.audit(ctx, auditRecord{
+		Action: apigen.Delete, ResourceType: apigen.AuditResourceTypeInventory, ResourceID: inv.ID, ResourceName: inv.Name,
+		Before: inventoryAudit(toAPIInventory(inv)),
+	})
 	return apigen.DeleteInventory204Response{}, nil
 }
 
 func (h *Handlers) ExportInventory(ctx context.Context, req apigen.ExportInventoryRequestObject) (apigen.ExportInventoryResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Read); err != nil {
+		return nil, err
+	}
 	snap, err := h.Store.GetInventorySnapshot(ctx, req.InventoryId)
 	if err != nil {
 		return nil, orNotFound(err, "Inventory")
@@ -96,9 +140,22 @@ func (h *Handlers) ExportInventory(ctx context.Context, req apigen.ExportInvento
 	return apigen.ExportInventory200JSONResponse(snap.Ansible()), nil
 }
 
+// inventoryAudit is what the audit log records about an inventory: its own
+// fields, not counts of hosts and groups, whose changes are recorded
+// separately.
+func inventoryAudit(i apigen.Inventory) map[string]any {
+	m := toMap(i)
+	delete(m, "hostCount")
+	delete(m, "groupCount")
+	return m
+}
+
 // --- Hosts ---
 
 func (h *Handlers) ListHosts(ctx context.Context, req apigen.ListHostsRequestObject) (apigen.ListHostsResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Read); err != nil {
+		return nil, err
+	}
 	p := req.Params
 	items, total, err := h.Store.ListHosts(ctx, req.InventoryId,
 		store.HostFilter{Search: deref(p.Search), GroupID: p.GroupId}, pageOf(p.Limit, p.Offset))
@@ -113,6 +170,9 @@ func (h *Handlers) ListHosts(ctx context.Context, req apigen.ListHostsRequestObj
 }
 
 func (h *Handlers) CreateHost(ctx context.Context, req apigen.CreateHostRequestObject) (apigen.CreateHostResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Admin); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	enabled := true
 	setIf(&enabled, b.Enabled)
@@ -123,18 +183,43 @@ func (h *Handlers) CreateHost(ctx context.Context, req apigen.CreateHostRequestO
 	if err != nil {
 		return nil, orNotFound(err, "Inventory")
 	}
-	return apigen.CreateHost201JSONResponse(toAPIHost(host)), nil
+	out := toAPIHost(host)
+	h.audit(ctx, auditRecord{
+		Action: apigen.Create, ResourceType: apigen.AuditResourceTypeHost, ResourceID: host.ID, ResourceName: host.Name,
+		After: out,
+	})
+	return apigen.CreateHost201JSONResponse(out), nil
+}
+
+// hostIn loads a host and checks the caller holds want on its inventory.
+func (h *Handlers) hostIn(ctx context.Context, id uuid.UUID, want rbac.Role) (store.Host, error) {
+	host, err := h.Store.GetHost(ctx, id)
+	if err != nil {
+		return store.Host{}, orNotFound(err, "Host")
+	}
+	if err := h.authorize(ctx, rbac.Inventory, host.InventoryID, want); err != nil {
+		var ae *apiError
+		if errors.As(err, &ae) && ae.status == 404 {
+			return store.Host{}, notFound("Host")
+		}
+		return store.Host{}, err
+	}
+	return host, nil
 }
 
 func (h *Handlers) GetHost(ctx context.Context, req apigen.GetHostRequestObject) (apigen.GetHostResponseObject, error) {
-	host, err := h.Store.GetHost(ctx, req.HostId)
+	host, err := h.hostIn(ctx, req.HostId, rbac.Read)
 	if err != nil {
-		return nil, orNotFound(err, "Host")
+		return nil, err
 	}
 	return apigen.GetHost200JSONResponse(toAPIHost(host)), nil
 }
 
 func (h *Handlers) UpdateHost(ctx context.Context, req apigen.UpdateHostRequestObject) (apigen.UpdateHostResponseObject, error) {
+	before, err := h.hostIn(ctx, req.HostId, rbac.Admin)
+	if err != nil {
+		return nil, err
+	}
 	b := req.Body
 	host, err := h.Store.UpdateHost(ctx, req.HostId, func(f *store.HostFields) error {
 		setIf(&f.Name, b.Name)
@@ -149,13 +234,26 @@ func (h *Handlers) UpdateHost(ctx context.Context, req apigen.UpdateHostRequestO
 	if err != nil {
 		return nil, orNotFound(err, "Host")
 	}
-	return apigen.UpdateHost200JSONResponse(toAPIHost(host)), nil
+	out := toAPIHost(host)
+	h.audit(ctx, auditRecord{
+		Action: apigen.Update, ResourceType: apigen.AuditResourceTypeHost, ResourceID: host.ID, ResourceName: host.Name,
+		Before: toAPIHost(before), After: out,
+	})
+	return apigen.UpdateHost200JSONResponse(out), nil
 }
 
 func (h *Handlers) DeleteHost(ctx context.Context, req apigen.DeleteHostRequestObject) (apigen.DeleteHostResponseObject, error) {
+	host, err := h.hostIn(ctx, req.HostId, rbac.Admin)
+	if err != nil {
+		return nil, err
+	}
 	if err := h.Store.DeleteHost(ctx, req.HostId); err != nil {
 		return nil, orNotFound(err, "Host")
 	}
+	h.audit(ctx, auditRecord{
+		Action: apigen.Delete, ResourceType: apigen.AuditResourceTypeHost, ResourceID: host.ID, ResourceName: host.Name,
+		Before: toAPIHost(host),
+	})
 	return apigen.DeleteHost204Response{}, nil
 }
 
@@ -172,6 +270,9 @@ func checkGroupName(name string) error {
 }
 
 func (h *Handlers) ListGroups(ctx context.Context, req apigen.ListGroupsRequestObject) (apigen.ListGroupsResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Read); err != nil {
+		return nil, err
+	}
 	p := req.Params
 	items, total, err := h.Store.ListGroups(ctx, req.InventoryId, deref(p.Search), pageOf(p.Limit, p.Offset))
 	if err != nil {
@@ -185,6 +286,9 @@ func (h *Handlers) ListGroups(ctx context.Context, req apigen.ListGroupsRequestO
 }
 
 func (h *Handlers) CreateGroup(ctx context.Context, req apigen.CreateGroupRequestObject) (apigen.CreateGroupResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Admin); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	if err := checkGroupName(b.Name); err != nil {
 		return nil, err
@@ -195,18 +299,43 @@ func (h *Handlers) CreateGroup(ctx context.Context, req apigen.CreateGroupReques
 	if err != nil {
 		return nil, orNotFound(err, "Inventory")
 	}
-	return apigen.CreateGroup201JSONResponse(toAPIGroup(g)), nil
+	out := toAPIGroup(g)
+	h.audit(ctx, auditRecord{
+		Action: apigen.Create, ResourceType: apigen.AuditResourceTypeGroup, ResourceID: g.ID, ResourceName: g.Name,
+		After: out,
+	})
+	return apigen.CreateGroup201JSONResponse(out), nil
+}
+
+// groupIn loads a group and checks the caller holds want on its inventory.
+func (h *Handlers) groupIn(ctx context.Context, id uuid.UUID, want rbac.Role) (store.Group, error) {
+	g, err := h.Store.GetGroup(ctx, id)
+	if err != nil {
+		return store.Group{}, orNotFound(err, "Group")
+	}
+	if err := h.authorize(ctx, rbac.Inventory, g.InventoryID, want); err != nil {
+		var ae *apiError
+		if errors.As(err, &ae) && ae.status == 404 {
+			return store.Group{}, notFound("Group")
+		}
+		return store.Group{}, err
+	}
+	return g, nil
 }
 
 func (h *Handlers) GetGroup(ctx context.Context, req apigen.GetGroupRequestObject) (apigen.GetGroupResponseObject, error) {
-	g, err := h.Store.GetGroup(ctx, req.GroupId)
+	g, err := h.groupIn(ctx, req.GroupId, rbac.Read)
 	if err != nil {
-		return nil, orNotFound(err, "Group")
+		return nil, err
 	}
 	return apigen.GetGroup200JSONResponse(toAPIGroup(g)), nil
 }
 
 func (h *Handlers) UpdateGroup(ctx context.Context, req apigen.UpdateGroupRequestObject) (apigen.UpdateGroupResponseObject, error) {
+	before, err := h.groupIn(ctx, req.GroupId, rbac.Admin)
+	if err != nil {
+		return nil, err
+	}
 	b := req.Body
 	if b.Name != nil {
 		if err := checkGroupName(*b.Name); err != nil {
@@ -225,13 +354,26 @@ func (h *Handlers) UpdateGroup(ctx context.Context, req apigen.UpdateGroupReques
 	if err != nil {
 		return nil, orNotFound(err, "Group")
 	}
-	return apigen.UpdateGroup200JSONResponse(toAPIGroup(g)), nil
+	out := toAPIGroup(g)
+	h.audit(ctx, auditRecord{
+		Action: apigen.Update, ResourceType: apigen.AuditResourceTypeGroup, ResourceID: g.ID, ResourceName: g.Name,
+		Before: toAPIGroup(before), After: out,
+	})
+	return apigen.UpdateGroup200JSONResponse(out), nil
 }
 
 func (h *Handlers) DeleteGroup(ctx context.Context, req apigen.DeleteGroupRequestObject) (apigen.DeleteGroupResponseObject, error) {
+	g, err := h.groupIn(ctx, req.GroupId, rbac.Admin)
+	if err != nil {
+		return nil, err
+	}
 	if err := h.Store.DeleteGroup(ctx, req.GroupId); err != nil {
 		return nil, orNotFound(err, "Group")
 	}
+	h.audit(ctx, auditRecord{
+		Action: apigen.Delete, ResourceType: apigen.AuditResourceTypeGroup, ResourceID: g.ID, ResourceName: g.Name,
+		Before: toAPIGroup(g),
+	})
 	return apigen.DeleteGroup204Response{}, nil
 }
 

@@ -220,6 +220,12 @@ type JobTemplateId = openapi_types.UUID
 // ProjectId defines model for ProjectId.
 type ProjectId = openapi_types.UUID
 
+// TeamId defines model for TeamId.
+type TeamId = openapi_types.UUID
+
+// UserId defines model for UserId.
+type UserId = openapi_types.UUID
+
 // BadRequest RFC 9457 problem details
 type BadRequest = Problem
 

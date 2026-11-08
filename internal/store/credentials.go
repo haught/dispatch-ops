@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"dispatch-ops/internal/rbac"
 )
 
 // Credential is a row in credentials. SecretInputs is ciphertext; see the
@@ -36,6 +38,8 @@ func (c *Credential) scanTargets() []any {
 type CredentialFilter struct {
 	Search string
 	Kind   string
+	// ReadableBy, if set, limits the list to credentials that user may read.
+	ReadableBy *uuid.UUID
 }
 
 // ListCredentials returns credentials, by name.
@@ -48,6 +52,7 @@ func (s *Store) ListCredentials(ctx context.Context, f CredentialFilter, page Pa
 		q.where += ` AND c.kind = $2`
 		q.args = append(q.args, f.Kind)
 	}
+	q.readableBy(f.ReadableBy, rbac.Credential, "c.id")
 	return list(ctx, s.pool, q, page, scanner[Credential]())
 }
 

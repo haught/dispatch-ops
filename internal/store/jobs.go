@@ -182,6 +182,9 @@ func getJob(ctx context.Context, db querier, id uuid.UUID, forUpdate bool) (Job,
 type JobFilter struct {
 	Status     string
 	TemplateID *uuid.UUID
+	// ReadableBy, if set, limits the list to jobs that user launched or
+	// whose template they hold a role on.
+	ReadableBy *uuid.UUID
 }
 
 // ListJobs returns jobs, newest first.
@@ -195,6 +198,13 @@ func (s *Store) ListJobs(ctx context.Context, f JobFilter, page Page) ([]Job, in
 	if f.TemplateID != nil {
 		q.args = append(q.args, *f.TemplateID)
 		conds = append(conds, `j.job_template_id = $`+strconv.Itoa(len(q.args)))
+	}
+	if f.ReadableBy != nil {
+		q.args = append(q.args, *f.ReadableBy)
+		n := strconv.Itoa(len(q.args))
+		conds = append(conds, `(j.launched_by = $`+n+` OR EXISTS (SELECT 1 FROM user_roles r
+			WHERE r.user_id = $`+n+` AND r.resource_type = 'job_template'
+				AND (r.resource_id IS NULL OR r.resource_id = j.job_template_id)))`)
 	}
 	q.where = strings.Join(conds, " AND ")
 	return list(ctx, s.pool, q, page, scanJob)

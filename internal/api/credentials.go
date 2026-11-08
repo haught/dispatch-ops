@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 
 	"github.com/google/uuid"
 
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/auth"
 	"dispatch-ops/internal/credentials"
+	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
 )
 
@@ -33,7 +35,8 @@ func (h *Handlers) ListCredentialKinds(_ context.Context, _ apigen.ListCredentia
 func (h *Handlers) ListCredentials(ctx context.Context, req apigen.ListCredentialsRequestObject) (apigen.ListCredentialsResponseObject, error) {
 	p := req.Params
 	items, total, err := h.Store.ListCredentials(ctx,
-		store.CredentialFilter{Search: deref(p.Search), Kind: string(deref(p.Kind))}, pageOf(p.Limit, p.Offset))
+		store.CredentialFilter{Search: deref(p.Search), Kind: string(deref(p.Kind)), ReadableBy: readableBy(ctx)},
+		pageOf(p.Limit, p.Offset))
 	if err != nil {
 		return nil, err
 	}
@@ -45,6 +48,9 @@ func (h *Handlers) ListCredentials(ctx context.Context, req apigen.ListCredentia
 }
 
 func (h *Handlers) CreateCredential(ctx context.Context, req apigen.CreateCredentialRequestObject) (apigen.CreateCredentialResponseObject, error) {
+	if err := h.authorizeCreate(ctx, rbac.Credential); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	c := store.Credential{ID: uuid.New(), Name: b.Name, Description: deref(b.Description), Kind: string(b.Kind)}
 	if p := auth.FromContext(ctx); p != nil {
@@ -57,11 +63,22 @@ func (h *Handlers) CreateCredential(ctx context.Context, req apigen.CreateCreden
 	if err != nil {
 		return nil, err
 	}
+	if err := h.grantCreator(ctx, rbac.Credential, c.ID); err != nil {
+		return nil, err
+	}
+	out := toAPICredential(c)
 	h.Log.InfoContext(ctx, "credential created", "credential_id", c.ID, "kind", c.Kind, "by", principalName(ctx))
-	return apigen.CreateCredential201JSONResponse(toAPICredential(c)), nil
+	h.audit(ctx, auditRecord{
+		Action: apigen.Create, ResourceType: apigen.AuditResourceTypeCredential, ResourceID: c.ID, ResourceName: c.Name,
+		After: out,
+	})
+	return apigen.CreateCredential201JSONResponse(out), nil
 }
 
 func (h *Handlers) GetCredential(ctx context.Context, req apigen.GetCredentialRequestObject) (apigen.GetCredentialResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Credential, req.CredentialId, rbac.Read); err != nil {
+		return nil, err
+	}
 	c, err := h.Store.GetCredential(ctx, req.CredentialId)
 	if err != nil {
 		return nil, orNotFound(err, "Credential")
@@ -70,8 +87,13 @@ func (h *Handlers) GetCredential(ctx context.Context, req apigen.GetCredentialRe
 }
 
 func (h *Handlers) UpdateCredential(ctx context.Context, req apigen.UpdateCredentialRequestObject) (apigen.UpdateCredentialResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Credential, req.CredentialId, rbac.Admin); err != nil {
+		return nil, err
+	}
 	b := req.Body
+	var before apigen.Credential
 	c, err := h.Store.UpdateCredential(ctx, req.CredentialId, func(c *store.Credential) error {
+		before = toAPICredential(*c)
 		setIf(&c.Name, b.Name)
 		setIf(&c.Description, b.Description)
 		if b.Inputs == nil {
@@ -94,15 +116,36 @@ func (h *Handlers) UpdateCredential(ctx context.Context, req apigen.UpdateCreden
 	if err != nil {
 		return nil, orNotFound(err, "Credential")
 	}
+	out := toAPICredential(c)
+	after := toMap(out)
+	if b.Inputs != nil {
+		// Secret values never appear in the log, only which were changed.
+		after["changedInputs"] = slices.Sorted(maps.Keys(*b.Inputs))
+	}
 	h.Log.InfoContext(ctx, "credential updated", "credential_id", c.ID, "inputs_changed", b.Inputs != nil, "by", principalName(ctx))
-	return apigen.UpdateCredential200JSONResponse(toAPICredential(c)), nil
+	h.audit(ctx, auditRecord{
+		Action: apigen.Update, ResourceType: apigen.AuditResourceTypeCredential, ResourceID: c.ID, ResourceName: c.Name,
+		Before: before, After: after,
+	})
+	return apigen.UpdateCredential200JSONResponse(out), nil
 }
 
 func (h *Handlers) DeleteCredential(ctx context.Context, req apigen.DeleteCredentialRequestObject) (apigen.DeleteCredentialResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Credential, req.CredentialId, rbac.Admin); err != nil {
+		return nil, err
+	}
+	c, err := h.Store.GetCredential(ctx, req.CredentialId)
+	if err != nil {
+		return nil, orNotFound(err, "Credential")
+	}
 	if err := h.Store.DeleteCredential(ctx, req.CredentialId); err != nil {
 		return nil, orNotFound(err, "Credential")
 	}
 	h.Log.InfoContext(ctx, "credential deleted", "credential_id", req.CredentialId, "by", principalName(ctx))
+	h.audit(ctx, auditRecord{
+		Action: apigen.Delete, ResourceType: apigen.AuditResourceTypeCredential, ResourceID: c.ID, ResourceName: c.Name,
+		Before: toAPICredential(c),
+	})
 	return apigen.DeleteCredential204Response{}, nil
 }
 
@@ -151,6 +194,9 @@ func (h *Handlers) ListExecutionEnvironments(ctx context.Context, req apigen.Lis
 }
 
 func (h *Handlers) CreateExecutionEnvironment(ctx context.Context, req apigen.CreateExecutionEnvironmentRequestObject) (apigen.CreateExecutionEnvironmentResponseObject, error) {
+	if err := requireSystemAdmin(ctx); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	if err := h.checkRegistryCredential(ctx, b.RegistryCredentialId); err != nil {
 		return nil, err
@@ -164,7 +210,12 @@ func (h *Handlers) CreateExecutionEnvironment(ctx context.Context, req apigen.Cr
 	if err != nil {
 		return nil, err
 	}
-	return apigen.CreateExecutionEnvironment201JSONResponse(toAPIExecutionEnvironment(e)), nil
+	out := toAPIExecutionEnvironment(e)
+	h.audit(ctx, auditRecord{
+		Action: apigen.Create, ResourceType: apigen.AuditResourceTypeExecutionEnvironment, ResourceID: e.ID, ResourceName: e.Name,
+		After: out,
+	})
+	return apigen.CreateExecutionEnvironment201JSONResponse(out), nil
 }
 
 func (h *Handlers) GetExecutionEnvironment(ctx context.Context, req apigen.GetExecutionEnvironmentRequestObject) (apigen.GetExecutionEnvironmentResponseObject, error) {
@@ -176,6 +227,9 @@ func (h *Handlers) GetExecutionEnvironment(ctx context.Context, req apigen.GetEx
 }
 
 func (h *Handlers) UpdateExecutionEnvironment(ctx context.Context, req apigen.UpdateExecutionEnvironmentRequestObject) (apigen.UpdateExecutionEnvironmentResponseObject, error) {
+	if err := requireSystemAdmin(ctx); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	var regCred *uuid.UUID
 	if b.RegistryCredentialId.IsSpecified() && !b.RegistryCredentialId.IsNull() {
@@ -185,7 +239,12 @@ func (h *Handlers) UpdateExecutionEnvironment(ctx context.Context, req apigen.Up
 			return nil, err
 		}
 	}
+	var before apigen.ExecutionEnvironment
 	e, err := h.Store.UpdateExecutionEnvironment(ctx, req.ExecutionEnvironmentId, func(f *store.ExecutionEnvironmentFields) error {
+		before = toAPIExecutionEnvironment(store.ExecutionEnvironment{
+			ID: req.ExecutionEnvironmentId, Name: f.Name, Description: f.Description, Image: f.Image,
+			PullPolicy: f.PullPolicy, RegistryCredentialID: f.RegistryCredentialID,
+		})
 		setIf(&f.Name, b.Name)
 		setIf(&f.Description, b.Description)
 		setIf(&f.Image, b.Image)
@@ -200,13 +259,30 @@ func (h *Handlers) UpdateExecutionEnvironment(ctx context.Context, req apigen.Up
 	if err != nil {
 		return nil, orNotFound(err, "Execution environment")
 	}
-	return apigen.UpdateExecutionEnvironment200JSONResponse(toAPIExecutionEnvironment(e)), nil
+	out := toAPIExecutionEnvironment(e)
+	before.CreatedAt = out.CreatedAt
+	h.audit(ctx, auditRecord{
+		Action: apigen.Update, ResourceType: apigen.AuditResourceTypeExecutionEnvironment, ResourceID: e.ID, ResourceName: e.Name,
+		Before: before, After: out,
+	})
+	return apigen.UpdateExecutionEnvironment200JSONResponse(out), nil
 }
 
 func (h *Handlers) DeleteExecutionEnvironment(ctx context.Context, req apigen.DeleteExecutionEnvironmentRequestObject) (apigen.DeleteExecutionEnvironmentResponseObject, error) {
+	if err := requireSystemAdmin(ctx); err != nil {
+		return nil, err
+	}
+	e, err := h.Store.GetExecutionEnvironment(ctx, req.ExecutionEnvironmentId)
+	if err != nil {
+		return nil, orNotFound(err, "Execution environment")
+	}
 	if err := h.Store.DeleteExecutionEnvironment(ctx, req.ExecutionEnvironmentId); err != nil {
 		return nil, orNotFound(err, "Execution environment")
 	}
+	h.audit(ctx, auditRecord{
+		Action: apigen.Delete, ResourceType: apigen.AuditResourceTypeExecutionEnvironment, ResourceID: e.ID, ResourceName: e.Name,
+		Before: toAPIExecutionEnvironment(e),
+	})
 	return apigen.DeleteExecutionEnvironment204Response{}, nil
 }
 

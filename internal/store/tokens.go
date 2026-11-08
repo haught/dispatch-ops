@@ -16,22 +16,33 @@ const (
 	TokenKindAPI     TokenKind = "api"
 )
 
+// TokenScope limits what an API token may do.
+type TokenScope string
+
+const (
+	// ScopeRead tokens may only make GET requests.
+	ScopeRead TokenScope = "read"
+	// ScopeWrite tokens may do anything their user may.
+	ScopeWrite TokenScope = "write"
+)
+
 // Token is a row in auth_tokens. The secret itself is never stored.
 type Token struct {
 	ID         uuid.UUID
 	UserID     uuid.UUID
 	Kind       TokenKind
 	Name       string
+	Scope      TokenScope
 	Prefix     string
 	CreatedAt  time.Time
 	ExpiresAt  *time.Time
 	LastUsedAt *time.Time
 }
 
-const tokenColumns = `t.id, t.user_id, t.kind, t.name, t.token_prefix, t.created_at, t.expires_at, t.last_used_at`
+const tokenColumns = `t.id, t.user_id, t.kind, t.name, t.scope, t.token_prefix, t.created_at, t.expires_at, t.last_used_at`
 
 func (t *Token) scanTargets() []any {
-	return []any{&t.ID, &t.UserID, &t.Kind, &t.Name, &t.Prefix, &t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt}
+	return []any{&t.ID, &t.UserID, &t.Kind, &t.Name, &t.Scope, &t.Prefix, &t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt}
 }
 
 // NewToken holds the fields for storing a token.
@@ -39,6 +50,7 @@ type NewToken struct {
 	UserID    uuid.UUID
 	Kind      TokenKind
 	Name      string
+	Scope     TokenScope // ScopeWrite if empty
 	Hash      []byte
 	Prefix    string
 	ExpiresAt *time.Time
@@ -46,12 +58,15 @@ type NewToken struct {
 
 // CreateToken stores a token hash.
 func (s *Store) CreateToken(ctx context.Context, in NewToken) (Token, error) {
+	if in.Scope == "" {
+		in.Scope = ScopeWrite
+	}
 	var t Token
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO auth_tokens AS t (user_id, kind, name, token_hash, token_prefix, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO auth_tokens AS t (user_id, kind, name, scope, token_hash, token_prefix, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING `+tokenColumns,
-		in.UserID, in.Kind, in.Name, in.Hash, in.Prefix, in.ExpiresAt,
+		in.UserID, in.Kind, in.Name, in.Scope, in.Hash, in.Prefix, in.ExpiresAt,
 	).Scan(t.scanTargets()...)
 	return t, mapErr(err)
 }
@@ -99,18 +114,14 @@ func (s *Store) ListTokens(ctx context.Context, userID uuid.UUID, kind TokenKind
 	})
 }
 
-// DeleteToken deletes one of a user's tokens. It returns ErrNotFound if the
-// user has no such token of that kind.
-func (s *Store) DeleteToken(ctx context.Context, userID, tokenID uuid.UUID, kind TokenKind) error {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM auth_tokens WHERE id = $1 AND user_id = $2 AND kind = $3`, tokenID, userID, kind)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+// DeleteToken deletes one of a user's tokens and returns it. It returns
+// ErrNotFound if the user has no such token of that kind.
+func (s *Store) DeleteToken(ctx context.Context, userID, tokenID uuid.UUID, kind TokenKind) (Token, error) {
+	var t Token
+	err := s.pool.QueryRow(ctx, `
+		DELETE FROM auth_tokens t WHERE t.id = $1 AND t.user_id = $2 AND t.kind = $3
+		RETURNING `+tokenColumns, tokenID, userID, kind).Scan(t.scanTargets()...)
+	return t, mapErr(err)
 }
 
 // DeleteExpiredTokens removes expired sessions and API tokens.

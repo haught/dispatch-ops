@@ -25,7 +25,8 @@ import (
 )
 
 // testServer starts the full HTTP stack against the database named by
-// DISPATCH_TEST_DATABASE_URL, and creates a fresh local user.
+// DISPATCH_TEST_DATABASE_URL, and creates a fresh local user who is a
+// system administrator.
 func testServer(t *testing.T) (srv *httptest.Server, username, password string) {
 	t.Helper()
 	srv, _, username, password = startServer(t)
@@ -34,6 +35,12 @@ func testServer(t *testing.T) (srv *httptest.Server, username, password string) 
 
 // startServer is testServer that also returns the store.
 func startServer(t *testing.T) (srv *httptest.Server, st *store.Store, username, password string) {
+	t.Helper()
+	return startServerWith(t, nil)
+}
+
+// startServerWith is startServer with a chance to configure the handlers.
+func startServerWith(t *testing.T, configure func(*api.Handlers)) (srv *httptest.Server, st *store.Store, username, password string) {
 	t.Helper()
 	pool, _ := testdb.Open(t, "api")
 	ctx := context.Background()
@@ -45,7 +52,7 @@ func startServer(t *testing.T) (srv *httptest.Server, st *store.Store, username,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateLocalUser(ctx, store.NewLocalUser{Username: username, PasswordHash: hash}); err != nil {
+	if _, err := st.CreateLocalUser(ctx, store.NewLocalUser{Username: username, PasswordHash: hash, IsAdmin: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,9 +65,13 @@ func startServer(t *testing.T) (srv *httptest.Server, st *store.Store, username,
 	t.Cleanup(stopHub)
 	hub := jobstream.NewHub()
 	go hub.Run(hubCtx, st, log)
-	h, err := api.NewHandler(&api.Handlers{
+	handlers := &api.Handlers{
 		Store: st, Vault: credentials.Vault{Keys: keys}, Hub: hub, Log: log, SessionTTL: time.Hour, Version: "test",
-	})
+	}
+	if configure != nil {
+		configure(handlers)
+	}
+	h, err := api.NewHandler(handlers)
 	if err != nil {
 		t.Fatal(err)
 	}

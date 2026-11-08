@@ -1,14 +1,37 @@
 openapi: 3.0.3
 info:
   title: Dispatch Ops API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     Dispatch Ops runs automation jobs (Ansible, scripts, or any container) on
     Kubernetes. This spec is the source of truth: the Go server, the
     TypeScript client and the runner's client are generated from it.
 
-    Authentication is either a browser session cookie (from `POST /auth/login`)
-    or an API token sent as `Authorization: Bearer <token>`.
+    Authentication is either a browser session cookie (from `POST /auth/login`
+    or single sign-on through `GET /auth/oidc/login`) or an API token sent as
+    `Authorization: Bearer <token>`.
+
+    ## Access control
+    Roles are granted to users or teams (`/role-grants`), on one inventory,
+    credential, project or job template, on every resource of one of those
+    types, or globally (`system_admin`, `auditor`). See the `Role` schema.
+    Lists only include what the caller may read. A resource the caller may
+    not read is reported as not found (404); an action their roles don't
+    allow on one they can read is forbidden (403).
+
+    - Creating an inventory, credential, project or job template needs
+      `admin` on every resource of that type; whoever creates one gets
+      `admin` on it.
+    - A job template needs `use` on the project, inventory and credentials
+      it references, and a project on its credential. Launching needs
+      `execute`, plus `use` on an inventory given at launch.
+    - Jobs can be seen by whoever launched them and by anyone with a role on
+      their template. Canceling needs `execute` on the template, or having
+      launched the job.
+    - Execution environments can be read and used by everyone, and are
+      managed by system administrators. So are users and teams, which every
+      signed-in user can list.
+    - Read-only (`read` scope) API tokens can only make GET requests.
 
     ## Conventions
     - List endpoints take `limit` and `offset` and return `{items, total}`.
@@ -26,6 +49,11 @@ tags:
   - name: system
   - name: auth
   - name: tokens
+  - name: users
+  - name: teams
+    description: Groups of users. Roles granted to a team apply to its members.
+  - name: roles
+  - name: audit
   - name: inventories
   - name: credentials
   - name: execution-environments
@@ -132,13 +160,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/ApiToken"
+                $ref: "#/components/schemas/ApiTokenList"
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
@@ -188,6 +210,629 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/auth/config:
+    get:
+      operationId: getAuthConfig
+      tags: [auth]
+      summary: Sign-in methods the server offers
+      security: []
+      responses:
+        "200":
+          description: Sign-in configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthConfig"
+
+  /api/v1/auth/oidc/login:
+    get:
+      operationId: oidcLogin
+      tags: [auth]
+      summary: Start single sign-on (OIDC)
+      description: |
+        Redirects the browser to the OIDC provider (authorization code flow
+        with PKCE). The provider sends it back to `/api/v1/auth/oidc/callback`.
+      security: []
+      parameters:
+        - name: next
+          in: query
+          description: UI path to return to after signing in
+          schema:
+            type: string
+            maxLength: 2048
+      responses:
+        "302":
+          description: Redirect to the OIDC provider
+          headers:
+            Location:
+              schema:
+                type: string
+            Set-Cookie:
+              description: Short-lived cookie holding the login state
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/auth/oidc/callback:
+    get:
+      operationId: oidcCallback
+      tags: [auth]
+      summary: Finish single sign-on (OIDC)
+      description: |
+        The OIDC provider redirects the browser here. On success the user is
+        created or updated from the ID token's claims, their OIDC-mapped team
+        memberships are synced, a session cookie is set, and the browser is
+        sent to the page it started from. On failure the browser is sent to
+        `/login?error=<message>`.
+      security: []
+      parameters:
+        - name: code
+          in: query
+          schema:
+            type: string
+            maxLength: 4096
+        - name: state
+          in: query
+          schema:
+            type: string
+            maxLength: 1024
+        - name: error
+          in: query
+          schema:
+            type: string
+            maxLength: 1024
+        - name: error_description
+          in: query
+          schema:
+            type: string
+            maxLength: 4096
+        - name: dispatch_oidc
+          in: cookie
+          description: The login state set by `GET /api/v1/auth/oidc/login`
+          schema:
+            type: string
+            maxLength: 4096
+      responses:
+        "302":
+          description: Redirect into the UI
+          headers:
+            Location:
+              schema:
+                type: string
+            Set-Cookie:
+              description: Session cookie
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --- Users -----------------------------------------------------------------
+
+  /api/v1/users:
+    get:
+      operationId: listUsers
+      tags: [users]
+      summary: List users
+      description: Any signed-in user may list users, to choose who to grant roles to.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: search
+          in: query
+          description: Case-insensitive substring match on username, display name or email
+          schema:
+            type: string
+            maxLength: 255
+      responses:
+        "200":
+          description: A page of users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createUser
+      tags: [users]
+      summary: Create a local user
+      description: |
+        System administrators only. Local users sign in with a password; they
+        are mainly for automation (service accounts). OIDC users are created
+        when they first sign in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserCreate"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/users/{userId}:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    get:
+      operationId: getUser
+      tags: [users]
+      summary: Get a user
+      responses:
+        "200":
+          description: The user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateUser
+      tags: [users]
+      summary: Update a user
+      description: |
+        System administrators only. Deactivating a user ends their sessions;
+        their API tokens stop working until they are reactivated. OIDC
+        users' username, display name and email are updated from the
+        provider at each sign-in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserUpdate"
+      responses:
+        "200":
+          description: The updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteUser
+      tags: [users]
+      summary: Delete a user
+      description: |
+        System administrators only. Removes the user's tokens, team
+        memberships and roles. Jobs they launched are kept. You cannot delete
+        yourself.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/users/{userId}/tokens:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    get:
+      operationId: listUserApiTokens
+      tags: [tokens]
+      summary: List a user's API tokens
+      description: System administrators and auditors only.
+      responses:
+        "200":
+          description: The user's API tokens (secrets are never returned)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiTokenList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createUserApiToken
+      tags: [tokens]
+      summary: Create an API token for a user
+      description: |
+        System administrators only, from a browser session. Gives a service
+        account a token without signing in as it. The secret is returned only
+        in this response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiTokenRequest"
+      responses:
+        "201":
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedApiToken"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/users/{userId}/tokens/{tokenId}:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+      - name: tokenId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: deleteUserApiToken
+      tags: [tokens]
+      summary: Revoke a user's API token
+      description: System administrators only.
+      responses:
+        "204":
+          description: Token revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --- Teams -----------------------------------------------------------------
+
+  /api/v1/teams:
+    get:
+      operationId: listTeams
+      tags: [teams]
+      summary: List teams
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+        - name: userId
+          in: query
+          description: Only teams this user is a member of
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: A page of teams
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createTeam
+      tags: [teams]
+      summary: Create a team
+      description: System administrators only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamCreate"
+      responses:
+        "201":
+          description: Team created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/teams/{teamId}:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    get:
+      operationId: getTeam
+      tags: [teams]
+      summary: Get a team
+      responses:
+        "200":
+          description: The team
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateTeam
+      tags: [teams]
+      summary: Update a team
+      description: |
+        System administrators only. Changes to `oidcGroups` apply to each
+        member the next time they sign in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamUpdate"
+      responses:
+        "200":
+          description: The updated team
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteTeam
+      tags: [teams]
+      summary: Delete a team
+      description: System administrators only. The roles granted to the team are revoked.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/teams/{teamId}/members:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    get:
+      operationId: listTeamMembers
+      tags: [teams]
+      summary: List a team's members
+      responses:
+        "200":
+          description: The team's members, by username
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/teams/{teamId}/members/{userId}:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+      - $ref: "#/components/parameters/UserId"
+    put:
+      operationId: addTeamMember
+      tags: [teams]
+      summary: Add a user to a team
+      description: |
+        System administrators only. Members added here stay members whatever
+        their OIDC groups.
+      responses:
+        "204":
+          description: The user is a member
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: removeTeamMember
+      tags: [teams]
+      summary: Remove a user from a team
+      description: |
+        System administrators only. A member from an OIDC group joins again
+        at their next sign-in unless the team's `oidcGroups` change.
+      responses:
+        "204":
+          description: Removed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --- Roles -----------------------------------------------------------------
+
+  /api/v1/role-grants:
+    get:
+      operationId: listRoleGrants
+      tags: [roles]
+      summary: List role grants
+      description: |
+        System administrators and auditors see every grant. Others must
+        filter by a resource they administer (`resourceType` and
+        `resourceId`), or by themselves (`userId`, which includes the grants
+        to their teams).
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: resourceType
+          in: query
+          description: "`global` for system_admin and auditor grants"
+          schema:
+            type: string
+            enum: [global, inventory, credential, project, job_template]
+        - name: resourceId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: userId
+          in: query
+          description: Grants that apply to this user, directly or through a team
+          schema:
+            type: string
+            format: uuid
+        - name: teamId
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: A page of grants
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleGrantList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createRoleGrant
+      tags: [roles]
+      summary: Grant a role
+      description: |
+        Grants a role to a user or a team. System administrators can grant
+        anything. A resource's admins can grant roles on that resource.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleGrantCreate"
+      responses:
+        "201":
+          description: Role granted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleGrant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/role-grants/{grantId}:
+    parameters:
+      - name: grantId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: deleteRoleGrant
+      tags: [roles]
+      summary: Revoke a role
+      description: System administrators, or an admin of the grant's resource.
+      responses:
+        "204":
+          description: Revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --- Audit log -------------------------------------------------------------
+
+  /api/v1/audit-log:
+    get:
+      operationId: listAuditLog
+      tags: [audit]
+      summary: List audit log entries, newest first
+      description: System administrators and auditors only.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: resourceType
+          in: query
+          schema:
+            $ref: "#/components/schemas/AuditResourceType"
+        - name: resourceId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: actorId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          schema:
+            $ref: "#/components/schemas/AuditAction"
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: A page of entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditEntryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   # --- Inventories -----------------------------------------------------------
 
   /api/v1/inventories:
@@ -229,6 +874,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
 
@@ -271,6 +918,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -284,6 +933,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -364,6 +1015,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -408,6 +1061,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -421,6 +1076,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -467,6 +1124,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -511,6 +1170,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -525,6 +1186,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -594,6 +1257,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
 
@@ -636,6 +1301,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -649,6 +1316,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -699,6 +1368,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
 
@@ -741,6 +1412,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -754,6 +1427,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -804,6 +1479,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
 
@@ -847,6 +1524,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -860,6 +1539,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -910,6 +1591,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
 
@@ -952,6 +1635,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -966,6 +1651,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -997,6 +1684,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1068,6 +1757,8 @@ paths:
                 $ref: "#/components/schemas/Job"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -1409,6 +2100,20 @@ components:
       schema:
         type: string
         format: uuid
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TeamId:
+      name: teamId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
 
   responses:
     BadRequest:
@@ -1486,7 +2191,7 @@ components:
 
     User:
       type: object
-      required: [id, username, displayName, email, authSource, isAdmin, createdAt, lastLoginAt]
+      required: [id, username, displayName, email, authSource, isAdmin, isAuditor, isActive, createdAt, lastLoginAt]
       properties:
         id:
           type: string
@@ -1502,6 +2207,13 @@ components:
           enum: [local, oidc]
         isAdmin:
           type: boolean
+          description: Holds the system_admin role, directly or through a team
+        isAuditor:
+          type: boolean
+          description: Holds the auditor role, directly or through a team
+        isActive:
+          type: boolean
+          description: Inactive users can't sign in, and their API tokens don't work
         createdAt:
           type: string
           format: date-time
@@ -1512,13 +2224,15 @@ components:
 
     ApiToken:
       type: object
-      required: [id, name, prefix, createdAt, expiresAt, lastUsedAt]
+      required: [id, name, scope, prefix, createdAt, expiresAt, lastUsedAt]
       properties:
         id:
           type: string
           format: uuid
         name:
           type: string
+        scope:
+          $ref: "#/components/schemas/TokenScope"
         prefix:
           type: string
           description: First characters of the token, to help tell tokens apart
@@ -1547,6 +2261,10 @@ components:
           minimum: 1
           maximum: 3650
           description: Omit for a token that never expires
+        scope:
+          allOf:
+            - $ref: "#/components/schemas/TokenScope"
+          default: write
 
     CreatedApiToken:
       allOf:
@@ -1557,6 +2275,363 @@ components:
             token:
               type: string
               description: The token secret. Shown only once.
+
+    AuthConfig:
+      type: object
+      required: [oidcEnabled, oidcDisplayName]
+      properties:
+        oidcEnabled:
+          type: boolean
+          description: Whether single sign-on (`GET /api/v1/auth/oidc/login`) is configured
+        oidcDisplayName:
+          type: string
+          description: Name of the sign-on provider, for the sign-in button
+
+    UserList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+        total:
+          type: integer
+
+    Username:
+      type: string
+      minLength: 1
+      maxLength: 255
+      pattern: '^\S+$'
+
+    Password:
+      type: string
+      minLength: 12
+      maxLength: 1024
+
+    UserCreate:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username:
+          $ref: "#/components/schemas/Username"
+        displayName:
+          type: string
+          maxLength: 255
+        email:
+          type: string
+          maxLength: 255
+        password:
+          $ref: "#/components/schemas/Password"
+
+    UserUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        username:
+          allOf:
+            - $ref: "#/components/schemas/Username"
+          description: Local users only
+        displayName:
+          type: string
+          maxLength: 255
+        email:
+          type: string
+          maxLength: 255
+        isActive:
+          type: boolean
+        password:
+          allOf:
+            - $ref: "#/components/schemas/Password"
+          description: Local users only
+
+    ApiTokenList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiToken"
+
+    TokenScope:
+      type: string
+      description: "`read` tokens may only make GET requests; `write` tokens may do anything their user may."
+      enum: [read, write]
+
+    # --- Teams ---
+
+    TeamRef:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
+    OidcGroups:
+      type: array
+      description: |
+        Values of the OIDC groups claim. Users signing in with any of them
+        join the team; those signing in without them leave it again.
+      maxItems: 100
+      items:
+        type: string
+        minLength: 1
+        maxLength: 255
+
+    Team:
+      type: object
+      required: [id, name, description, oidcGroups, memberCount, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        oidcGroups:
+          type: array
+          items:
+            type: string
+        memberCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    TeamCreate:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        oidcGroups:
+          $ref: "#/components/schemas/OidcGroups"
+
+    TeamUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        oidcGroups:
+          $ref: "#/components/schemas/OidcGroups"
+
+    TeamList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Team"
+        total:
+          type: integer
+
+    TeamMember:
+      type: object
+      required: [user, displayName, source, addedAt]
+      properties:
+        user:
+          $ref: "#/components/schemas/UserRef"
+        displayName:
+          type: string
+        source:
+          type: string
+          enum: [manual, oidc]
+          description: "`manual`: added through the API. `oidc`: from the OIDC groups claim at sign-in."
+        addedAt:
+          type: string
+          format: date-time
+
+    TeamMemberList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TeamMember"
+
+    # --- Roles ---
+
+    Role:
+      type: string
+      description: |
+        On a resource: `admin` (edit, delete, grant roles on it; includes
+        the others), `use` (reference it from a job template; inventories,
+        credentials and projects), `execute` (launch it; job templates) and
+        `read`. Global: `system_admin` (everything) and `auditor` (read
+        everything, including the audit log).
+      enum: [admin, use, execute, read, system_admin, auditor]
+
+    ResourceType:
+      type: string
+      enum: [inventory, credential, project, job_template]
+
+    RoleGrant:
+      type: object
+      required: [id, role, resourceType, resourceId, resourceName, user, team, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          $ref: "#/components/schemas/Role"
+        resourceType:
+          allOf:
+            - $ref: "#/components/schemas/ResourceType"
+          nullable: true
+          description: "`null` for a global role"
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "`null` for a global role, or a role on every resource of the type"
+        resourceName:
+          type: string
+        user:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+          description: The user holding the role, if granted to a user
+        team:
+          allOf:
+            - $ref: "#/components/schemas/TeamRef"
+          nullable: true
+          description: The team holding the role, if granted to a team
+        createdAt:
+          type: string
+          format: date-time
+
+    RoleGrantCreate:
+      type: object
+      required: [role]
+      additionalProperties: false
+      description: |
+        Give exactly one of `userId` and `teamId`. Omit `resourceType` for a
+        global role. Omit `resourceId` to grant the role on every resource of
+        the type; `admin` on a type also allows creating resources of it.
+      properties:
+        role:
+          $ref: "#/components/schemas/Role"
+        resourceType:
+          $ref: "#/components/schemas/ResourceType"
+        resourceId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        teamId:
+          type: string
+          format: uuid
+
+    RoleGrantList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoleGrant"
+        total:
+          type: integer
+
+    # --- Audit log ---
+
+    AuditAction:
+      type: string
+      enum: [create, update, delete, launch, cancel, login, grant, revoke, add_member, remove_member]
+
+    AuditResourceType:
+      type: string
+      enum:
+        - inventory
+        - host
+        - group
+        - credential
+        - execution_environment
+        - project
+        - job_template
+        - job
+        - user
+        - team
+        - api_token
+
+    AuditEntry:
+      type: object
+      required: [id, time, actor, actorName, authMethod, action, resourceType, resourceId, resourceName, before, after]
+      properties:
+        id:
+          type: integer
+          format: int64
+        time:
+          type: string
+          format: date-time
+        actor:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+          description: "`null` if the user has since been deleted"
+        actorName:
+          type: string
+          description: The actor's username at the time
+        authMethod:
+          type: string
+          description: |
+            How the actor authenticated: `session`, `api_token`, `password`
+            or `oidc` (sign-ins), or `cli` (`dispatch-ops user create` and
+            `user grant-admin`)
+        action:
+          $ref: "#/components/schemas/AuditAction"
+        resourceType:
+          $ref: "#/components/schemas/AuditResourceType"
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+        resourceName:
+          type: string
+        before:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            The resource before the change (as the API shows it, so never
+            secrets). For updates, only the fields that changed.
+        after:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            The resource after the change. For updates, only the fields that
+            changed. Role grants, team membership changes and launches record
+            what was granted, added or launched here.
+
+    AuditEntryList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        total:
+          type: integer
 
     # --- Shared field types ---
 

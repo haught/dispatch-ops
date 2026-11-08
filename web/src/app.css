@@ -146,3 +146,65 @@ code {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 0.9em;
 }
+
+select,
+textarea {
+	font: inherit;
+	padding: 0.45rem 0.55rem;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--bg);
+	color: var(--text);
+}
+
+label select,
+label textarea {
+	display: block;
+	width: 100%;
+	margin-top: 0.25rem;
+	font-weight: normal;
+}
+
+.table-wrap {
+	overflow-x: auto;
+}
+
+.small {
+	font-size: 0.85rem;
+}
+
+.badge {
+	display: inline-block;
+	padding: 0.05rem 0.45rem;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	font-size: 0.8rem;
+	white-space: nowrap;
+}
+
+.badge.accent {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+
+.badge.warn {
+	border-color: var(--warn);
+	color: var(--warn);
+}
+
+.row-actions {
+	display: flex;
+	gap: 0.5rem;
+	justify-content: flex-end;
+}
+
+.form-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 0 1rem;
+	align-items: end;
+}
+
+section.card + section.card {
+	margin-top: 1rem;
+}

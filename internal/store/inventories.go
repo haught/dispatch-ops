@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"dispatch-ops/internal/rbac"
 )
 
 // ErrCycle means a group change would make a group its own descendant.
@@ -41,11 +43,14 @@ type InventoryFields struct {
 }
 
 // ListInventories returns inventories whose name contains search, by name.
-func (s *Store) ListInventories(ctx context.Context, search string, page Page) ([]Inventory, int, error) {
-	return list(ctx, s.pool, listQuery{
+// If readableBy is set, only those that user may read.
+func (s *Store) ListInventories(ctx context.Context, search string, readableBy *uuid.UUID, page Page) ([]Inventory, int, error) {
+	q := listQuery{
 		columns: inventoryColumns, from: `inventories i`,
 		where: `i.name ILIKE $1`, args: []any{likePattern(search)}, orderBy: `i.name`,
-	}, page, scanner[Inventory]())
+	}
+	q.readableBy(readableBy, rbac.Inventory, "i.id")
+	return list(ctx, s.pool, q, page, scanner[Inventory]())
 }
 
 // GetInventory returns one inventory.

@@ -18,7 +18,13 @@ const (
 type Principal struct {
 	UserID   uuid.UUID
 	Username string
-	IsAdmin  bool
+	// IsAdmin and IsAuditor are the global roles the user holds, directly or
+	// through a team.
+	IsAdmin   bool
+	IsAuditor bool
+	// ReadOnly is set for read-scoped API tokens, which may only make GET
+	// requests.
+	ReadOnly bool
 	Method   Method
 	// TokenID is the session or API token used, so a session can be ended.
 	TokenID uuid.UUID

@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"dispatch-ops/internal/rbac"
 )
 
 // Project is a row in projects: a git repository holding playbooks and scripts.
@@ -35,12 +37,15 @@ type ProjectFields struct {
 	CredentialID *uuid.UUID
 }
 
-// ListProjects returns projects, by name.
-func (s *Store) ListProjects(ctx context.Context, search string, page Page) ([]Project, int, error) {
-	return list(ctx, s.pool, listQuery{
+// ListProjects returns projects, by name. If readableBy is set, only those
+// that user may read.
+func (s *Store) ListProjects(ctx context.Context, search string, readableBy *uuid.UUID, page Page) ([]Project, int, error) {
+	q := listQuery{
 		columns: projectColumns, from: `projects p`,
 		where: `p.name ILIKE $1`, args: []any{likePattern(search)}, orderBy: `p.name`,
-	}, page, scanner[Project]())
+	}
+	q.readableBy(readableBy, rbac.Project, "p.id")
+	return list(ctx, s.pool, q, page, scanner[Project]())
 }
 
 // GetProject returns one project.

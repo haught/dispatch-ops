@@ -15,8 +15,16 @@
 		{ href: '/templates', label: 'Job templates' },
 		{ href: '/tokens', label: 'API tokens' }
 	];
+	// System administrators and auditors.
+	const adminNav = [
+		{ href: '/users', label: 'Users' },
+		{ href: '/teams', label: 'Teams' },
+		{ href: '/access', label: 'Access' },
+		{ href: '/audit', label: 'Audit log' }
+	];
 	// Managed through the API until their pages arrive.
 	const upcoming = ['Inventories', 'Credentials', 'Execution environments', 'Projects'];
+	const canAdminister = $derived(Boolean(session.user?.isAdmin || session.user?.isAuditor));
 
 	const isLogin = $derived(page.url.pathname === '/login');
 
@@ -59,6 +67,12 @@
 				{#each nav as item (item.href)}
 					<a href={item.href} class:active={isActive(item.href)}>{item.label}</a>
 				{/each}
+				{#if canAdminister}
+					<div class="section">Administration</div>
+					{#each adminNav as item (item.href)}
+						<a href={item.href} class:active={isActive(item.href)}>{item.label}</a>
+					{/each}
+				{/if}
 				<div class="section">API only for now</div>
 				{#each upcoming as label (label)}
 					<span class="disabled">{label}</span>
@@ -67,7 +81,11 @@
 		</aside>
 		<div class="main">
 			<header>
-				<span class="muted">Signed in as <strong>{session.user.username}</strong></span>
+				<span class="muted">
+					Signed in as <strong>{session.user.displayName || session.user.username}</strong>
+					{#if session.user.isAdmin}<span class="badge accent">Admin</span>
+					{:else if session.user.isAuditor}<span class="badge">Auditor</span>{/if}
+				</span>
 				<button class="secondary" onclick={handleSignOut}>Sign out</button>
 			</header>
 			<main>

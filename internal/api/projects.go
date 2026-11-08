@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"dispatch-ops/internal/api/apigen"
+	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
 )
 
@@ -40,10 +41,14 @@ func checkScmURL(u string) error {
 		u, strings.Join(scmSchemes, "://…, "))
 }
 
-// checkScmCredential verifies that id names an scm credential.
+// checkScmCredential verifies that id names an scm credential the caller
+// may use.
 func (h *Handlers) checkScmCredential(ctx context.Context, id *uuid.UUID) error {
 	if id == nil {
 		return nil
+	}
+	if err := h.authorizeUse(ctx, rbac.Credential, *id); err != nil {
+		return err
 	}
 	c, err := h.Store.GetCredential(ctx, *id)
 	if errors.Is(err, store.ErrNotFound) {
@@ -60,7 +65,7 @@ func (h *Handlers) checkScmCredential(ctx context.Context, id *uuid.UUID) error 
 
 func (h *Handlers) ListProjects(ctx context.Context, req apigen.ListProjectsRequestObject) (apigen.ListProjectsResponseObject, error) {
 	p := req.Params
-	items, total, err := h.Store.ListProjects(ctx, deref(p.Search), pageOf(p.Limit, p.Offset))
+	items, total, err := h.Store.ListProjects(ctx, deref(p.Search), readableBy(ctx), pageOf(p.Limit, p.Offset))
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +77,9 @@ func (h *Handlers) ListProjects(ctx context.Context, req apigen.ListProjectsRequ
 }
 
 func (h *Handlers) CreateProject(ctx context.Context, req apigen.CreateProjectRequestObject) (apigen.CreateProjectResponseObject, error) {
+	if err := h.authorizeCreate(ctx, rbac.Project); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	if err := checkScmURL(b.ScmUrl); err != nil {
 		return nil, err
@@ -87,11 +95,22 @@ func (h *Handlers) CreateProject(ctx context.Context, req apigen.CreateProjectRe
 	if err != nil {
 		return nil, err
 	}
+	if err := h.grantCreator(ctx, rbac.Project, p.ID); err != nil {
+		return nil, err
+	}
+	out := toAPIProject(p)
 	h.Log.InfoContext(ctx, "project created", "project_id", p.ID, "by", principalName(ctx))
-	return apigen.CreateProject201JSONResponse(toAPIProject(p)), nil
+	h.audit(ctx, auditRecord{
+		Action: apigen.Create, ResourceType: apigen.AuditResourceTypeProject, ResourceID: p.ID, ResourceName: p.Name,
+		After: out,
+	})
+	return apigen.CreateProject201JSONResponse(out), nil
 }
 
 func (h *Handlers) GetProject(ctx context.Context, req apigen.GetProjectRequestObject) (apigen.GetProjectResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Project, req.ProjectId, rbac.Read); err != nil {
+		return nil, err
+	}
 	p, err := h.Store.GetProject(ctx, req.ProjectId)
 	if err != nil {
 		return nil, orNotFound(err, "Project")
@@ -100,6 +119,13 @@ func (h *Handlers) GetProject(ctx context.Context, req apigen.GetProjectRequestO
 }
 
 func (h *Handlers) UpdateProject(ctx context.Context, req apigen.UpdateProjectRequestObject) (apigen.UpdateProjectResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Project, req.ProjectId, rbac.Admin); err != nil {
+		return nil, err
+	}
+	before, err := h.Store.GetProject(ctx, req.ProjectId)
+	if err != nil {
+		return nil, orNotFound(err, "Project")
+	}
 	b := req.Body
 	if b.ScmUrl != nil {
 		if err := checkScmURL(*b.ScmUrl); err != nil {
@@ -110,8 +136,11 @@ func (h *Handlers) UpdateProject(ctx context.Context, req apigen.UpdateProjectRe
 	if b.CredentialId.IsSpecified() && !b.CredentialId.IsNull() {
 		id := b.CredentialId.MustGet()
 		cred = &id
-		if err := h.checkScmCredential(ctx, cred); err != nil {
-			return nil, err
+		// Keeping a credential needs no use role; switching to one does.
+		if before.CredentialID == nil || *before.CredentialID != id {
+			if err := h.checkScmCredential(ctx, cred); err != nil {
+				return nil, err
+			}
 		}
 	}
 	p, err := h.Store.UpdateProject(ctx, req.ProjectId, func(f *store.ProjectFields) error {
@@ -127,15 +156,31 @@ func (h *Handlers) UpdateProject(ctx context.Context, req apigen.UpdateProjectRe
 	if err != nil {
 		return nil, orNotFound(err, "Project")
 	}
+	out := toAPIProject(p)
 	h.Log.InfoContext(ctx, "project updated", "project_id", p.ID, "by", principalName(ctx))
-	return apigen.UpdateProject200JSONResponse(toAPIProject(p)), nil
+	h.audit(ctx, auditRecord{
+		Action: apigen.Update, ResourceType: apigen.AuditResourceTypeProject, ResourceID: p.ID, ResourceName: p.Name,
+		Before: toAPIProject(before), After: out,
+	})
+	return apigen.UpdateProject200JSONResponse(out), nil
 }
 
 func (h *Handlers) DeleteProject(ctx context.Context, req apigen.DeleteProjectRequestObject) (apigen.DeleteProjectResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Project, req.ProjectId, rbac.Admin); err != nil {
+		return nil, err
+	}
+	p, err := h.Store.GetProject(ctx, req.ProjectId)
+	if err != nil {
+		return nil, orNotFound(err, "Project")
+	}
 	if err := h.Store.DeleteProject(ctx, req.ProjectId); err != nil {
 		return nil, orNotFound(err, "Project")
 	}
 	h.Log.InfoContext(ctx, "project deleted", "project_id", req.ProjectId, "by", principalName(ctx))
+	h.audit(ctx, auditRecord{
+		Action: apigen.Delete, ResourceType: apigen.AuditResourceTypeProject, ResourceID: p.ID, ResourceName: p.Name,
+		Before: toAPIProject(p),
+	})
 	return apigen.DeleteProject204Response{}, nil
 }
 

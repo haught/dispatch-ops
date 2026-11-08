@@ -11,6 +11,49 @@ export type JobStatus = components['schemas']['JobStatus'];
 export type JobEvent = components['schemas']['JobEvent'];
 export type JobTemplate = components['schemas']['JobTemplate'];
 export type JobHostSummary = components['schemas']['JobHostSummary'];
+export type TokenScope = components['schemas']['TokenScope'];
+export type Team = components['schemas']['Team'];
+export type TeamMember = components['schemas']['TeamMember'];
+export type Role = components['schemas']['Role'];
+export type ResourceType = components['schemas']['ResourceType'];
+export type RoleGrant = components['schemas']['RoleGrant'];
+export type RoleGrantCreate = components['schemas']['RoleGrantCreate'];
+export type AuditEntry = components['schemas']['AuditEntry'];
+export type AuditAction = components['schemas']['AuditAction'];
+export type AuditResourceType = components['schemas']['AuditResourceType'];
+
+/** Resource types roles can be granted on, with display names. */
+export const resourceTypes: { type: ResourceType; label: string; plural: string }[] = [
+	{ type: 'inventory', label: 'Inventory', plural: 'inventories' },
+	{ type: 'credential', label: 'Credential', plural: 'credentials' },
+	{ type: 'project', label: 'Project', plural: 'projects' },
+	{ type: 'job_template', label: 'Job template', plural: 'job templates' }
+];
+
+/** The roles that can be granted on each resource type. */
+export const rolesFor: Record<ResourceType, Role[]> = {
+	inventory: ['admin', 'use', 'read'],
+	credential: ['admin', 'use', 'read'],
+	project: ['admin', 'use', 'read'],
+	job_template: ['admin', 'execute', 'read']
+};
+
+/** Roles granted without a resource. */
+export const globalRoles: Role[] = ['system_admin', 'auditor'];
+
+/** Lists resources of a type (up to 500), for pickers. */
+export async function listResources(type: ResourceType): Promise<{ id: string; name: string }[]> {
+	const query = { params: { query: { limit: 500 } } };
+	const res =
+		type === 'inventory'
+			? await api.GET('/api/v1/inventories', query)
+			: type === 'credential'
+				? await api.GET('/api/v1/credentials', query)
+				: type === 'project'
+					? await api.GET('/api/v1/projects', query)
+					: await api.GET('/api/v1/job-templates', query);
+	return res.data?.items ?? [];
+}
 
 /** Event types for a host's task result in an Ansible job. */
 export const hostEventTypes = ['host_ok', 'host_failed', 'host_skipped', 'host_unreachable'];

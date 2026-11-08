@@ -1,5 +1,11 @@
 <script lang="ts">
-	import { api, errorMessage, type ApiToken, type CreatedApiToken } from '#lib/api/client.js';
+	import {
+		api,
+		errorMessage,
+		type ApiToken,
+		type CreatedApiToken,
+		type TokenScope
+	} from '#lib/api/client.js';
 
 	let tokens = $state<ApiToken[]>([]);
 	let loading = $state(true);
@@ -7,6 +13,7 @@
 
 	let name = $state('');
 	let expiresInDays = $state<number | null>(90);
+	let scope = $state<TokenScope>('write');
 	let creating = $state(false);
 	let created = $state<CreatedApiToken | null>(null);
 	let copied = $state(false);
@@ -27,7 +34,7 @@
 		creating = true;
 		error = '';
 		const { data, error: err } = await api.POST('/api/v1/tokens', {
-			body: { name, expiresInDays: expiresInDays || undefined }
+			body: { name, scope, expiresInDays: expiresInDays || undefined }
 		});
 		creating = false;
 		if (!data) {
@@ -65,7 +72,8 @@
 
 <h1>API tokens</h1>
 <p class="muted">
-	Use a token from scripts and CI by sending <code>Authorization: Bearer &lt;token&gt;</code>.
+	Use a token from scripts and CI by sending <code>Authorization: Bearer &lt;token&gt;</code>. A
+	token can do what you can; a read-only one only GET requests.
 </p>
 
 {#if error}
@@ -91,6 +99,13 @@
 			<input bind:value={name} maxlength="100" placeholder="e.g. ci-pipeline" required />
 		</label>
 		<label>
+			Access
+			<select bind:value={scope}>
+				<option value="write">Read and write</option>
+				<option value="read">Read only (GET requests)</option>
+			</select>
+		</label>
+		<label>
 			Expires in (days)
 			<input type="number" bind:value={expiresInDays} min="1" max="3650" placeholder="Never" />
 		</label>
@@ -111,6 +126,7 @@
 					<tr>
 						<th>Name</th>
 						<th>Token</th>
+						<th>Access</th>
 						<th>Created</th>
 						<th>Expires</th>
 						<th>Last used</th>
@@ -122,6 +138,7 @@
 						<tr>
 							<td>{token.name}</td>
 							<td><code>{token.prefix}…</code></td>
+							<td>{token.scope === 'read' ? 'Read only' : 'Read and write'}</td>
 							<td>{fmt(token.createdAt)}</td>
 							<td>{token.expiresAt ? fmt(token.expiresAt) : 'Never'}</td>
 							<td>{fmt(token.lastUsedAt)}</td>
@@ -141,7 +158,7 @@
 
 	.new {
 		display: grid;
-		grid-template-columns: 2fr 1fr auto;
+		grid-template-columns: 2fr 1fr 1fr auto;
 		gap: 1rem;
 		align-items: end;
 	}

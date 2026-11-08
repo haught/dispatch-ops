@@ -39,7 +39,43 @@ type Config struct {
 	// key rotation (DISPATCH_OLD_ENCRYPTION_KEYS, comma-separated).
 	OldEncryptionKeys []string
 
+	// ExternalURL is the server's base URL as browsers reach it
+	// (DISPATCH_EXTERNAL_URL), e.g. https://dispatch.example.com. Single
+	// sign-on needs it for its callback URL.
+	ExternalURL string
+
+	OIDC OIDC
+
 	TaskManager TaskManager
+}
+
+// OIDC configures single sign-on. It is off unless Issuer is set.
+type OIDC struct {
+	// Issuer is the provider's issuer URL (DISPATCH_OIDC_ISSUER).
+	Issuer string
+	// ClientID and ClientSecret identify this server to the provider
+	// (DISPATCH_OIDC_CLIENT_ID, DISPATCH_OIDC_CLIENT_SECRET).
+	ClientID     string
+	ClientSecret string
+	// Scopes are requested besides openid (DISPATCH_OIDC_SCOPES, comma- or
+	// space-separated).
+	Scopes []string
+	// UsernameClaim becomes the username; email, then the subject, are the
+	// fallbacks (DISPATCH_OIDC_USERNAME_CLAIM).
+	UsernameClaim string
+	// GroupsClaim lists the user's groups, which teams map to
+	// (DISPATCH_OIDC_GROUPS_CLAIM). Dots address nested claims.
+	GroupsClaim string
+	// DisplayName labels the sign-in button (DISPATCH_OIDC_DISPLAY_NAME).
+	DisplayName string
+}
+
+// Enabled reports whether single sign-on is configured.
+func (o OIDC) Enabled() bool { return o.Issuer != "" }
+
+// OIDCRedirectURL is the callback URL to register with the provider.
+func (c Config) OIDCRedirectURL() string {
+	return c.ExternalURL + "/api/v1/auth/oidc/callback"
 }
 
 // TaskManager configures the task-manager command.
@@ -76,6 +112,16 @@ func Load() (Config, error) {
 		LogLevel:      getenv("DISPATCH_LOG_LEVEL", "info"),
 		LogFormat:     getenv("DISPATCH_LOG_FORMAT", "json"),
 		EncryptionKey: os.Getenv("DISPATCH_ENCRYPTION_KEY"),
+		ExternalURL:   strings.TrimRight(os.Getenv("DISPATCH_EXTERNAL_URL"), "/"),
+		OIDC: OIDC{
+			Issuer:        os.Getenv("DISPATCH_OIDC_ISSUER"),
+			ClientID:      os.Getenv("DISPATCH_OIDC_CLIENT_ID"),
+			ClientSecret:  os.Getenv("DISPATCH_OIDC_CLIENT_SECRET"),
+			Scopes:        strings.FieldsFunc(getenv("DISPATCH_OIDC_SCOPES", "profile,email"), isListSep),
+			UsernameClaim: getenv("DISPATCH_OIDC_USERNAME_CLAIM", "preferred_username"),
+			GroupsClaim:   getenv("DISPATCH_OIDC_GROUPS_CLAIM", "groups"),
+			DisplayName:   getenv("DISPATCH_OIDC_DISPLAY_NAME", "Single sign-on"),
+		},
 		TaskManager: TaskManager{
 			Namespace:    getenv("DISPATCH_JOB_NAMESPACE", "dispatch-jobs"),
 			KubeContext:  os.Getenv("DISPATCH_KUBE_CONTEXT"),
@@ -112,6 +158,19 @@ func Load() (Config, error) {
 	if c.DatabaseURL == "" {
 		errs = append(errs, errors.New("DISPATCH_DATABASE_URL is required"))
 	}
+	if c.ExternalURL != "" {
+		if u, err := url.Parse(c.ExternalURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			errs = append(errs, fmt.Errorf("DISPATCH_EXTERNAL_URL must be an http(s) URL, got %q", c.ExternalURL))
+		}
+	}
+	if c.OIDC.Enabled() {
+		if c.OIDC.ClientID == "" {
+			errs = append(errs, errors.New("DISPATCH_OIDC_CLIENT_ID is required with DISPATCH_OIDC_ISSUER"))
+		}
+		if c.ExternalURL == "" {
+			errs = append(errs, errors.New("DISPATCH_EXTERNAL_URL is required with DISPATCH_OIDC_ISSUER, for the sign-in callback URL"))
+		}
+	}
 	switch c.LogFormat {
 	case "text", "json":
 	default:
@@ -145,6 +204,8 @@ func (c Config) ValidateTaskManager() error {
 	}
 	return errors.Join(errs...)
 }
+
+func isListSep(r rune) bool { return r == ',' || r == ' ' }
 
 func getenv(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {

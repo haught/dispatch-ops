@@ -98,10 +98,15 @@ func identify(st *store.Store, log *slog.Logger, next http.Handler) http.Handler
 			tok, user, err := st.LookupToken(r.Context(), auth.HashToken(secret))
 			switch {
 			case err == nil && tok.Kind == kind:
-				r = r.WithContext(auth.WithPrincipal(r.Context(), &auth.Principal{
-					UserID: user.ID, Username: user.Username, IsAdmin: user.IsAdmin,
-					Method: method, TokenID: tok.ID,
-				}))
+				p := &auth.Principal{
+					UserID: user.ID, Username: user.Username, IsAdmin: user.IsAdmin, IsAuditor: user.IsAuditor,
+					ReadOnly: tok.Scope == store.ScopeRead, Method: method, TokenID: tok.ID,
+				}
+				if p.ReadOnly && r.Method != http.MethodGet && r.Method != http.MethodHead {
+					writeProblem(w, problemDetail(http.StatusForbidden, "Forbidden", "This API token is read-only"))
+					return
+				}
+				r = r.WithContext(auth.WithPrincipal(r.Context(), p))
 			case err != nil && !errors.Is(err, store.ErrNotFound):
 				log.ErrorContext(r.Context(), "token lookup failed", "err", err)
 				writeProblem(w, problem(http.StatusServiceUnavailable, "Service unavailable"))

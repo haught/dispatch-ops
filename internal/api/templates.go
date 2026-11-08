@@ -13,6 +13,7 @@ import (
 
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/auth"
+	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
 )
 
@@ -99,6 +100,31 @@ func (h *Handlers) checkTemplateCredentials(ctx context.Context, jobType string,
 	return nil
 }
 
+// checkTemplateRefs checks that the caller may use the project, inventory
+// and credentials a template references. With old set, only references
+// that change are checked, so a template's admin can edit it without being
+// able to use everything it already references.
+func (h *Handlers) checkTemplateRefs(ctx context.Context, old *store.JobTemplate, f store.JobTemplateFields) error {
+	if f.ProjectID != nil && (old == nil || old.ProjectID == nil || *old.ProjectID != *f.ProjectID) {
+		if err := h.authorizeUse(ctx, rbac.Project, *f.ProjectID); err != nil {
+			return err
+		}
+	}
+	if f.InventoryID != nil && (old == nil || old.InventoryID == nil || *old.InventoryID != *f.InventoryID) {
+		if err := h.authorizeUse(ctx, rbac.Inventory, *f.InventoryID); err != nil {
+			return err
+		}
+	}
+	for _, id := range f.CredentialIDs {
+		if old == nil || !slices.Contains(old.CredentialIDs, id) {
+			if err := h.authorizeUse(ctx, rbac.Credential, id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func overridesToStrings(o *[]apigen.OverridableField) []string {
 	if o == nil {
 		return []string{}
@@ -112,7 +138,7 @@ func overridesToStrings(o *[]apigen.OverridableField) []string {
 
 func (h *Handlers) ListJobTemplates(ctx context.Context, req apigen.ListJobTemplatesRequestObject) (apigen.ListJobTemplatesResponseObject, error) {
 	p := req.Params
-	items, total, err := h.Store.ListJobTemplates(ctx, deref(p.Search), pageOf(p.Limit, p.Offset))
+	items, total, err := h.Store.ListJobTemplates(ctx, deref(p.Search), readableBy(ctx), pageOf(p.Limit, p.Offset))
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +150,9 @@ func (h *Handlers) ListJobTemplates(ctx context.Context, req apigen.ListJobTempl
 }
 
 func (h *Handlers) CreateJobTemplate(ctx context.Context, req apigen.CreateJobTemplateRequestObject) (apigen.CreateJobTemplateResponseObject, error) {
+	if err := h.authorizeCreate(ctx, rbac.JobTemplate); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	timeout := 3600
 	setIf(&timeout, b.TimeoutSeconds)
@@ -138,6 +167,9 @@ func (h *Handlers) CreateJobTemplate(ctx context.Context, req apigen.CreateJobTe
 	if err := checkTemplate(f); err != nil {
 		return nil, err
 	}
+	if err := h.checkTemplateRefs(ctx, nil, f); err != nil {
+		return nil, err
+	}
 	if err := h.checkTemplateCredentials(ctx, f.JobType, f.CredentialIDs); err != nil {
 		return nil, err
 	}
@@ -145,10 +177,21 @@ func (h *Handlers) CreateJobTemplate(ctx context.Context, req apigen.CreateJobTe
 	if err != nil {
 		return nil, err
 	}
-	return apigen.CreateJobTemplate201JSONResponse(toAPIJobTemplate(t)), nil
+	if err := h.grantCreator(ctx, rbac.JobTemplate, t.ID); err != nil {
+		return nil, err
+	}
+	out := toAPIJobTemplate(t)
+	h.audit(ctx, auditRecord{
+		Action: apigen.Create, ResourceType: apigen.AuditResourceTypeJobTemplate, ResourceID: t.ID, ResourceName: t.Name,
+		After: out,
+	})
+	return apigen.CreateJobTemplate201JSONResponse(out), nil
 }
 
 func (h *Handlers) GetJobTemplate(ctx context.Context, req apigen.GetJobTemplateRequestObject) (apigen.GetJobTemplateResponseObject, error) {
+	if err := h.authorize(ctx, rbac.JobTemplate, req.JobTemplateId, rbac.Read); err != nil {
+		return nil, err
+	}
 	t, err := h.Store.GetJobTemplate(ctx, req.JobTemplateId)
 	if err != nil {
 		return nil, orNotFound(err, "Job template")
@@ -157,8 +200,19 @@ func (h *Handlers) GetJobTemplate(ctx context.Context, req apigen.GetJobTemplate
 }
 
 func (h *Handlers) UpdateJobTemplate(ctx context.Context, req apigen.UpdateJobTemplateRequestObject) (apigen.UpdateJobTemplateResponseObject, error) {
+	if err := h.authorize(ctx, rbac.JobTemplate, req.JobTemplateId, rbac.Admin); err != nil {
+		return nil, err
+	}
 	b := req.Body
+	var before store.JobTemplate
 	t, err := h.Store.UpdateJobTemplate(ctx, req.JobTemplateId, func(f *store.JobTemplateFields) error {
+		before = store.JobTemplate{
+			ID: req.JobTemplateId, Name: f.Name, Description: f.Description, JobType: f.JobType,
+			ExecutionEnvironmentID: f.ExecutionEnvironmentID, ProjectID: f.ProjectID, Entrypoint: f.Entrypoint,
+			InventoryID: f.InventoryID, CredentialIDs: slices.Clone(f.CredentialIDs), Command: f.Command,
+			Arguments: f.Arguments, ExtraVars: maps.Clone(f.ExtraVars), Limit: f.Limit, Tags: f.Tags,
+			SkipTags: f.SkipTags, Verbosity: f.Verbosity, TimeoutSeconds: f.TimeoutSeconds, AllowOverrides: f.AllowOverrides,
+		}
 		setIf(&f.Name, b.Name)
 		setIf(&f.Description, b.Description)
 		setIf(&f.ExecutionEnvironmentID, b.ExecutionEnvironmentId)
@@ -190,6 +244,9 @@ func (h *Handlers) UpdateJobTemplate(ctx context.Context, req apigen.UpdateJobTe
 		if err := checkTemplate(*f); err != nil {
 			return err
 		}
+		if err := h.checkTemplateRefs(ctx, &before, *f); err != nil {
+			return err
+		}
 		if b.CredentialIds != nil {
 			return h.checkTemplateCredentials(ctx, f.JobType, f.CredentialIDs)
 		}
@@ -198,17 +255,37 @@ func (h *Handlers) UpdateJobTemplate(ctx context.Context, req apigen.UpdateJobTe
 	if err != nil {
 		return nil, orNotFound(err, "Job template")
 	}
-	return apigen.UpdateJobTemplate200JSONResponse(toAPIJobTemplate(t)), nil
+	out := toAPIJobTemplate(t)
+	before.CreatedAt = t.CreatedAt
+	h.audit(ctx, auditRecord{
+		Action: apigen.Update, ResourceType: apigen.AuditResourceTypeJobTemplate, ResourceID: t.ID, ResourceName: t.Name,
+		Before: toAPIJobTemplate(before), After: out,
+	})
+	return apigen.UpdateJobTemplate200JSONResponse(out), nil
 }
 
 func (h *Handlers) DeleteJobTemplate(ctx context.Context, req apigen.DeleteJobTemplateRequestObject) (apigen.DeleteJobTemplateResponseObject, error) {
+	if err := h.authorize(ctx, rbac.JobTemplate, req.JobTemplateId, rbac.Admin); err != nil {
+		return nil, err
+	}
+	t, err := h.Store.GetJobTemplate(ctx, req.JobTemplateId)
+	if err != nil {
+		return nil, orNotFound(err, "Job template")
+	}
 	if err := h.Store.DeleteJobTemplate(ctx, req.JobTemplateId); err != nil {
 		return nil, orNotFound(err, "Job template")
 	}
+	h.audit(ctx, auditRecord{
+		Action: apigen.Delete, ResourceType: apigen.AuditResourceTypeJobTemplate, ResourceID: t.ID, ResourceName: t.Name,
+		Before: toAPIJobTemplate(t),
+	})
 	return apigen.DeleteJobTemplate204Response{}, nil
 }
 
 func (h *Handlers) LaunchJobTemplate(ctx context.Context, req apigen.LaunchJobTemplateRequestObject) (apigen.LaunchJobTemplateResponseObject, error) {
+	if err := h.authorize(ctx, rbac.JobTemplate, req.JobTemplateId, rbac.Execute); err != nil {
+		return nil, err
+	}
 	t, err := h.Store.GetJobTemplate(ctx, req.JobTemplateId)
 	if err != nil {
 		return nil, orNotFound(err, "Job template")
@@ -235,6 +312,9 @@ func (h *Handlers) LaunchJobTemplate(ctx context.Context, req apigen.LaunchJobTe
 	}
 	if b.InventoryId != nil {
 		if err := allowed(apigen.OverridableFieldInventory); err != nil {
+			return nil, err
+		}
+		if err := h.authorizeUse(ctx, rbac.Inventory, *b.InventoryId); err != nil {
 			return nil, err
 		}
 		if _, err := h.Store.GetInventory(ctx, *b.InventoryId); errors.Is(err, store.ErrNotFound) {
@@ -305,6 +385,14 @@ func (h *Handlers) LaunchJobTemplate(ctx context.Context, req apigen.LaunchJobTe
 		return nil, err
 	}
 	h.Log.InfoContext(ctx, "job launched", "job_id", job.ID, "job_template_id", t.ID, "by", p.Username)
+	launch := map[string]any{"jobTemplateId": t.ID, "launchType": launchType}
+	if overrides := toMap(b); len(overrides) > 0 {
+		launch["overrides"] = overrides
+	}
+	h.audit(ctx, auditRecord{
+		Action: apigen.Launch, ResourceType: apigen.AuditResourceTypeJob, ResourceID: job.ID, ResourceName: job.Name,
+		After: launch,
+	})
 	return apigen.LaunchJobTemplate201JSONResponse(toAPIJob(job)), nil
 }
 

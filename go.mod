@@ -5,7 +5,9 @@ go 1.27.3
 tool github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen
 
 require (
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/getkin/kin-openapi v0.153.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.12.0
@@ -13,6 +15,7 @@ require (
 	github.com/oapi-codegen/nullable v1.1.0
 	github.com/oapi-codegen/runtime v1.8.0
 	golang.org/x/crypto v0.58.0
+	golang.org/x/oauth2 v0.36.0
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
 	k8s.io/client-go v0.37.2
@@ -63,7 +66,6 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0 // indirect
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect

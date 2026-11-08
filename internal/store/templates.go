@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"dispatch-ops/internal/rbac"
 )
 
 // JobTemplate is a row in job_templates with its credential IDs.
@@ -66,12 +68,15 @@ type JobTemplateFields struct {
 	AllowOverrides         []string
 }
 
-// ListJobTemplates returns job templates, by name.
-func (s *Store) ListJobTemplates(ctx context.Context, search string, page Page) ([]JobTemplate, int, error) {
-	return list(ctx, s.pool, listQuery{
+// ListJobTemplates returns job templates, by name. If readableBy is set,
+// only those that user may read.
+func (s *Store) ListJobTemplates(ctx context.Context, search string, readableBy *uuid.UUID, page Page) ([]JobTemplate, int, error) {
+	q := listQuery{
 		columns: templateColumns, from: `job_templates t`,
 		where: `t.name ILIKE $1`, args: []any{likePattern(search)}, orderBy: `t.name`,
-	}, page, scanner[JobTemplate]())
+	}
+	q.readableBy(readableBy, rbac.JobTemplate, "t.id")
+	return list(ctx, s.pool, q, page, scanner[JobTemplate]())
 }
 
 // GetJobTemplate returns one job template.

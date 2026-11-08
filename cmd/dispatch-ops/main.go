@@ -28,6 +28,7 @@ import (
 	"dispatch-ops/internal/credentials"
 	"dispatch-ops/internal/db"
 	"dispatch-ops/internal/jobstream"
+	"dispatch-ops/internal/oidc"
 	"dispatch-ops/internal/secrets"
 	"dispatch-ops/internal/server"
 	"dispatch-ops/internal/store"
@@ -48,6 +49,7 @@ Commands:
   migrate version           Show the current migration version
   migrate force <version>   Mark a version as applied after fixing a failed migration
   user create [flags]       Create a local user (run "dispatch-ops user create -h")
+  user grant-admin <name>   Make an existing user a system administrator
   gen-key                   Print a new random credential encryption key
   version                   Print the version
 
@@ -77,10 +79,13 @@ func run(args []string) error {
 	case "migrate":
 		return migrateCmd(args[1:])
 	case "user":
-		if len(args) < 2 || args[1] != "create" {
-			return errors.New(`usage: dispatch-ops user create [flags]`)
+		switch {
+		case len(args) >= 2 && args[1] == "create":
+			return createUser(args[2:])
+		case len(args) == 3 && args[1] == "grant-admin":
+			return grantAdmin(args[2])
 		}
-		return createUser(args[2:])
+		return errors.New("usage: dispatch-ops user create [flags] | user grant-admin <username>")
 	case "version":
 		fmt.Println(version)
 		return nil
@@ -136,10 +141,20 @@ func serve() error {
 	hub := jobstream.NewHub()
 	go hub.Run(ctx, st, log)
 
+	var sso *oidc.Provider
+	if o := cfg.OIDC; o.Enabled() {
+		sso = oidc.New(oidc.Config{
+			Issuer: o.Issuer, ClientID: o.ClientID, ClientSecret: o.ClientSecret, RedirectURL: cfg.OIDCRedirectURL(),
+			Scopes: o.Scopes, UsernameClaim: o.UsernameClaim, GroupsClaim: o.GroupsClaim, DisplayName: o.DisplayName,
+		})
+		log.Info("single sign-on enabled", "issuer", o.Issuer, "redirect_url", cfg.OIDCRedirectURL())
+	}
+
 	apiHandler, err := api.NewHandler(&api.Handlers{
 		Store:         st,
 		Vault:         credentials.Vault{Keys: keys},
 		Hub:           hub,
+		OIDC:          sso,
 		Log:           log,
 		SessionTTL:    cfg.SessionTTL,
 		SecureCookies: cfg.SecureCookies,
@@ -334,7 +349,8 @@ func createUser(args []string) error {
 	}
 	defer pool.Close()
 
-	u, err := store.New(pool).CreateLocalUser(ctx, store.NewLocalUser{
+	st := store.New(pool)
+	u, err := st.CreateLocalUser(ctx, store.NewLocalUser{
 		Username: *username, DisplayName: *displayName, Email: *email, PasswordHash: hash, IsAdmin: *admin,
 	})
 	if errors.Is(err, store.ErrConflict) {
@@ -343,10 +359,48 @@ func createUser(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := st.AddAuditEntry(ctx, store.AuditEntry{
+		ActorName: "dispatch-ops user create", AuthMethod: "cli", Action: "create", ResourceType: "user",
+		ResourceID: &u.ID, ResourceName: u.Username, After: map[string]any{"username": u.Username, "isAdmin": u.IsAdmin},
+	}); err != nil {
+		return err
+	}
 	fmt.Printf("created user %s (id %s, admin: %t)\n", u.Username, u.ID, u.IsAdmin)
 	if generated {
 		fmt.Printf("password: %s\n", password)
 	}
+	return nil
+}
+
+func grantAdmin(username string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	st := store.New(pool)
+	u, err := st.GetUserByUsername(ctx, username)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("no user %q (single sign-on users exist once they have signed in)", username)
+	}
+	if err != nil {
+		return err
+	}
+	if err := st.GrantSystemAdmin(ctx, u.ID); err != nil {
+		return err
+	}
+	if err := st.AddAuditEntry(ctx, store.AuditEntry{
+		ActorName: "dispatch-ops user grant-admin", AuthMethod: "cli", Action: "grant", ResourceType: "user",
+		ResourceID: &u.ID, ResourceName: u.Username, After: map[string]any{"role": "system_admin", "user": u.Username},
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("%s is a system administrator\n", u.Username)
 	return nil
 }
 

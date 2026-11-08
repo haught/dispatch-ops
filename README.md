@@ -5,21 +5,26 @@ and container commands as jobs.
 
 **Status:** early development. Ansible playbooks, scripts and container
 commands run on Kubernetes with live logs; playbooks and scripts come from
-git projects, and Ansible jobs report per-host results. Inventories,
-credentials, execution environments, projects and job templates are managed
-through the API; the UI lists jobs and templates, launches templates, streams
-job output and shows per-host results.
+git projects, and Ansible jobs report per-host results. Users sign in with
+single sign-on (OIDC) or local accounts, and roles granted to users and
+teams control who can see, use, change and launch what; every change is
+audited. Inventories, credentials, execution environments, projects and job
+templates are managed through the API; the UI lists jobs and templates,
+launches templates, streams job output, shows per-host results, and manages
+users, teams, roles and API tokens.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `api/openapi.yaml` | The API contract. The Go server and the TS client are generated from it. |
-| `cmd/dispatch-ops` | The binary: `serve`, `task-manager`, `migrate`, `user create`, `gen-key` |
+| `cmd/dispatch-ops` | The binary: `serve`, `task-manager`, `migrate`, `user create`, `user grant-admin`, `gen-key` |
 | `cmd/dispatch-runner` | The runner: the entrypoint of every execution environment image |
 | `internal/api` | HTTP handlers (one file per resource) and request pipeline (`router.go`) |
 | `internal/api/apigen` | Generated server code. Do not edit by hand. |
 | `internal/auth` | Password hashing, tokens, request principal |
+| `internal/rbac` | Roles, and which roles allow what |
+| `internal/oidc` | Single sign-on with an OIDC provider |
 | `internal/credentials` | Credential kinds, input validation, encryption of secret inputs |
 | `internal/secrets` | AES-256-GCM keyring |
 | `internal/store` | PostgreSQL queries, the job queue, `LISTEN/NOTIFY` |
@@ -117,7 +122,9 @@ socket. It starts nothing by itself; use the same `make` targets. Inside it:
 
 Requests are validated against the spec before they reach a handler. An
 operation's `security` block decides whether it needs a signed-in caller.
-`security: []` makes it public.
+`security: []` makes it public. What the caller may do is checked by the
+handler, with the helpers in `internal/api/access.go`; changes are recorded
+with `h.audit` (`internal/api/audit.go`).
 
 ### Tests
 
@@ -134,18 +141,92 @@ task manager against a fake Kubernetes client.
 
 ## Authentication
 
-- **Browser:** `POST /api/v1/auth/login` sets an HTTP-only `dispatch_session`
-  cookie. Cross-site state-changing requests are rejected by Go's
-  `http.CrossOriginProtection`.
+- **Browser:** sign in with single sign-on (OIDC, below) or a local
+  username and password (`POST /api/v1/auth/login`). Either sets an
+  HTTP-only `dispatch_session` cookie. Cross-site state-changing requests
+  are rejected by Go's `http.CrossOriginProtection`.
 - **Scripts/CI:** create an API token on the *API tokens* page and send
-  `Authorization: Bearer dop_…`. API tokens cannot create more tokens.
+  `Authorization: Bearer dop_…`. A token can do what its user can; a
+  read-only one (`"scope": "read"`) only GET requests. Tokens can only be
+  created from a browser session, never with another token. For a service
+  account, create a local user and have an administrator create its tokens
+  (`POST /api/v1/users/{id}/tokens`, or the user's page).
 - Only a SHA-256 hash of each token is stored. Passwords use argon2id.
-
+- Deactivating a user ends their sessions; their tokens stop working until
+  they are reactivated.
 - **Runners:** each job gets a one-time token (`doj_…`) that only works on
   `/runner/v1/jobs/<its id>/…`, and stops working when the job ends.
 
-OIDC sign-in and role-based access control are not implemented yet: every
-signed-in user can manage every resource and launch any template.
+### Single sign-on (OIDC)
+
+Set `DISPATCH_OIDC_ISSUER`, `DISPATCH_OIDC_CLIENT_ID`,
+`DISPATCH_OIDC_CLIENT_SECRET` and `DISPATCH_EXTERNAL_URL`, and register
+`<DISPATCH_EXTERNAL_URL>/api/v1/auth/oidc/callback` as the client's redirect
+URI. The sign-in page then offers a single sign-on button. The flow is the
+authorization code flow with PKCE.
+
+A user is created at their first sign-in, keyed on the issuer and subject.
+Their username comes from `DISPATCH_OIDC_USERNAME_CLAIM` (then `email`, then
+the subject), and their display name and email from `name` and `email`; all
+three are refreshed at each sign-in. A username already used by another
+account is refused.
+
+Teams list provider groups (`oidcGroups`). At each sign-in a user joins the
+teams that list one of the groups in their `DISPATCH_OIDC_GROUPS_CLAIM`, and
+leaves the teams they joined that way if they no longer have it. Members
+added by an administrator are left alone. Ask the provider to include the
+claim (often with the `groups` scope in `DISPATCH_OIDC_SCOPES`); nested
+claims such as Keycloak's `realm_access.roles` are addressed with dots. If
+the ID token lacks the claim, the userinfo endpoint is asked.
+
+The provider is contacted on the first sign-in, not at startup, so the API
+keeps serving local users, tokens and runners while it is unreachable.
+Signing out ends the Dispatch Ops session only, not the provider's.
+
+## Access control
+
+Roles are granted to users or teams (`/api/v1/role-grants`, or the
+*Access*, *Users* and *Teams* pages):
+
+| Role | On | Allows |
+|---|---|---|
+| `admin` | an inventory, credential, project or job template | Edit and delete it, and grant roles on it. Includes the others. |
+| `use` | an inventory, credential or project | Reference it from a job template (or a credential from a project) |
+| `execute` | a job template | Launch it |
+| `read` | any of those | See it |
+| `system_admin` | everything | Anything, including users, teams and execution environments |
+| `auditor` | everything | Read everything, including the audit log |
+
+- A role on a resource type without a resource ID applies to every resource
+  of that type. `admin` on a type is what allows creating them, and whoever
+  creates one gets `admin` on it.
+- Lists show only what the caller can read. A resource they can't read is
+  reported as not found; an action their roles don't allow is forbidden.
+- Changing a template's project, inventory or credentials needs `use` on the
+  new ones. Overriding the inventory at launch needs `use` on it.
+- A job can be seen by whoever launched it and by anyone with a role on its
+  template. It can be canceled by whoever launched it and by those with
+  `execute` on its template.
+- Execution environments can be used by everyone; only system
+  administrators manage them, and users and teams.
+- `make admin` (`dispatch-ops user create -admin`) creates a local system
+  administrator. `dispatch-ops user grant-admin <username>` makes an
+  existing user one, e.g. to recover access, or to promote a single sign-on
+  user after their first sign-in. Granting `system_admin` to a team mapped
+  from a provider group does the same for everyone in it.
+
+Upgrading from a version without access control turns existing
+administrators into `system_admin` grants. Other existing users see nothing
+until they are granted roles.
+
+### Audit log
+
+Every change made through the API, every launch and cancel, and every
+sign-in is recorded with who made it, how they authenticated and when:
+creates with the new resource, deletes with the old one, and updates with
+the fields that changed. Secrets are never recorded; a credential update
+lists which inputs were changed. System administrators and auditors can
+read it on the *Audit log* page or at `GET /api/v1/audit-log`.
 
 ## How a job runs
 
@@ -273,6 +354,14 @@ plus git, ssh and sshpass).
 | `DISPATCH_LOG_FORMAT` | `json` | `json` or `text` |
 | `DISPATCH_ENCRYPTION_KEY` | (required) | Encrypts credentials. 32 bytes, base64; `dispatch-ops gen-key` makes one |
 | `DISPATCH_OLD_ENCRYPTION_KEYS` | | Comma-separated previous keys, still used to decrypt during a rotation |
+| `DISPATCH_EXTERNAL_URL` | | The server's URL as browsers reach it, e.g. `https://dispatch.example.com`. Needed for single sign-on |
+| `DISPATCH_OIDC_ISSUER` | | OIDC provider's issuer URL. Turns on single sign-on |
+| `DISPATCH_OIDC_CLIENT_ID` | | Required with the issuer |
+| `DISPATCH_OIDC_CLIENT_SECRET` | | |
+| `DISPATCH_OIDC_SCOPES` | `profile,email` | Scopes besides `openid`, comma- or space-separated |
+| `DISPATCH_OIDC_USERNAME_CLAIM` | `preferred_username` | |
+| `DISPATCH_OIDC_GROUPS_CLAIM` | `groups` | Claim listing the user's groups, which teams map to |
+| `DISPATCH_OIDC_DISPLAY_NAME` | `Single sign-on` | Label of the sign-in button |
 
 Task manager only:
 

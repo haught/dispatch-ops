@@ -12,13 +12,15 @@ import (
 	"github.com/google/uuid"
 
 	"dispatch-ops/internal/api/apigen"
+	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
 )
 
 func (h *Handlers) ListJobs(ctx context.Context, req apigen.ListJobsRequestObject) (apigen.ListJobsResponseObject, error) {
 	p := req.Params
 	items, total, err := h.Store.ListJobs(ctx,
-		store.JobFilter{Status: string(deref(p.Status)), TemplateID: p.JobTemplateId}, pageOf(p.Limit, p.Offset))
+		store.JobFilter{Status: string(deref(p.Status)), TemplateID: p.JobTemplateId, ReadableBy: readableBy(ctx)},
+		pageOf(p.Limit, p.Offset))
 	if err != nil {
 		return nil, err
 	}
@@ -30,15 +32,22 @@ func (h *Handlers) ListJobs(ctx context.Context, req apigen.ListJobsRequestObjec
 }
 
 func (h *Handlers) GetJob(ctx context.Context, req apigen.GetJobRequestObject) (apigen.GetJobResponseObject, error) {
-	j, err := h.Store.GetJob(ctx, req.JobId)
+	j, err := h.getJob(ctx, req.JobId)
 	if err != nil {
-		return nil, orNotFound(err, "Job")
+		return nil, err
 	}
 	return apigen.GetJob200JSONResponse(toAPIJob(j)), nil
 }
 
 func (h *Handlers) CancelJob(ctx context.Context, req apigen.CancelJobRequestObject) (apigen.CancelJobResponseObject, error) {
-	j, err := h.Store.CancelJob(ctx, req.JobId)
+	j, err := h.Store.GetJob(ctx, req.JobId)
+	if err != nil {
+		return nil, orNotFound(err, "Job")
+	}
+	if err := h.authorizeJob(ctx, j, rbac.Execute); err != nil {
+		return nil, err
+	}
+	j, err = h.Store.CancelJob(ctx, req.JobId)
 	if errors.Is(err, store.ErrJobState) {
 		return nil, conflict("the job has already finished")
 	}
@@ -46,10 +55,17 @@ func (h *Handlers) CancelJob(ctx context.Context, req apigen.CancelJobRequestObj
 		return nil, orNotFound(err, "Job")
 	}
 	h.Log.InfoContext(ctx, "job cancel requested", "job_id", j.ID, "status", j.Status, "by", principalName(ctx))
+	h.audit(ctx, auditRecord{
+		Action: apigen.Cancel, ResourceType: apigen.AuditResourceTypeJob, ResourceID: j.ID, ResourceName: j.Name,
+		After: map[string]any{"status": j.Status},
+	})
 	return apigen.CancelJob202JSONResponse(toAPIJob(j)), nil
 }
 
 func (h *Handlers) ListJobEvents(ctx context.Context, req apigen.ListJobEventsRequestObject) (apigen.ListJobEventsResponseObject, error) {
+	if _, err := h.getJob(ctx, req.JobId); err != nil {
+		return nil, err
+	}
 	limit := 1000
 	setIf(&limit, req.Params.Limit)
 	events, err := h.Store.ListJobEvents(ctx, req.JobId,
@@ -65,6 +81,9 @@ func (h *Handlers) ListJobEvents(ctx context.Context, req apigen.ListJobEventsRe
 }
 
 func (h *Handlers) ListJobHosts(ctx context.Context, req apigen.ListJobHostsRequestObject) (apigen.ListJobHostsResponseObject, error) {
+	if _, err := h.getJob(ctx, req.JobId); err != nil {
+		return nil, err
+	}
 	hosts, err := h.Store.ListJobHostSummaries(ctx, req.JobId)
 	if err != nil {
 		return nil, orNotFound(err, "Job")
@@ -107,9 +126,9 @@ func (h *Handlers) StreamJob(ctx context.Context, req apigen.StreamJobRequestObj
 		}
 		after = seq
 	}
-	// Check the job exists before committing to a 200 stream.
-	if _, err := h.Store.GetJob(ctx, req.JobId); err != nil {
-		return nil, orNotFound(err, "Job")
+	// Check the job exists, and may be seen, before committing to a 200 stream.
+	if _, err := h.getJob(ctx, req.JobId); err != nil {
+		return nil, err
 	}
 	return jobStream{h: h, ctx: ctx, jobID: req.JobId, after: after}, nil
 }
