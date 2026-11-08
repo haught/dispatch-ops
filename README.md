@@ -11,12 +11,13 @@ teams control who can see, use, change and launch what; every change is
 audited. Templates can run on cron schedules, jobs can be relaunched (or
 rerun on just their failed hosts), and job events can notify webhooks,
 Slack or email. Old jobs are deleted after a retention period, and both
-server processes export Prometheus metrics. Inventories, credentials,
-execution environments, projects and job templates are managed through the
-API; the UI lists jobs and templates, launches templates, manages their
-schedules and notifications, streams job output, shows per-host results,
-and manages users, teams, roles, notification targets and API tokens. An
-operator installs and upgrades it on Kubernetes.
+server processes export Prometheus metrics. The UI manages inventories
+(hosts, groups and variables), credentials, projects, execution environments
+and job templates, lists jobs, launches templates, manages their schedules,
+notifications and access, streams job
+output, shows per-host results, and manages users, teams, roles,
+notification targets and API tokens. An operator installs and upgrades it on
+Kubernetes.
 
 ## Layout
 
@@ -73,7 +74,9 @@ Job pods reach the API on the host at `http://host.docker.internal:8080`
 (`DISPATCH_RUNNER_API_URL`). If your `.env` is older than
 `.env.example`, copy the variables it is missing.
 
-Then register the image and create a template, e.g. with an API token:
+Then register the image and create a template, from the UI (*Execution
+environments*, then *Job templates* → *New job template*) or with an API
+token:
 
 ```sh
 curl -s localhost:8080/api/v1/execution-environments -H "Authorization: Bearer $TOKEN" \

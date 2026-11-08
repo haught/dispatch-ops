@@ -41,8 +41,11 @@
 			<a href="/jobs">jobs</a> page.
 		</p>
 		<p class="muted">
-			Inventories, credentials, execution environments and templates are managed through the API for
-			now: create an <a href="/tokens">API token</a> and see <code>api/openapi.yaml</code>.
+			Jobs run against an <a href="/inventories">inventory</a>, in an
+			<a href="/execution-environments">execution environment</a>, with playbooks or scripts from a
+			<a href="/projects">project</a> and secrets from <a href="/credentials">credentials</a>.
+			Templates are created through the API for now: create an <a href="/tokens">API token</a> and
+			see <code>api/openapi.yaml</code>.
 		</p>
 	</section>
 </div>

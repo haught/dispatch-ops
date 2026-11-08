@@ -14,6 +14,10 @@
 		{ href: '/jobs', label: 'Jobs' },
 		{ href: '/templates', label: 'Job templates' },
 		{ href: '/schedules', label: 'Schedules' },
+		{ href: '/inventories', label: 'Inventories' },
+		{ href: '/credentials', label: 'Credentials' },
+		{ href: '/projects', label: 'Projects' },
+		{ href: '/execution-environments', label: 'Execution environments' },
 		{ href: '/tokens', label: 'API tokens' }
 	];
 	// System administrators and auditors.
@@ -24,8 +28,6 @@
 		{ href: '/notifications', label: 'Notifications' },
 		{ href: '/audit', label: 'Audit log' }
 	];
-	// Managed through the API until their pages arrive.
-	const upcoming = ['Inventories', 'Credentials', 'Execution environments', 'Projects'];
 	const canAdminister = $derived(Boolean(session.user?.isAdmin || session.user?.isAuditor));
 
 	const isLogin = $derived(page.url.pathname === '/login');
@@ -75,10 +77,6 @@
 						<a href={item.href} class:active={isActive(item.href)}>{item.label}</a>
 					{/each}
 				{/if}
-				<div class="section">API only for now</div>
-				{#each upcoming as label (label)}
-					<span class="disabled">{label}</span>
-				{/each}
 			</nav>
 		</aside>
 		<div class="main">
@@ -122,8 +120,7 @@
 		gap: 2px;
 	}
 
-	nav a,
-	nav .disabled {
+	nav a {
 		padding: 0.4rem 0.5rem;
 		border-radius: 6px;
 		color: var(--text);
@@ -137,10 +134,6 @@
 	nav a.active {
 		background: var(--bg);
 		font-weight: 600;
-	}
-
-	nav .disabled {
-		color: var(--muted);
 	}
 
 	nav .section {

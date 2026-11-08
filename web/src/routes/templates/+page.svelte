@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { api, errorMessage, type JobTemplate } from '#lib/api/client.js';
+	import TemplateForm from '#lib/components/TemplateForm.svelte';
+	import { canCreate, loadMyGrants } from '#lib/permissions.svelte.js';
 
 	let templates = $state<JobTemplate[]>([]);
 	let total = $state(0);
@@ -8,6 +10,13 @@
 	let loading = $state(true);
 	let error = $state('');
 	let launching = $state<string | null>(null);
+	let creating = $state(false);
+
+	const mayCreate = $derived(canCreate('job_template'));
+
+	$effect(() => {
+		loadMyGrants();
+	});
 
 	async function load() {
 		const { data, error: err } = await api.GET('/api/v1/job-templates', {
@@ -40,10 +49,21 @@
 	}
 </script>
 
-<h1>Job templates</h1>
-<p class="muted">
-	Templates are created through the API for now (<code>POST /api/v1/job-templates</code>).
-</p>
+<div class="page-header">
+	<h1>Job templates</h1>
+	<span class="spacer"></span>
+	{#if mayCreate && !creating}
+		<button onclick={() => (creating = true)}>New job template</button>
+	{/if}
+</div>
+<p class="muted">What to run, where and with which secrets. Launch one to start a job.</p>
+
+{#if creating}
+	<section class="card">
+		<h2>New job template</h2>
+		<TemplateForm onsaved={(t) => goto(`/templates/${t.id}`)} oncancel={() => (creating = false)} />
+	</section>
+{/if}
 
 <label class="search">
 	Search
@@ -104,6 +124,10 @@
 <style>
 	.search {
 		max-width: 320px;
+	}
+
+	section.card + label.search {
+		margin-top: 1rem;
 	}
 
 	.table-wrap {

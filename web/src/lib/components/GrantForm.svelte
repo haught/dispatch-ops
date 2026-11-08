@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import {
 		api,
 		errorMessage,
@@ -14,25 +15,31 @@
 	let {
 		userId,
 		teamId,
+		resourceType,
+		resourceId,
 		ongranted
 	}: {
 		/** Grant to this user, instead of choosing a holder. */
 		userId?: string;
 		/** Grant to this team, instead of choosing a holder. */
 		teamId?: string;
+		/** With resourceId, grant on this resource instead of choosing one. */
+		resourceType?: ResourceType;
+		resourceId?: string;
 		ongranted: () => void;
 	} = $props();
 
 	const fixedHolder = $derived(Boolean(userId || teamId));
+	const fixedResource = $derived(Boolean(resourceType && resourceId));
 
 	let holderKind = $state<'user' | 'team'>('user');
 	let holderId = $state('');
 	let holders = $state<{ id: string; name: string }[]>([]);
 
-	let scope = $state<ResourceType | 'global'>('job_template');
-	let resourceId = $state('');
+	let scope = $state<ResourceType | 'global'>(untrack(() => resourceType) ?? 'job_template');
+	let chosenResourceId = $state('');
 	let resources = $state<{ id: string; name: string }[]>([]);
-	let role = $state<Role>('execute');
+	let role = $state<Role>(untrack(() => (resourceType ? rolesFor[resourceType][1] : 'execute')));
 
 	let busy = $state(false);
 	let error = $state('');
@@ -60,8 +67,9 @@
 
 	// Load the resources of the chosen type.
 	$effect(() => {
+		if (fixedResource) return;
 		const s = scope;
-		resourceId = '';
+		chosenResourceId = '';
 		resources = [];
 		if (s !== 'global') listResources(s).then((r) => (resources = r));
 	});
@@ -80,9 +88,12 @@
 		else if (teamId) body.teamId = teamId;
 		else if (holderKind === 'user') body.userId = holderId;
 		else body.teamId = holderId;
-		if (scope !== 'global') {
+		if (fixedResource) {
+			body.resourceType = resourceType;
+			body.resourceId = resourceId;
+		} else if (scope !== 'global') {
 			body.resourceType = scope;
-			if (resourceId) body.resourceId = resourceId;
+			if (chosenResourceId) body.resourceId = chosenResourceId;
 		}
 		const { error: err } = await api.POST('/api/v1/role-grants', { body });
 		busy = false;
@@ -114,25 +125,27 @@
 				</select>
 			</label>
 		{/if}
-		<label>
-			On
-			<select bind:value={scope} onchange={scopeChanged}>
-				{#each resourceTypes as rt (rt.type)}
-					<option value={rt.type}>{rt.label}</option>
-				{/each}
-				<option value="global">Everything (global role)</option>
-			</select>
-		</label>
-		{#if scope !== 'global'}
+		{#if !fixedResource}
 			<label>
-				Which
-				<select bind:value={resourceId}>
-					<option value="">All {resourceTypes.find((r) => r.type === scope)?.plural}</option>
-					{#each resources as r (r.id)}
-						<option value={r.id}>{r.name}</option>
+				On
+				<select bind:value={scope} onchange={scopeChanged}>
+					{#each resourceTypes as rt (rt.type)}
+						<option value={rt.type}>{rt.label}</option>
 					{/each}
+					<option value="global">Everything (global role)</option>
 				</select>
 			</label>
+			{#if scope !== 'global'}
+				<label>
+					Which
+					<select bind:value={chosenResourceId}>
+						<option value="">All {resourceTypes.find((r) => r.type === scope)?.plural}</option>
+						{#each resources as r (r.id)}
+							<option value={r.id}>{r.name}</option>
+						{/each}
+					</select>
+				</label>
+			{/if}
 		{/if}
 		<label>
 			Role
@@ -152,6 +165,6 @@
 	<p class="muted small">
 		<strong>admin</strong> manages a resource and its roles; <strong>use</strong> lets job templates
 		reference it; <strong>execute</strong> launches a template; <strong>read</strong> shows it.
-		<strong>admin</strong> on all of a type also allows creating them.
+		{#if !fixedResource}<strong>admin</strong> on all of a type also allows creating them.{/if}
 	</p>
 </form>

@@ -10,6 +10,8 @@ export type Job = components['schemas']['Job'];
 export type JobStatus = components['schemas']['JobStatus'];
 export type JobEvent = components['schemas']['JobEvent'];
 export type JobTemplate = components['schemas']['JobTemplate'];
+export type JobType = components['schemas']['JobType'];
+export type OverridableField = components['schemas']['OverridableField'];
 export type JobHostSummary = components['schemas']['JobHostSummary'];
 export type TokenScope = components['schemas']['TokenScope'];
 export type Team = components['schemas']['Team'];
@@ -27,6 +29,32 @@ export type NotificationKind = components['schemas']['NotificationKind'];
 export type NotificationEvent = components['schemas']['NotificationEvent'];
 export type TemplateNotification = components['schemas']['TemplateNotification'];
 export type NotificationDelivery = components['schemas']['NotificationDelivery'];
+export type Inventory = components['schemas']['Inventory'];
+export type Host = components['schemas']['Host'];
+export type Group = components['schemas']['Group'];
+export type Variables = components['schemas']['Variables'];
+export type Credential = components['schemas']['Credential'];
+export type CredentialKind = components['schemas']['CredentialKind'];
+export type CredentialKindInfo = components['schemas']['CredentialKindInfo'];
+export type CredentialField = components['schemas']['CredentialField'];
+export type ExecutionEnvironment = components['schemas']['ExecutionEnvironment'];
+export type PullPolicy = components['schemas']['PullPolicy'];
+export type Project = components['schemas']['Project'];
+
+/** Image pull policies, as Kubernetes names them. */
+export const pullPolicies: PullPolicy[] = ['IfNotPresent', 'Always', 'Never'];
+
+/** Describes the credential kinds and their fields. */
+export async function listCredentialKinds(): Promise<CredentialKindInfo[]> {
+	const { data } = await api.GET('/api/v1/credential-kinds');
+	return data?.items ?? [];
+}
+
+/** Lists the job templates the caller can see (up to 500), e.g. to show what uses a resource. */
+export async function listTemplates(): Promise<JobTemplate[]> {
+	const { data } = await api.GET('/api/v1/job-templates', { params: { query: { limit: 500 } } });
+	return data?.items ?? [];
+}
 
 /** Notification events, with labels. */
 export const notificationEvents: { event: NotificationEvent; label: string }[] = [
