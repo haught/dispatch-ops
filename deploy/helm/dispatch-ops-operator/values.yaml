@@ -45,3 +45,68 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# A Dispatch Ops installation (a DispatchOps resource) for this release's
+# operator to run, with the settings `.env` holds in development. Off by
+# default: without it, create DispatchOps resources yourself (see README.md).
+#
+# On a cluster that doesn't have the DispatchOps CRD yet, the first
+# `helm install` can only install the CRD; run `helm upgrade` once more with
+# the same values to create the installation.
+installation:
+  enabled: false
+  name: dispatch-ops
+  # Defaults to the release's namespace. It must exist, and be in
+  # watchNamespaces when that's set.
+  namespace: ""
+  # Keep the DispatchOps (and so the running installation) and the Secrets
+  # below when the chart is uninstalled. Losing the encryption key loses every
+  # stored credential.
+  keep: true
+
+  # DISPATCH_EXTERNAL_URL, DISPATCH_SESSION_TTL, DISPATCH_LOG_LEVEL. Empty
+  # means the operator's default.
+  externalURL: ""
+  sessionTTL: ""
+  logLevel: ""
+
+  # An external PostgreSQL. Without url or existingSecret, the operator runs
+  # one.
+  database:
+    # DISPATCH_DATABASE_URL; the chart stores it in the <name>-database Secret.
+    url: ""
+    # Or a Secret you created holding the URL under existingSecretKey.
+    existingSecret: ""
+    existingSecretKey: url
+
+  # The credential encryption key. Without key or existingSecret, the operator
+  # generates <name>-encryption-key.
+  encryptionKey:
+    # DISPATCH_ENCRYPTION_KEY (`dispatch-ops gen-key` makes one) and
+    # DISPATCH_OLD_ENCRYPTION_KEYS; the chart stores them in the
+    # <name>-encryption-key Secret.
+    key: ""
+    oldKeys: ""
+    # Or a Secret you created, with "key" and optionally "oldKeys".
+    existingSecret: ""
+
+  # Single sign-on, on when issuer is set. Register
+  # <externalURL>/api/v1/auth/oidc/callback as the client's redirect URI.
+  oidc:
+    issuer: ""
+    clientID: ""
+    # DISPATCH_OIDC_CLIENT_SECRET; the chart stores it in the <name>-oidc
+    # Secret.
+    clientSecret: ""
+    # Or a Secret you created holding it under existingSecretKey.
+    existingSecret: ""
+    existingSecretKey: clientSecret
+    scopes: []
+    usernameClaim: ""
+    groupsClaim: ""
+    displayName: ""
+
+  # Any other DispatchOps spec fields (image, api, taskManager, retention,
+  # secureCookies, ...); the settings above take precedence.
+  # `kubectl explain dispatchops.spec` documents them.
+  spec: {}

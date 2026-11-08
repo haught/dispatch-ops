@@ -178,3 +178,4 @@ docker: ## Build the server and operator container images
 .PHONY: helm-lint
 helm-lint: ## Lint the operator's Helm chart
 	helm lint $(CHART)
+	helm lint $(CHART) -f $(CHART)/ci/installation-values.yaml

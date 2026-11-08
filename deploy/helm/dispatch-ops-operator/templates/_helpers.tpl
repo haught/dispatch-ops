@@ -21,3 +21,14 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- define "dispatch-ops-operator.serviceAccountName" -}}
 {{- .Values.serviceAccount.name | default (include "dispatch-ops-operator.fullname" .) -}}
 {{- end -}}
+
+{{- define "dispatch-ops-operator.installationNamespace" -}}
+{{- .Values.installation.namespace | default .Release.Namespace -}}
+{{- end -}}
+
+{{- /* Labels for the installation's objects, which aren't the operator's. */ -}}
+{{- define "dispatch-ops-operator.installationLabels" -}}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
+{{- end -}}

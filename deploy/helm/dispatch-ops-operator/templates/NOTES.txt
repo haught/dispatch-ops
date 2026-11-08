@@ -1,5 +1,32 @@
 The Dispatch Ops operator is running in {{ .Release.Namespace }}. It runs
 {{ .Values.serverImage.repository }}:{{ .Values.serverImage.tag | default .Chart.AppVersion }} for DispatchOps resources that don't name an image.
+{{- $ns := include "dispatch-ops-operator.installationNamespace" . }}
+{{- if .Values.installation.enabled }}
+{{- if .Capabilities.APIVersions.Has "dispatch-ops.io/v1alpha1/DispatchOps" }}
+
+It runs the installation {{ .Values.installation.name }} in {{ $ns }}. Follow it with
+
+  kubectl get dispatchops -n {{ $ns }} -w
+{{- else }}
+
+The DispatchOps CRD was new to this cluster, so Helm couldn't create the
+installation {{ .Values.installation.name }} yet. Create it with
+
+  helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reuse-values
+
+then follow it with `kubectl get dispatchops -n {{ $ns }} -w`.
+{{- end }}
+{{- if not (or .Values.installation.encryptionKey.key .Values.installation.encryptionKey.existingSecret) }}
+
+The operator generates the encryption key in the
+{{ .Values.installation.name }}-encryption-key Secret. Back it up: without it, stored
+credentials can't be decrypted.
+{{- end }}
+{{- if not .Values.installation.spec.admin }}
+
+The administrator's password is in the {{ .Values.installation.name }}-admin-password Secret.
+{{- end }}
+{{- else }}
 
 Create an installation, e.g. with an operator-managed database:
 
@@ -12,5 +39,7 @@ Create an installation, e.g. with an operator-managed database:
   spec: {}
   YAML
 
-and follow it with `kubectl get dispatchops -n dispatch-ops -w`. The
-administrator's password is in the <name>-admin-password Secret.
+or set installation.enabled in the chart's values. Follow it with
+`kubectl get dispatchops -n dispatch-ops -w`. The administrator's password is
+in the <name>-admin-password Secret.
+{{- end }}

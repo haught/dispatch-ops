@@ -561,6 +561,49 @@ provide, an Ingress, single sign-on, a separate job namespace and
 retention periods. `kubectl explain dispatchops.spec` documents every
 field.
 
+The chart can also create the installation and its Secrets from the
+`installation` section of its values, with the settings `.env` holds in
+development:
+
+```yaml
+# lab-values.yaml
+serverImage:
+  repository: registry.lab.example/dispatch-ops
+image:
+  repository: registry.lab.example/dispatch-ops-operator
+installation:
+  enabled: true
+  namespace: dispatch-ops
+  externalURL: https://dispatch.lab.example     # DISPATCH_EXTERNAL_URL
+  logLevel: info                                # DISPATCH_LOG_LEVEL
+  database:
+    existingSecret: dispatch-ops-database       # holds DISPATCH_DATABASE_URL as "url"
+  encryptionKey:
+    existingSecret: dispatch-ops-encryption-key # holds DISPATCH_ENCRYPTION_KEY as "key"
+  oidc:
+    issuer: https://idp.lab.example/realms/lab  # DISPATCH_OIDC_*
+    clientID: dispatch-ops
+    existingSecret: dispatch-ops-oidc
+  spec:                                         # any other DispatchOps fields
+    api:
+      ingress:
+        host: dispatch.lab.example
+```
+
+```sh
+helm upgrade --install dispatch-ops-operator deploy/helm/dispatch-ops-operator \
+  --namespace dispatch-ops-system --create-namespace -f lab-values.yaml
+```
+
+Instead of `existingSecret`, `database.url`, `encryptionKey.key` and
+`oidc.clientSecret` take the values themselves and the chart creates the
+Secrets; keep those in a separate values file out of version control. The
+installation's namespace must exist. Helm can't create a `DispatchOps` in the
+same install that first creates its CRD, so on a new cluster run the
+`helm upgrade --install` twice; the chart's notes say when. Uninstalling the
+chart keeps the installation and its Secrets unless `installation.keep` is
+false.
+
 `spec.retention.jobs` and `spec.retention.auditLog` set the retention
 periods (e.g. `2160h`). Metrics are on by default (`spec.metrics.enabled`):
 both Deployments' pods serve them on a port named `metrics` (9090) and carry

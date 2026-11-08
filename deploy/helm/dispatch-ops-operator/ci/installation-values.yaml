@@ -1,0 +1,34 @@
+# Every installation.* setting, for `make helm-lint`. Not a real installation.
+installation:
+  enabled: true
+  name: dispatch-ops
+  namespace: dispatch-ops
+  externalURL: https://dispatch.example.com
+  sessionTTL: 12h
+  logLevel: info
+  database:
+    url: postgres://dispatch:example@db.example.com:5432/dispatch?sslmode=require
+  encryptionKey:
+    key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    oldKeys: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
+  oidc:
+    issuer: https://idp.example.com/realms/corp
+    clientID: dispatch-ops
+    clientSecret: example
+    scopes: [profile, email, groups]
+    usernameClaim: preferred_username
+    groupsClaim: groups
+    displayName: Corp SSO
+  spec:
+    api:
+      replicas: 2
+      ingress:
+        host: dispatch.example.com
+        className: nginx
+        tlsSecretName: dispatch-ops-tls
+    taskManager:
+      jobNamespace: dispatch-jobs
+      maxConcurrentJobs: 20
+    retention:
+      jobs: 2160h
+      auditLog: 8760h

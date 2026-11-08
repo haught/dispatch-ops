@@ -1,0 +1,143 @@
+{{- /*
+The optional DispatchOps installation (installation.* in values.yaml) and the
+Secrets it names. The DispatchOps renders only once the API server knows its
+kind: Helm can't create it in the same install that first creates the CRD.
+*/ -}}
+{{- if .Values.installation.enabled }}
+{{- $i := .Values.installation }}
+{{- $name := required "installation.name is required" $i.name }}
+{{- $ns := include "dispatch-ops-operator.installationNamespace" . }}
+
+{{- if and .Values.watchNamespaces (not (has $ns .Values.watchNamespaces)) }}
+{{- fail (printf "installation.namespace %q is not in watchNamespaces, so the operator would not run it" $ns) }}
+{{- end }}
+{{- if and $i.database.url $i.database.existingSecret }}
+{{- fail "set installation.database.url or installation.database.existingSecret, not both" }}
+{{- end }}
+{{- if and $i.encryptionKey.key $i.encryptionKey.existingSecret }}
+{{- fail "set installation.encryptionKey.key or installation.encryptionKey.existingSecret, not both" }}
+{{- end }}
+{{- if and $i.encryptionKey.oldKeys (not $i.encryptionKey.key) }}
+{{- fail "installation.encryptionKey.oldKeys needs installation.encryptionKey.key" }}
+{{- end }}
+{{- if and $i.oidc.clientSecret $i.oidc.existingSecret }}
+{{- fail "set installation.oidc.clientSecret or installation.oidc.existingSecret, not both" }}
+{{- end }}
+{{- if and $i.oidc.issuer (not $i.oidc.clientID) }}
+{{- fail "installation.oidc.issuer needs installation.oidc.clientID" }}
+{{- end }}
+
+{{- $spec := deepCopy ($i.spec | default dict) }}
+{{- with $i.externalURL }}{{ $_ := set $spec "externalURL" . }}{{ end }}
+{{- with $i.sessionTTL }}{{ $_ := set $spec "sessionTTL" . }}{{ end }}
+{{- with $i.logLevel }}{{ $_ := set $spec "logLevel" . }}{{ end }}
+
+{{- $dbSecret := $i.database.existingSecret }}
+{{- $dbKey := $i.database.existingSecretKey | default "url" }}
+{{- if $i.database.url }}
+{{- $dbSecret = printf "%s-database" $name }}
+{{- $dbKey = "url" }}
+{{- end }}
+{{- if $dbSecret }}
+{{- $_ := set $spec "database" (dict "external" (dict "urlSecret" (dict "name" $dbSecret "key" $dbKey))) }}
+{{- end }}
+
+{{- $encSecret := $i.encryptionKey.existingSecret }}
+{{- if $i.encryptionKey.key }}
+{{- $encSecret = printf "%s-encryption-key" $name }}
+{{- end }}
+{{- if $encSecret }}
+{{- $_ := set $spec "encryptionKeySecret" (dict "name" $encSecret) }}
+{{- end }}
+
+{{- if $i.oidc.issuer }}
+{{- $oidc := dict "issuer" $i.oidc.issuer "clientID" $i.oidc.clientID }}
+{{- with $i.oidc.scopes }}{{ $_ := set $oidc "scopes" . }}{{ end }}
+{{- with $i.oidc.usernameClaim }}{{ $_ := set $oidc "usernameClaim" . }}{{ end }}
+{{- with $i.oidc.groupsClaim }}{{ $_ := set $oidc "groupsClaim" . }}{{ end }}
+{{- with $i.oidc.displayName }}{{ $_ := set $oidc "displayName" . }}{{ end }}
+{{- if $i.oidc.clientSecret }}
+{{- $_ := set $oidc "clientSecret" (dict "name" (printf "%s-oidc" $name) "key" "clientSecret") }}
+{{- else if $i.oidc.existingSecret }}
+{{- $_ := set $oidc "clientSecret" (dict "name" $i.oidc.existingSecret "key" ($i.oidc.existingSecretKey | default "clientSecret")) }}
+{{- end }}
+{{- $_ := set $spec "oidc" $oidc }}
+{{- end }}
+
+{{- if $i.database.url }}
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: {{ $name }}-database
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dispatch-ops-operator.installationLabels" . | nindent 4 }}
+  {{- if $i.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+stringData:
+  url: {{ $i.database.url | quote }}
+{{- end }}
+
+{{- if $i.encryptionKey.key }}
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: {{ $name }}-encryption-key
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dispatch-ops-operator.installationLabels" . | nindent 4 }}
+  {{- if $i.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+stringData:
+  key: {{ $i.encryptionKey.key | quote }}
+  {{- with $i.encryptionKey.oldKeys }}
+  oldKeys: {{ . | quote }}
+  {{- end }}
+{{- end }}
+
+{{- if and $i.oidc.issuer $i.oidc.clientSecret }}
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: {{ $name }}-oidc
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dispatch-ops-operator.installationLabels" . | nindent 4 }}
+  {{- if $i.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+stringData:
+  clientSecret: {{ $i.oidc.clientSecret | quote }}
+{{- end }}
+
+{{- if .Capabilities.APIVersions.Has "dispatch-ops.io/v1alpha1/DispatchOps" }}
+---
+apiVersion: dispatch-ops.io/v1alpha1
+kind: DispatchOps
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dispatch-ops-operator.installationLabels" . | nindent 4 }}
+  {{- if $i.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  {{- if $spec }}
+  {{- toYaml $spec | nindent 2 }}
+  {{- else }} {}
+  {{- end }}
+{{- end }}
+{{- end }}
