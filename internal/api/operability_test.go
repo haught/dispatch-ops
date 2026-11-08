@@ -213,6 +213,14 @@ func TestNotificationTargets(t *testing.T) {
 	admin.mustDo("POST", "/api/v1/notification-targets", map[string]any{
 		"name": target["name"], "kind": "slack", "secrets": map[string]string{"webhookUrl": "https://hooks.slack.com/x"},
 	}, 409)
+	chat := admin.mustDo("POST", "/api/v1/notification-targets", map[string]any{
+		"name": unique("chat"), "kind": "googlechat",
+		"secrets": map[string]string{"webhookUrl": "https://chat.googleapis.com/v1/spaces/A/messages?key=k&token=chat-secret"},
+	}, 201)
+	if strings.Contains(jsonOf(chat), "chat-secret") || strs(chat["secretFields"])[0] != "webhookUrl" {
+		t.Errorf("google chat target = %v", chat)
+	}
+	admin.mustDo("DELETE", "/api/v1/notification-targets/"+chat["id"].(string), nil, 204)
 
 	// Everyone may list targets, but only admins see their config, and
 	// manage them.

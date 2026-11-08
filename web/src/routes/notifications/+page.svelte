@@ -24,6 +24,7 @@
 	let authorization = $state('');
 	let signingSecret = $state('');
 	let slackUrl = $state('');
+	let googleChatUrl = $state('');
 	let host = $state('');
 	let port = $state('');
 	let security = $state('starttls');
@@ -48,7 +49,7 @@
 
 	function reset() {
 		editing = null;
-		name = description = url = authorization = signingSecret = slackUrl = '';
+		name = description = url = authorization = signingSecret = slackUrl = googleChatUrl = '';
 		host = port = username = password = from = to = '';
 		security = 'starttls';
 		kind = 'webhook';
@@ -103,6 +104,8 @@
 			set('signingSecret', signingSecret);
 		} else if (kind === 'slack') {
 			set('webhookUrl', slackUrl);
+		} else if (kind === 'googlechat') {
+			set('webhookUrl', googleChatUrl);
 		} else {
 			set('password', password);
 		}
@@ -226,6 +229,7 @@
 					<select bind:value={kind} disabled={editing !== null}>
 						<option value="webhook">Webhook</option>
 						<option value="slack">Slack</option>
+						<option value="googlechat">Google Chat</option>
 						<option value="email">Email</option>
 					</select>
 				</label>
@@ -269,6 +273,21 @@
 						placeholder={secretHint || 'https://hooks.slack.com/services/…'}
 					/>
 				</label>
+			{:else if kind === 'googlechat'}
+				<label>
+					Incoming webhook URL
+					<input
+						bind:value={googleChatUrl}
+						type="password"
+						required={!editing}
+						placeholder={secretHint ||
+							'https://chat.googleapis.com/v1/spaces/…/messages?key=…&token=…'}
+					/>
+				</label>
+				<p class="small muted">
+					In the space, open <em>Apps &amp; integrations → Webhooks</em> and add a webhook. Each job's
+					notifications are posted as cards in one thread.
+				</p>
 			{:else}
 				<div class="form-grid">
 					<label>SMTP host <input bind:value={host} required /></label>

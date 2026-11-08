@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"mime/quotedprintable"
@@ -19,6 +20,7 @@ import (
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -98,6 +100,8 @@ func (s *Sender) Send(ctx context.Context, target store.NotificationTarget, secr
 		return s.sendWebhook(ctx, c, secrets, ev)
 	case KindSlack:
 		return s.sendSlack(ctx, secrets["webhookUrl"], ev)
+	case KindGoogleChat:
+		return s.sendGoogleChat(ctx, secrets["webhookUrl"], ev)
 	case KindEmail:
 		var c EmailConfig
 		if err := decodeStrict(target.Config, &c); err != nil {
@@ -177,18 +181,22 @@ func Summary(ev Event) string {
 	return s
 }
 
-// details lists facts about the job, one "Label: value" per line.
-func (s *Sender) details(ev Event) []string {
+// fact is one thing a notification says about the job. Label is empty for
+// a free-standing line.
+type fact struct{ Label, Value string }
+
+// facts lists what a notification says about ev's job.
+func facts(ev Event) []fact {
 	j := ev.Job
 	if j == nil {
-		return []string{"This target is set up correctly."}
+		return []fact{{Value: "This target is set up correctly."}}
 	}
-	lines := []string{"Status: " + j.Status}
+	fs := []fact{{"Status", j.Status}}
 	if j.ExitCode != nil {
-		lines = append(lines, "Exit code: "+strconv.Itoa(*j.ExitCode))
+		fs = append(fs, fact{"Exit code", strconv.Itoa(*j.ExitCode)})
 	}
 	if j.FailureReason != "" {
-		lines = append(lines, "Reason: "+j.FailureReason)
+		fs = append(fs, fact{"Reason", j.FailureReason})
 	}
 	launched := j.LaunchType
 	switch {
@@ -197,9 +205,22 @@ func (s *Sender) details(ev Event) []string {
 	case j.LaunchedBy != nil:
 		launched = j.LaunchedBy.Username + " (" + j.LaunchType + ")"
 	}
-	lines = append(lines, "Launched by: "+launched)
+	fs = append(fs, fact{"Launched by", launched})
 	if j.StartedAt != nil && j.FinishedAt != nil {
-		lines = append(lines, "Duration: "+j.FinishedAt.Sub(*j.StartedAt).Round(time.Second).String())
+		fs = append(fs, fact{"Duration", j.FinishedAt.Sub(*j.StartedAt).Round(time.Second).String()})
+	}
+	return fs
+}
+
+// details lists facts about the job, one "Label: value" per line.
+func (s *Sender) details(ev Event) []string {
+	var lines []string
+	for _, f := range facts(ev) {
+		if f.Label == "" {
+			lines = append(lines, f.Value)
+		} else {
+			lines = append(lines, f.Label+": "+f.Value)
+		}
 	}
 	return lines
 }
@@ -303,6 +324,100 @@ func (s *Sender) sendSlack(ctx context.Context, webhookURL string, ev Event) err
 		return &PermanentError{err}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return s.post(req)
+}
+
+// --- Google Chat ---------------------------------------------------------------
+
+var googleChatIcons = map[string]string{
+	EventStarted: "▶️", EventSucceeded: "✅", EventFailed: "❌", EventCanceled: "🚫", EventTest: "🔔",
+}
+
+// googleChatColors colour the job's status in the card.
+var googleChatColors = map[string]string{
+	EventStarted: "#1a73e8", EventSucceeded: "#188038", EventFailed: "#d93025", EventCanceled: "#5f6368",
+}
+
+// GoogleChatMessage is a Google Chat message (google.chat.v1.Message) with
+// a card describing ev.
+type GoogleChatMessage struct {
+	FallbackText string           `json:"fallbackText"`
+	CardsV2      []GoogleChatCard `json:"cardsV2"`
+}
+
+// GoogleChatCard is an element of a message's cardsV2.
+type GoogleChatCard struct {
+	CardID string `json:"cardId"`
+	Card   struct {
+		Header struct {
+			Title    string `json:"title"`
+			Subtitle string `json:"subtitle"`
+		} `json:"header"`
+		Sections []GoogleChatSection `json:"sections"`
+	} `json:"card"`
+}
+
+// GoogleChatSection is a section of a card: a list of widgets.
+type GoogleChatSection struct {
+	Widgets []map[string]any `json:"widgets"`
+}
+
+// GoogleChatMessage is the message posted to Google Chat for ev. The header
+// is plain text; widget text is HTML-escaped, since Chat renders a few
+// HTML tags there.
+func (s *Sender) GoogleChatMessage(ev Event) GoogleChatMessage {
+	var c GoogleChatCard
+	c.CardID = "dispatch-ops"
+	c.Card.Header.Title = strings.TrimSpace(googleChatIcons[ev.Name] + " " + Summary(ev))
+	c.Card.Header.Subtitle = "Dispatch Ops"
+	var widgets []map[string]any
+	for _, f := range facts(ev) {
+		text := html.EscapeString(f.Value)
+		if f.Label == "" {
+			widgets = append(widgets, map[string]any{"textParagraph": map[string]any{"text": text}})
+			continue
+		}
+		if color := googleChatColors[ev.Name]; f.Label == "Status" && color != "" {
+			text = fmt.Sprintf(`<font color="%s">%s</font>`, color, text)
+		}
+		widgets = append(widgets, map[string]any{"decoratedText": map[string]any{"topLabel": f.Label, "text": text}})
+	}
+	if u := s.JobURL(ev.Job); u != "" {
+		widgets = append(widgets, map[string]any{"buttonList": map[string]any{"buttons": []map[string]any{{
+			"text": "Open job", "onClick": map[string]any{"openLink": map[string]any{"url": u}},
+		}}}})
+	}
+	c.Card.Sections = []GoogleChatSection{{Widgets: widgets}}
+	return GoogleChatMessage{FallbackText: Summary(ev), CardsV2: []GoogleChatCard{c}}
+}
+
+// GoogleChatThreadKey is the thread a job's messages are posted in, so a
+// job's events are grouped together in the space.
+func GoogleChatThreadKey(j *store.Job) string { return "dispatch-ops-job-" + j.ID.String() }
+
+func (s *Sender) sendGoogleChat(ctx context.Context, webhookURL string, ev Event) error {
+	if webhookURL == "" {
+		return &PermanentError{errors.New("the Google Chat target has no webhookUrl")}
+	}
+	u, err := url.Parse(webhookURL)
+	if err != nil {
+		return &PermanentError{fmt.Errorf("webhookUrl: %w", err)}
+	}
+	if ev.Job != nil {
+		q := u.Query()
+		q.Set("threadKey", GoogleChatThreadKey(ev.Job))
+		q.Set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD")
+		u.RawQuery = q.Encode()
+	}
+	body, err := json.Marshal(s.GoogleChatMessage(ev))
+	if err != nil {
+		return &PermanentError{err}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return &PermanentError{err}
+	}
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 	return s.post(req)
 }
 

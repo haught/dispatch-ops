@@ -220,6 +220,12 @@ type JobTemplateId = openapi_types.UUID
 // ProjectId defines model for ProjectId.
 type ProjectId = openapi_types.UUID
 
+// ScheduleId defines model for ScheduleId.
+type ScheduleId = openapi_types.UUID
+
+// TargetId defines model for TargetId.
+type TargetId = openapi_types.UUID
+
 // TeamId defines model for TeamId.
 type TeamId = openapi_types.UUID
 

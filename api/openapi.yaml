@@ -72,7 +72,7 @@ tags:
   - name: schedules
     description: Launch job templates on a cron schedule.
   - name: notifications
-    description: Send webhook, Slack or email notifications about jobs.
+    description: Send webhook, Slack, Google Chat or email notifications about jobs.
   - name: runner
     description: Called by the runner inside job pods. Job-token auth only.
 
@@ -4353,10 +4353,13 @@ components:
           `X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
         - `slack`: posts a message to a Slack incoming webhook. Secret:
           `webhookUrl` (required).
+        - `googlechat`: posts a card to a Google Chat space's incoming
+          webhook; a job's messages share a thread. Secret: `webhookUrl`
+          (required).
         - `email`: sends an email over SMTP. Config: `host`, `port` (default
           587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
           `none`), `username`, `from`, `to` (a list). Secret: `password`.
-      enum: [webhook, slack, email]
+      enum: [webhook, slack, googlechat, email]
 
     NotificationEvent:
       type: string

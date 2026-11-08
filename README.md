@@ -10,7 +10,7 @@ single sign-on (OIDC) or local accounts, and roles granted to users and
 teams control who can see, use, change and launch what; every change is
 audited. Templates can run on cron schedules, jobs can be relaunched (or
 rerun on just their failed hosts), and job events can notify webhooks,
-Slack or email. Old jobs are deleted after a retention period, and both
+Slack, Google Chat or email. Old jobs are deleted after a retention period, and both
 server processes export Prometheus metrics. The UI manages inventories
 (hosts, groups and variables), credentials, projects, execution environments
 and job templates, lists jobs, launches templates, manages their schedules,
@@ -328,6 +328,7 @@ template's page, which targets its jobs notify and on which events:
 |---|---|---|
 | `webhook` | `url` | `authorization` (sent as the `Authorization` header), `signingSecret` |
 | `slack` | | `webhookUrl` (an incoming webhook) |
+| `googlechat` | | `webhookUrl` (a space's incoming webhook, from *Apps & integrations → Webhooks*) |
 | `email` | `host`, `port` (587, or 465 with `tls`), `security` (`starttls`, `tls` or `none`), `username`, `from`, `to` | `password` |
 
 Secrets are encrypted like credentials and never returned. A webhook gets a
@@ -335,6 +336,8 @@ POST of `{"event": …, "job": {…}}` with `X-Dispatch-Event` and
 `X-Dispatch-Delivery` headers; with a signing secret, also
 `X-Dispatch-Timestamp` and `X-Dispatch-Signature: sha256=<hex>`, the
 HMAC-SHA256 of `<timestamp>.<body>`. Check it, and reject old timestamps.
+Google Chat gets a card with the job's status and an *Open job* button,
+and a job's messages share one thread in the space.
 
 A job's status change queues its notifications in the same database
 transaction, and the task manager sends them. Failures are retried after

@@ -44,6 +44,7 @@ func TestNormalizeConfigAndSecrets(t *testing.T) {
 		{KindWebhook, map[string]any{"url": "ftp://x"}, "http or https"},
 		{KindWebhook, map[string]any{"url": "https://x", "token": "t"}, `unknown field "token"`},
 		{KindSlack, map[string]any{"url": "https://hooks.slack.com/x"}, "webhookUrl"},
+		{KindGoogleChat, map[string]any{"url": "https://chat.googleapis.com/x"}, "webhookUrl"},
 		{KindEmail, map[string]any{"host": "smtp", "from": "x", "to": []string{"a@example.com"}}, "from"},
 		{KindEmail, map[string]any{"host": "smtp", "from": "ops@example.com"}, "at least one"},
 		{"pager", nil, "unknown"},
@@ -61,6 +62,9 @@ func TestNormalizeConfigAndSecrets(t *testing.T) {
 	}{
 		{KindSlack, nil, map[string]string{}, "need the secret webhookUrl"},
 		{KindSlack, nil, map[string]string{"webhookUrl": "http://hooks.slack.com/x"}, "https"},
+		{KindGoogleChat, nil, map[string]string{}, "need the secret webhookUrl"},
+		{KindGoogleChat, nil, map[string]string{"webhookUrl": "http://chat.googleapis.com/x"}, "https"},
+		{KindGoogleChat, nil, map[string]string{"webhookUrl": "https://chat.googleapis.com/x", "token": "t"}, `unknown secret "token"`},
 		{KindWebhook, nil, map[string]string{"password": "x"}, `unknown secret "password"`},
 		{KindEmail, map[string]any{"username": "u"}, map[string]string{}, "needs the secret password"},
 		{KindEmail, map[string]any{"username": "u", "security": "none"}, map[string]string{"password": "p"}, "encrypted connection"},
@@ -71,6 +75,14 @@ func TestNormalizeConfigAndSecrets(t *testing.T) {
 	}
 	if err := CheckSecrets(KindSlack, nil, map[string]string{"webhookUrl": "https://hooks.slack.com/x"}); err != nil {
 		t.Error(err)
+	}
+	if err := CheckSecrets(KindGoogleChat, nil, map[string]string{
+		"webhookUrl": "https://chat.googleapis.com/v1/spaces/AAA/messages?key=k&token=t",
+	}); err != nil {
+		t.Error(err)
+	}
+	if c, err := NormalizeConfig(KindGoogleChat, nil); err != nil || len(c) != 0 {
+		t.Errorf("NormalizeConfig(googlechat) = %v, %v", c, err)
 	}
 
 	merged := MergeSecrets(map[string]string{"a": "1", "b": "2"}, map[string]string{"a": "", "c": "3"})
@@ -118,6 +130,95 @@ func TestSlackText(t *testing.T) {
 		"\nStatus: failed\nExit code: 2\nReason: exit status 2\nLaunched by: alice (manual)\nDuration: 1m5s"
 	if got != want {
 		t.Errorf("SlackText =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestGoogleChatMessage(t *testing.T) {
+	s := &Sender{ExternalURL: "https://ops.example.com/"}
+	j := testJob()
+	got, _ := json.Marshal(s.GoogleChatMessage(Event{Name: EventFailed, Job: j}))
+	want := `{"fallbackText":"Job \"deploy \u003cprod\u003e \u0026 more\" failed","cardsV2":[{"cardId":"dispatch-ops","card":{` +
+		`"header":{"title":"❌ Job \"deploy \u003cprod\u003e \u0026 more\" failed","subtitle":"Dispatch Ops"},"sections":[{"widgets":[` +
+		`{"decoratedText":{"text":"\u003cfont color=\"#d93025\"\u003efailed\u003c/font\u003e","topLabel":"Status"}},` +
+		`{"decoratedText":{"text":"2","topLabel":"Exit code"}},` +
+		`{"decoratedText":{"text":"exit status 2","topLabel":"Reason"}},` +
+		`{"decoratedText":{"text":"alice (manual)","topLabel":"Launched by"}},` +
+		`{"decoratedText":{"text":"1m5s","topLabel":"Duration"}},` +
+		`{"buttonList":{"buttons":[{"onClick":{"openLink":{"url":"https://ops.example.com/jobs/` + j.ID.String() + `"}},"text":"Open job"}]}}` +
+		`]}]}}]}`
+	if string(got) != want {
+		t.Errorf("GoogleChatMessage =\n%s\nwant\n%s", got, want)
+	}
+
+	// Widget text is HTML-escaped; the header is plain text.
+	j.FailureReason = "<b>boom</b> & more"
+	msg := s.GoogleChatMessage(Event{Name: EventFailed, Job: j})
+	if w := msg.CardsV2[0].Card.Sections[0].Widgets[2]["decoratedText"].(map[string]any); w["text"] != "&lt;b&gt;boom&lt;/b&gt; &amp; more" {
+		t.Errorf("reason widget = %v", w)
+	}
+
+	// A test message has no job, so no button (nor without an external URL).
+	for _, s := range []*Sender{s, {}} {
+		msg := s.GoogleChatMessage(Event{Name: EventTest})
+		c := msg.CardsV2[0].Card
+		if c.Header.Title != "🔔 Test notification from Dispatch Ops" || len(c.Sections[0].Widgets) != 1 ||
+			c.Sections[0].Widgets[0]["textParagraph"] == nil {
+			t.Errorf("test message = %+v", c)
+		}
+	}
+	if b, _ := json.Marshal((&Sender{}).GoogleChatMessage(Event{Name: EventSucceeded, Job: j})); strings.Contains(string(b), "buttonList") {
+		t.Errorf("message without an external URL has a button: %s", b)
+	}
+}
+
+func TestSendGoogleChat(t *testing.T) {
+	status := 200
+	var got *http.Request
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+
+	s := &Sender{}
+	target := store.NotificationTarget{Kind: KindGoogleChat}
+	sec := map[string]string{"webhookUrl": srv.URL + "/v1/spaces/AAA/messages?key=k&token=t%3D"}
+	j := testJob()
+	if err := s.Send(context.Background(), target, sec, Event{Name: EventFailed, Job: j}); err != nil {
+		t.Fatal(err)
+	}
+	q := got.URL.Query()
+	if got.Method != http.MethodPost || got.URL.Path != "/v1/spaces/AAA/messages" ||
+		!strings.HasPrefix(got.Header.Get("Content-Type"), "application/json") ||
+		q.Get("key") != "k" || q.Get("token") != "t=" ||
+		q.Get("threadKey") != "dispatch-ops-job-"+j.ID.String() ||
+		q.Get("messageReplyOption") != "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" {
+		t.Errorf("request = %s %s %v", got.Method, got.URL, got.Header)
+	}
+	var msg GoogleChatMessage
+	if json.Unmarshal(gotBody, &msg) != nil || len(msg.CardsV2) != 1 || !strings.Contains(msg.FallbackText, "failed") {
+		t.Errorf("body = %s", gotBody)
+	}
+
+	// A test message isn't threaded.
+	if err := s.Send(context.Background(), target, sec, Event{Name: EventTest}); err != nil {
+		t.Fatal(err)
+	}
+	if q := got.URL.Query(); q.Has("threadKey") || q.Has("messageReplyOption") || q.Get("key") != "k" {
+		t.Errorf("test request URL = %s", got.URL)
+	}
+
+	for code, permanent := range map[int]bool{500: false, 429: false, 400: true, 403: true} {
+		status = code
+		err := s.Send(context.Background(), target, sec, Event{Name: EventTest})
+		if err == nil || IsPermanent(err) != permanent {
+			t.Errorf("status %d: err = %v, permanent = %v", code, err, IsPermanent(err))
+		}
+	}
+	if err := s.Send(context.Background(), target, nil, Event{Name: EventTest}); !IsPermanent(err) {
+		t.Errorf("no webhookUrl: err = %v", err)
 	}
 }
 

@@ -2088,12 +2088,15 @@ export interface components {
          *       `X-Dispatch-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
          *     - `slack`: posts a message to a Slack incoming webhook. Secret:
          *       `webhookUrl` (required).
+         *     - `googlechat`: posts a card to a Google Chat space's incoming
+         *       webhook; a job's messages share a thread. Secret: `webhookUrl`
+         *       (required).
          *     - `email`: sends an email over SMTP. Config: `host`, `port` (default
          *       587, or 465 with `tls`), `security` (`starttls` (default), `tls` or
          *       `none`), `username`, `from`, `to` (a list). Secret: `password`.
          * @enum {string}
          */
-        NotificationKind: "webhook" | "slack" | "email";
+        NotificationKind: "webhook" | "slack" | "googlechat" | "email";
         /**
          * @description `failed` covers jobs that failed or errored.
          * @enum {string}

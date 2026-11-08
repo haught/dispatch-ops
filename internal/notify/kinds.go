@@ -1,4 +1,5 @@
-// Package notify sends job notifications to webhooks, Slack and email.
+// Package notify sends job notifications to webhooks, Slack, Google Chat
+// and email.
 //
 // A notification target has a kind, a non-secret config (shown to
 // administrators) and secret values (tokens, passwords), which are
@@ -19,13 +20,14 @@ import (
 
 // Target kinds.
 const (
-	KindWebhook = "webhook"
-	KindSlack   = "slack"
-	KindEmail   = "email"
+	KindWebhook    = "webhook"
+	KindSlack      = "slack"
+	KindGoogleChat = "googlechat"
+	KindEmail      = "email"
 )
 
 // Kinds lists the target kinds.
-var Kinds = []string{KindWebhook, KindSlack, KindEmail}
+var Kinds = []string{KindWebhook, KindSlack, KindGoogleChat, KindEmail}
 
 // Events a template's jobs can notify about.
 const (
@@ -39,9 +41,10 @@ const (
 
 // Secret fields per kind, and which are required.
 var secretFields = map[string]struct{ all, required []string }{
-	KindWebhook: {all: []string{"authorization", "signingSecret"}},
-	KindSlack:   {all: []string{"webhookUrl"}, required: []string{"webhookUrl"}},
-	KindEmail:   {all: []string{"password"}},
+	KindWebhook:    {all: []string{"authorization", "signingSecret"}},
+	KindSlack:      {all: []string{"webhookUrl"}, required: []string{"webhookUrl"}},
+	KindGoogleChat: {all: []string{"webhookUrl"}, required: []string{"webhookUrl"}},
+	KindEmail:      {all: []string{"password"}},
 }
 
 // WebhookConfig is a webhook target's config.
@@ -53,6 +56,11 @@ type WebhookConfig struct {
 // SlackConfig is a Slack target's config. The incoming webhook URL is a
 // secret (webhookUrl), since it is all it takes to post.
 type SlackConfig struct{}
+
+// GoogleChatConfig is a Google Chat target's config. The space's incoming
+// webhook URL is a secret (webhookUrl): its key and token are all it takes
+// to post.
+type GoogleChatConfig struct{}
 
 // Email security modes.
 const (
@@ -93,6 +101,12 @@ func NormalizeConfig(kind string, config map[string]any) (map[string]any, error)
 		var c SlackConfig
 		if err := decodeStrict(config, &c); err != nil {
 			return nil, fmt.Errorf("%w (the Slack webhook URL is the secret webhookUrl)", err)
+		}
+		return toMap(c)
+	case KindGoogleChat:
+		var c GoogleChatConfig
+		if err := decodeStrict(config, &c); err != nil {
+			return nil, fmt.Errorf("%w (the Google Chat webhook URL is the secret webhookUrl)", err)
 		}
 		return toMap(c)
 	case KindEmail:
@@ -164,7 +178,7 @@ func CheckSecrets(kind string, config map[string]any, secrets map[string]string)
 		}
 	}
 	switch kind {
-	case KindSlack:
+	case KindSlack, KindGoogleChat:
 		if err := checkHTTPURL(secrets["webhookUrl"], true); err != nil {
 			return fmt.Errorf("webhookUrl: %w", err)
 		}
