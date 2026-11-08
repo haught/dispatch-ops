@@ -5,8 +5,9 @@
 	"name": "dispatch-ops",
 	"build": { "dockerfile": "Dockerfile" },
 	"features": {
+		"ghcr.io/devcontainers/features/git:1": {},
 		"ghcr.io/devcontainers/features/go:1": { "version": "1.27" },
-		"ghcr.io/devcontainers/features/node:1": { "version": "25" },
+		"ghcr.io/devcontainers/features/node:2.1.1": { "version": "25" },
 		// Mounts the host's Docker socket and installs the Docker CLI + compose.
 		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": { "moby": false },
 		"ghcr.io/devcontainers/features/kubectl-helm-minikube:1": { "helm": "none", "minikube": "none" }
@@ -14,10 +15,19 @@
 	"remoteUser": "vscode",
 	"containerEnv": {
 		// The Makefile adjusts host addresses for the dev container when set.
-		"DISPATCH_DEVCONTAINER": "true"
+		"DISPATCH_DEVCONTAINER": "true",
+		// Use the host's socket directly, not the feature's socat relay on
+		// /var/run/docker.sock: socat drops a connection 0.5s after one side
+		// closes, which cuts off `docker exec` (kind's `kubeadm init` returns
+		// early and `make kind-up` fails).
+		"DOCKER_HOST": "unix:///var/run/docker-host.sock"
 	},
-	// host.docker.internal on Linux hosts (Docker Desktop provides it already).
-	"runArgs": ["--add-host=host.docker.internal:host-gateway"],
+	"runArgs": [
+		// host.docker.internal on Linux hosts (Docker Desktop provides it already).
+		"--add-host=host.docker.internal:host-gateway",
+		// Docker Desktop's socket is root:root 660; group 0 lets vscode open it.
+		"--group-add=0"
+	],
 	// Publish the API on the host so job pods in kind reach it at
 	// host.docker.internal:8080, as when `make run` runs on the host.
 	"appPort": ["127.0.0.1:8080:8080"],
@@ -26,10 +36,8 @@
 		"8080": { "label": "API", "onAutoForward": "ignore" },
 		"5173": { "label": "Vite dev server" }
 	},
-	// Keep Linux node_modules out of the host checkout (native esbuild/rollup
-	// binaries differ between macOS and Linux).
 	"mounts": [
-		"source=dispatch-ops-node-modules,target=${containerWorkspaceFolder}/web/node_modules,type=volume"
+		// add mounts
 	],
 	// A new volume is root-owned; let `make deps` write to it.
 	"postCreateCommand": "sudo chown vscode:vscode web/node_modules",
