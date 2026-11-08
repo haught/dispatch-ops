@@ -34,6 +34,10 @@ type Config struct {
 	Heartbeat time.Duration
 	// KillGrace is how long the command gets between SIGTERM and SIGKILL.
 	KillGrace time.Duration
+	// Askpass is a program git runs to ask for a username or password: the
+	// runner binary itself (see Askpass). Empty means git can't ask, so
+	// cloning over HTTP(S) works only without a password.
+	Askpass string
 }
 
 // ConfigFromEnv reads the runner's configuration.
@@ -65,6 +69,9 @@ func ConfigFromEnv(version string) (Config, error) {
 	}
 	if c.WorkDir == "" {
 		c.WorkDir, _ = os.Getwd()
+	}
+	if exe, err := os.Executable(); err == nil {
+		c.Askpass = exe
 	}
 	return c, errors.Join(errs...)
 }
@@ -217,72 +224,101 @@ func (s *stopper) reason() stopReason {
 
 // --- Execution ---------------------------------------------------------------
 
-// execute prepares the workspace, runs the command and returns the result to
-// report.
+// execute prepares the workspace, checks out the project, runs the command
+// and returns the result to report.
 func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev *emitter, stop *stopper) runnerapi.RunnerFinish {
-	fail := func(status runnerapi.RunnerFinishStatus, reason string) runnerapi.RunnerFinish {
-		ev.runner(reason)
-		return runnerapi.RunnerFinish{Status: status, FailureReason: &reason}
-	}
-	if len(spec.Command) == 0 {
-		return fail(runnerapi.Error, "The job has no command")
+	timeout := time.Duration(spec.TimeoutSeconds) * time.Second
+	result := runnerapi.RunnerFinish{}
+	fail := func(reason string) runnerapi.RunnerFinish {
+		return withReason(result, runnerapi.Error, reason, ev)
 	}
 
-	env, err := prepare(cfg, spec)
+	// The timeout covers the checkout too. stopCtx ends when anything stops
+	// the job, which aborts a checkout in progress.
+	done := make(chan struct{})
+	defer close(done)
+	stopCtx, cancelStop := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelStop()
+	go func() {
+		t := time.NewTimer(timeout)
+		defer t.Stop()
+		select {
+		case <-t.C:
+			stop.trigger(stopTimeout)
+		case <-ctx.Done():
+			stop.trigger(stopTerminated)
+		case <-stop.ch:
+		case <-done:
+			return
+		}
+		cancelStop()
+	}()
+
+	ws, err := prepare(cfg, spec)
 	if err != nil {
-		return fail(runnerapi.Error, "Could not prepare the workspace: "+err.Error())
+		return fail("Could not prepare the workspace: " + err.Error())
+	}
+	if spec.Project != nil {
+		rev, err := checkout(stopCtx, cfg, ws, spec.Project, ev)
+		if rev != "" {
+			result.ScmRevision = &rev
+		}
+		if r := stop.reason(); r != stopNone {
+			return stopped(result, r, timeout, ev)
+		}
+		if err != nil {
+			return fail("Could not check out the project: " + err.Error())
+		}
+	}
+	c, err := buildCommand(spec, ws)
+	if err != nil {
+		return fail(err.Error())
 	}
 
-	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
-	cmd.Dir = cfg.WorkDir
-	cmd.Env = env
+	cmd := exec.Command(c.argv[0], c.argv[1:]...)
+	cmd.Dir = c.dir
+	cmd.Env = c.env
 	// Its own process group, so the whole tree can be signaled.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		return fail(runnerapi.Error, "Could not create the output pipe: "+err.Error())
+		return fail("Could not create the output pipe: " + err.Error())
 	}
 	cmd.Stdout, cmd.Stderr = pw, pw // one pipe keeps stdout and stderr in order
 
-	ev.runner(fmt.Sprintf("Running %s (timeout %s)", quoteCommand(spec.Command), time.Duration(spec.TimeoutSeconds)*time.Second))
+	if r := stop.reason(); r != stopNone {
+		pw.Close()
+		pr.Close()
+		return stopped(result, r, timeout, ev)
+	}
+	ev.runner(fmt.Sprintf("Running %s (timeout %s)", quoteCommand(c.argv), timeout))
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
-		return fail(runnerapi.Error, "Could not start the command: "+err.Error())
+		return fail("Could not start the command: " + err.Error())
 	}
 	pw.Close() // the child has its copy
 	consumed := make(chan struct{})
 	go func() {
-		ev.consume(pr)
+		ev.consume(pr, c.eventMarker)
 		close(consumed)
 	}()
 
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 
-	timeout := time.NewTimer(time.Duration(spec.TimeoutSeconds) * time.Second)
-	defer timeout.Stop()
-
 	var waitErr error
 	reason := stopNone
-	finished := false
 	select {
 	case waitErr = <-exited:
 		// It finished on its own; a stop request that raced with that is moot.
-		finished = true
-	case <-timeout.C:
-		stop.trigger(stopTimeout)
-	case <-ctx.Done():
-		stop.trigger(stopTerminated)
 	case <-stop.ch:
-	}
-	if !finished {
 		reason = stop.reason()
 		switch reason {
 		case stopCancel:
 			ev.runner("Cancel requested; stopping the command")
 		case stopTimeout:
-			ev.runner(fmt.Sprintf("Timed out after %s; stopping the command", time.Duration(spec.TimeoutSeconds)*time.Second))
+			ev.runner(fmt.Sprintf("Timed out after %s; stopping the command", timeout))
 		case stopTerminated:
 			ev.runner("The job pod is shutting down; stopping the command")
 		}
@@ -295,19 +331,11 @@ func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev 
 	pr.Close()
 
 	exitCode := cmd.ProcessState.ExitCode()
-	result := runnerapi.RunnerFinish{}
 	if exitCode >= 0 {
 		result.ExitCode = &exitCode
 	}
-	switch reason {
-	case stopCancel:
-		return withReason(result, runnerapi.Canceled, "Canceled", ev)
-	case stopTimeout:
-		return withReason(result, runnerapi.Failed, fmt.Sprintf("Timed out after %s", time.Duration(spec.TimeoutSeconds)*time.Second), ev)
-	case stopTerminated:
-		return withReason(result, runnerapi.Error, "The job pod was terminated", ev)
-	case stopJobOver:
-		return withReason(result, runnerapi.Error, "Stopped: the server ended the job", ev)
+	if reason != stopNone {
+		return stopped(result, reason, timeout, ev)
 	}
 
 	var exitErr *exec.ExitError
@@ -322,6 +350,20 @@ func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev 
 		return withReason(result, runnerapi.Failed, "The command was killed: "+exitErr.String(), ev)
 	default:
 		return withReason(result, runnerapi.Error, "Waiting for the command failed: "+waitErr.Error(), ev)
+	}
+}
+
+// stopped is the result of a job stopped for reason.
+func stopped(r runnerapi.RunnerFinish, reason stopReason, timeout time.Duration, ev *emitter) runnerapi.RunnerFinish {
+	switch reason {
+	case stopCancel:
+		return withReason(r, runnerapi.Canceled, "Canceled", ev)
+	case stopTimeout:
+		return withReason(r, runnerapi.Failed, fmt.Sprintf("Timed out after %s", timeout), ev)
+	case stopTerminated:
+		return withReason(r, runnerapi.Error, "The job pod was terminated", ev)
+	default:
+		return withReason(r, runnerapi.Error, "Stopped: the server ended the job", ev)
 	}
 }
 
@@ -366,19 +408,42 @@ func quoteCommand(args []string) string {
 
 // --- Workspace ---------------------------------------------------------------
 
-// prepare writes the job's inputs to files and returns the command's
+// workspace is where a job's files go.
+type workspace struct {
+	dir     string // the working directory
+	secrets string // memory-backed in job pods; credentials go here
+	// env is the command's environment, pointing at the files below.
+	env        []string
+	inventory  string // the inventory file, or "" if the job has none
+	vars       string // the extra vars file
+	projectDir string // where the project is checked out, or "" if none
+}
+
+// path returns a path inside the workspace's private directory, which the
+// runner uses for its own files.
+func (w *workspace) path(elem ...string) string {
+	return filepath.Join(append([]string{w.dir, ".dispatch"}, elem...)...)
+}
+
+// secret returns a path for runner-written secrets.
+func (w *workspace) secret(elem ...string) string {
+	return filepath.Join(append([]string{w.secrets, "runner"}, elem...)...)
+}
+
+// prepare writes the job's inputs to files and sets up the command's
 // environment, which points at them:
 //
 //	DISPATCH_JOB_ID          the job ID
 //	DISPATCH_WORKDIR         the working directory
+//	DISPATCH_PROJECT_DIR     the project checkout (ansible and script jobs)
 //	DISPATCH_INVENTORY       Ansible JSON inventory (only if the job has one)
 //	DISPATCH_VARS            extra vars, as a JSON object
 //	DISPATCH_LIMIT           host pattern limit (may be empty)
 //	DISPATCH_CREDENTIALS     all credentials as JSON: [{name, kind, inputs}]
 //	DISPATCH_CREDENTIALS_DIR one directory per credential, one file per input
-func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) ([]string, error) {
-	secretsDir := filepath.Join(cfg.WorkDir, "secrets")
-	for _, d := range []string{cfg.WorkDir, secretsDir} {
+func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) (*workspace, error) {
+	ws := &workspace{dir: cfg.WorkDir, secrets: filepath.Join(cfg.WorkDir, "secrets")}
+	for _, d := range []string{ws.dir, ws.secrets, ws.path(), ws.secret()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
@@ -386,21 +451,25 @@ func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) ([]string, error) {
 	env := baseEnv()
 	set := func(k, v string) { env = append(env, k+"="+v) }
 	set("DISPATCH_JOB_ID", cfg.JobID.String())
-	set("DISPATCH_WORKDIR", cfg.WorkDir)
+	set("DISPATCH_WORKDIR", ws.dir)
 	set("DISPATCH_LIMIT", spec.Limit)
+	if spec.Project != nil {
+		ws.projectDir = filepath.Join(ws.dir, "project")
+		set("DISPATCH_PROJECT_DIR", ws.projectDir)
+	}
 
 	if spec.Inventory != nil {
-		p := filepath.Join(cfg.WorkDir, "inventory.json")
-		if err := writeJSON(p, spec.Inventory, 0o600); err != nil {
+		ws.inventory = filepath.Join(ws.dir, "inventory.json")
+		if err := writeJSON(ws.inventory, spec.Inventory, 0o600); err != nil {
 			return nil, err
 		}
-		set("DISPATCH_INVENTORY", p)
+		set("DISPATCH_INVENTORY", ws.inventory)
 	}
-	vars := filepath.Join(cfg.WorkDir, "vars.json")
-	if err := writeJSON(vars, spec.ExtraVars, 0o600); err != nil {
+	ws.vars = filepath.Join(ws.dir, "vars.json")
+	if err := writeJSON(ws.vars, spec.ExtraVars, 0o600); err != nil {
 		return nil, err
 	}
-	set("DISPATCH_VARS", vars)
+	set("DISPATCH_VARS", ws.vars)
 
 	type credFile struct {
 		Name   string            `json:"name"`
@@ -408,7 +477,7 @@ func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) ([]string, error) {
 		Inputs map[string]string `json:"inputs"`
 	}
 	all := make([]credFile, 0, len(spec.Credentials))
-	credDir := filepath.Join(secretsDir, "credentials")
+	credDir := filepath.Join(ws.secrets, "credentials")
 	used := map[string]bool{}
 	for _, c := range spec.Credentials {
 		all = append(all, credFile{Name: c.Name, Kind: string(c.Kind), Inputs: c.Inputs})
@@ -426,13 +495,14 @@ func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) ([]string, error) {
 			}
 		}
 	}
-	credsJSON := filepath.Join(secretsDir, "credentials.json")
+	credsJSON := filepath.Join(ws.secrets, "credentials.json")
 	if err := writeJSON(credsJSON, all, 0o600); err != nil {
 		return nil, err
 	}
 	set("DISPATCH_CREDENTIALS", credsJSON)
 	set("DISPATCH_CREDENTIALS_DIR", credDir)
-	return env, nil
+	ws.env = env
+	return ws, nil
 }
 
 // baseEnv is the runner's environment without its own settings, which the

@@ -10,6 +10,10 @@ export type Job = components['schemas']['Job'];
 export type JobStatus = components['schemas']['JobStatus'];
 export type JobEvent = components['schemas']['JobEvent'];
 export type JobTemplate = components['schemas']['JobTemplate'];
+export type JobHostSummary = components['schemas']['JobHostSummary'];
+
+/** Event types for a host's task result in an Ansible job. */
+export const hostEventTypes = ['host_ok', 'host_failed', 'host_skipped', 'host_unreachable'];
 
 /** Statuses after which a job no longer changes. */
 export const finishedStatuses: readonly JobStatus[] = ['successful', 'failed', 'error', 'canceled'];

@@ -26,6 +26,7 @@ const (
 	Scm              CredentialKind = "scm"
 	Ssh              CredentialKind = "ssh"
 	UsernamePassword CredentialKind = "username_password"
+	Vault            CredentialKind = "vault"
 )
 
 // Valid indicates whether the value is a known member of the CredentialKind enum.
@@ -42,6 +43,8 @@ func (e CredentialKind) Valid() bool {
 	case Ssh:
 		return true
 	case UsernamePassword:
+		return true
+	case Vault:
 		return true
 	default:
 		return false
@@ -100,7 +103,9 @@ type CredentialKind string
 // `children`), plus `all`, `ungrouped` and `_meta.hostvars`.
 type InventoryExport map[string]interface{}
 
-// JobType Only `container` is supported so far; `ansible` and `script` arrive with projects.
+// JobType `ansible` runs a playbook from a project with `ansible-playbook`.
+// `script` runs a script from a project. `container` runs a command in
+// the execution environment, without a project.
 type JobType string
 
 // Problem RFC 9457 problem details
@@ -140,9 +145,12 @@ type RunnerEventBatch struct {
 
 // RunnerFinish defines model for RunnerFinish.
 type RunnerFinish struct {
-	ExitCode      *int               `json:"exitCode,omitempty"`
-	FailureReason *string            `json:"failureReason,omitempty"`
-	Status        RunnerFinishStatus `json:"status"`
+	ExitCode      *int    `json:"exitCode,omitempty"`
+	FailureReason *string `json:"failureReason,omitempty"`
+
+	// ScmRevision The commit the project was checked out at
+	ScmRevision *string            `json:"scmRevision,omitempty"`
+	Status      RunnerFinishStatus `json:"status"`
 }
 
 // RunnerFinishStatus defines model for RunnerFinish.Status.
@@ -150,24 +158,39 @@ type RunnerFinishStatus string
 
 // RunnerJobSpec defines model for RunnerJobSpec.
 type RunnerJobSpec struct {
+	Arguments   []string           `json:"arguments"`
 	Command     []string           `json:"command"`
 	Credentials []RunnerCredential `json:"credentials"`
+	Entrypoint  string             `json:"entrypoint"`
 
 	// ExtraVars Variables as a JSON object (e.g. Ansible variables)
 	ExtraVars Variables          `json:"extraVars"`
 	Inventory *InventoryExport   `json:"inventory"`
 	JobId     openapi_types.UUID `json:"jobId"`
 
-	// JobType Only `container` is supported so far; `ansible` and `script` arrive with projects.
-	JobType        JobType `json:"jobType"`
-	Limit          string  `json:"limit"`
-	TimeoutSeconds int     `json:"timeoutSeconds"`
+	// JobType `ansible` runs a playbook from a project with `ansible-playbook`.
+	// `script` runs a script from a project. `container` runs a command in
+	// the execution environment, without a project.
+	JobType        JobType        `json:"jobType"`
+	Limit          string         `json:"limit"`
+	Project        *RunnerProject `json:"project"`
+	SkipTags       string         `json:"skipTags"`
+	Tags           string         `json:"tags"`
+	TimeoutSeconds int            `json:"timeoutSeconds"`
+	Verbosity      int            `json:"verbosity"`
 }
 
 // RunnerJobState defines model for RunnerJobState.
 type RunnerJobState struct {
 	// CancelRequested Stop the job and finish it as `canceled`
 	CancelRequested bool `json:"cancelRequested"`
+}
+
+// RunnerProject The git repository to check out
+type RunnerProject struct {
+	Credential *RunnerCredential `json:"credential"`
+	Ref        string            `json:"ref"`
+	Url        string            `json:"url"`
 }
 
 // Variables Variables as a JSON object (e.g. Ansible variables)
@@ -193,6 +216,9 @@ type JobId = openapi_types.UUID
 
 // JobTemplateId defines model for JobTemplateId.
 type JobTemplateId = openapi_types.UUID
+
+// ProjectId defines model for ProjectId.
+type ProjectId = openapi_types.UUID
 
 // BadRequest RFC 9457 problem details
 type BadRequest = Problem

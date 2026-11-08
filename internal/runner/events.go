@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"regexp"
 	"sync"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 const (
 	maxEventBytes = 16 << 10  // longer lines are split into several events
 	maxBatchCount = 500       // events per request
-	maxBatchBytes = 256 << 10 // stdout bytes per request (the API caps bodies at 1 MiB)
+	maxBatchBytes = 256 << 10 // output and data bytes per request (the API caps bodies at 1 MiB)
 	flushInterval = 250 * time.Millisecond
 	sendRetryTime = 2 * time.Minute
 )
@@ -30,7 +31,7 @@ type emitter struct {
 	jobID  uuid.UUID
 	echo   io.Writer
 
-	queue chan runnerapi.RunnerEvent
+	queue chan queued
 	done  chan struct{}
 
 	// sending is held (shared) while queueing and (exclusively) to close
@@ -50,19 +51,49 @@ type emitter struct {
 	onOver   func()
 }
 
+// queued is an event waiting to be sent, with its approximate size.
+type queued struct {
+	ev   runnerapi.RunnerEvent
+	size int
+}
+
+// eventType is the API's pattern for event types.
+var eventType = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
+
 func newEmitter(client *runnerapi.ClientWithResponses, jobID uuid.UUID, echo io.Writer, onCancel, onOver func()) *emitter {
 	e := &emitter{
 		client: client, jobID: jobID, echo: echo,
-		queue: make(chan runnerapi.RunnerEvent, 2000), done: make(chan struct{}),
+		queue: make(chan queued, 2000), done: make(chan struct{}),
 		onCancel: onCancel, onOver: onOver,
 	}
 	go e.loop()
 	return e
 }
 
-// add queues one event. It also echoes stdout to the runner's own output,
-// so `kubectl logs` shows the job's output too.
+// add queues one output event. It also echoes the text to the runner's own
+// output, so `kubectl logs` shows the job's output too.
 func (e *emitter) add(typ, text string) {
+	echo := text + "\n"
+	if typ == "runner" {
+		echo = "[dispatch-runner] " + echo
+	}
+	e.queueEvent(runnerapi.RunnerEvent{Type: typ, Stdout: text}, len(text), echo)
+}
+
+// addStructured queues a structured event (no output text). size is
+// roughly how many bytes its data takes as JSON.
+func (e *emitter) addStructured(typ, host string, data map[string]any, size int) {
+	ev := runnerapi.RunnerEvent{Type: typ}
+	if host != "" {
+		ev.HostName = &host
+	}
+	if data != nil {
+		ev.Data = &data
+	}
+	e.queueEvent(ev, size, "")
+}
+
+func (e *emitter) queueEvent(ev runnerapi.RunnerEvent, size int, echo string) {
 	e.sending.RLock()
 	defer e.sending.RUnlock()
 	if e.closed {
@@ -74,25 +105,30 @@ func (e *emitter) add(typ, text string) {
 	defer e.mu.Unlock()
 	e.seq++
 	now := time.Now().UTC()
-	ev := runnerapi.RunnerEvent{Seq: e.seq, Type: typ, Stdout: text, Time: &now}
-	if typ == "runner" {
-		_, _ = io.WriteString(e.echo, "[dispatch-runner] "+text+"\n")
-	} else {
-		_, _ = io.WriteString(e.echo, text+"\n")
+	ev.Seq, ev.Time = e.seq, &now
+	if echo != "" {
+		_, _ = io.WriteString(e.echo, echo)
 	}
-	e.queue <- ev
+	e.queue <- queued{ev: ev, size: size}
 }
 
 // runner queues a message from the runner itself.
 func (e *emitter) runner(msg string) { e.add("runner", msg) }
 
-// consume reads r line by line into stdout events until EOF.
-func (e *emitter) consume(r io.Reader) {
+// consume reads r line by line into stdout events until EOF. Lines that
+// start with marker (if not empty) are structured events; see
+// parseEventLine.
+func (e *emitter) consume(r io.Reader, marker string) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), maxEventBytes+1)
 	sc.Split(splitLines)
 	for sc.Scan() {
-		e.add("stdout", string(sc.Bytes()))
+		line := string(sc.Bytes())
+		if typ, host, data, ok := parseEventLine(line, marker); ok {
+			e.addStructured(typ, host, data, len(line))
+			continue
+		}
+		e.add("stdout", line)
 	}
 }
 
@@ -144,7 +180,7 @@ func (e *emitter) loop() {
 	}
 	for {
 		select {
-		case ev, ok := <-e.queue:
+		case q, ok := <-e.queue:
 			if !ok {
 				flush()
 				return
@@ -152,8 +188,8 @@ func (e *emitter) loop() {
 			if len(batch) == 0 {
 				timer.Reset(flushInterval)
 			}
-			batch = append(batch, ev)
-			size += len(ev.Stdout)
+			batch = append(batch, q.ev)
+			size += q.size
 			if len(batch) >= maxBatchCount || size >= maxBatchBytes {
 				flush()
 			}

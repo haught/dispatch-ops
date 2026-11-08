@@ -21,6 +21,10 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	// Git runs the runner as GIT_ASKPASS to get a project's username and password.
+	if dir := os.Getenv(runner.AskpassDirEnv); dir != "" {
+		os.Exit(runner.Askpass(dir, os.Args[1:], os.Stdout))
+	}
 	cfg, err := runner.ConfigFromEnv(version)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dispatch-runner:", err)

@@ -358,6 +358,48 @@ export interface paths {
         patch: operations["updateExecutionEnvironment"];
         trace?: never;
     };
+    "/api/v1/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List projects (git repositories) */
+        get: operations["listProjects"];
+        put?: never;
+        /** Create a project */
+        post: operations["createProject"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: components["parameters"]["ProjectId"];
+            };
+            cookie?: never;
+        };
+        /** Get a project */
+        get: operations["getProject"];
+        put?: never;
+        post?: never;
+        /** Delete a project */
+        delete: operations["deleteProject"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a project
+         * @description Jobs already launched keep the repository and ref they were launched with.
+         */
+        patch: operations["updateProject"];
+        trace?: never;
+    };
     "/api/v1/job-templates": {
         parameters: {
             query?: never;
@@ -499,6 +541,31 @@ export interface paths {
          *     event's `seq` as `afterSeq`.
          */
         get: operations["listJobEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{jobId}/hosts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Per-host results of an Ansible job
+         * @description One entry per host the playbook ran against, by host name. While the
+         *     job runs, the counts come from the task results received so far; once
+         *     the playbook finishes they are Ansible's own recap. Jobs of other
+         *     types have no entries.
+         */
+        get: operations["listJobHosts"];
         put?: never;
         post?: never;
         delete?: never;
@@ -803,7 +870,7 @@ export interface components {
             total: number;
         };
         /** @enum {string} */
-        CredentialKind: "ssh" | "username_password" | "api_token" | "registry" | "scm" | "generic";
+        CredentialKind: "ssh" | "username_password" | "api_token" | "registry" | "scm" | "vault" | "generic";
         CredentialKindInfo: {
             kind: components["schemas"]["CredentialKind"];
             label: string;
@@ -905,14 +972,75 @@ export interface components {
             total: number;
         };
         /**
-         * @description Only `container` is supported so far; `ansible` and `script` arrive with projects.
+         * @description Git repository URL: `https://`, `http://`, `ssh://`, `git://`,
+         *     `file://`, or scp-like `git@host:path`.
+         */
+        ScmUrl: string;
+        /** @description Branch, tag or commit to check out */
+        ScmRef: string;
+        Project: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            description: string;
+            scmUrl: string;
+            scmRef: string;
+            /**
+             * Format: uuid
+             * @description An `scm` credential used to clone the repository
+             */
+            credentialId: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ProjectCreate: {
+            name: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            scmUrl: components["schemas"]["ScmUrl"];
+            /** @default main */
+            scmRef: components["schemas"]["ScmRef"];
+            /** Format: uuid */
+            credentialId?: string;
+        };
+        ProjectUpdate: {
+            name?: components["schemas"]["Name"];
+            description?: components["schemas"]["Description"];
+            scmUrl?: components["schemas"]["ScmUrl"];
+            scmRef?: components["schemas"]["ScmRef"];
+            /**
+             * Format: uuid
+             * @description `null` removes the credential
+             */
+            credentialId?: string | null;
+        };
+        ProjectList: {
+            items: components["schemas"]["Project"][];
+            total: number;
+        };
+        /**
+         * @description `ansible` runs a playbook from a project with `ansible-playbook`.
+         *     `script` runs a script from a project. `container` runs a command in
+         *     the execution environment, without a project.
          * @enum {string}
          */
         JobType: "ansible" | "script" | "container";
         /** @description The program and its arguments. Not run through a shell. */
         Command: string[];
+        /** @description Arguments passed to the script */
+        Arguments: string[];
+        /**
+         * @description Path of the playbook (`ansible`) or script (`script`) within the
+         *     project, e.g. `playbooks/site.yml`.
+         */
+        Entrypoint: string;
+        /** @description Comma-separated Ansible tags */
+        AnsibleTags: string;
+        /** @description Ansible verbosity (the number of `-v` flags) */
+        Verbosity: number;
         /** @enum {string} */
-        OverridableField: "inventory" | "extraVars" | "limit" | "command";
+        OverridableField: "inventory" | "extraVars" | "limit" | "command" | "tags" | "skipTags";
         JobTemplate: {
             /** Format: uuid */
             id: string;
@@ -921,13 +1049,28 @@ export interface components {
             jobType: components["schemas"]["JobType"];
             /** Format: uuid */
             executionEnvironmentId: string;
+            /**
+             * Format: uuid
+             * @description The project (`ansible` and `script` jobs)
+             */
+            projectId: string | null;
+            /** @description Playbook or script path within the project */
+            entrypoint: string;
             /** Format: uuid */
             inventoryId: string | null;
             credentialIds: string[];
+            /** @description The command (`container` jobs) */
             command: string[];
+            /** @description Arguments passed to the script (`script` jobs) */
+            arguments: string[];
             extraVars: components["schemas"]["Variables"];
             /** @description Host pattern to restrict the job to (Ansible `--limit`) */
             limit: string;
+            /** @description Only run tasks with these tags (Ansible `--tags`) */
+            tags: string;
+            /** @description Skip tasks with these tags (Ansible `--skip-tags`) */
+            skipTags: string;
+            verbosity: number;
             timeoutSeconds: number;
             allowOverrides: components["schemas"]["OverridableField"][];
             /** Format: date-time */
@@ -935,6 +1078,10 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        /**
+         * @description `ansible` and `script` templates need `projectId` and `entrypoint`;
+         *     `container` templates need `command`.
+         */
         JobTemplateCreate: {
             name: components["schemas"]["Name"];
             description?: components["schemas"]["Description"];
@@ -942,11 +1089,18 @@ export interface components {
             /** Format: uuid */
             executionEnvironmentId: string;
             /** Format: uuid */
+            projectId?: string;
+            entrypoint?: components["schemas"]["Entrypoint"];
+            /** Format: uuid */
             inventoryId?: string;
             credentialIds?: string[];
-            command: components["schemas"]["Command"];
+            command?: components["schemas"]["Command"];
+            arguments?: components["schemas"]["Arguments"];
             extraVars?: components["schemas"]["Variables"];
             limit?: string;
+            tags?: components["schemas"]["AnsibleTags"];
+            skipTags?: components["schemas"]["AnsibleTags"];
+            verbosity?: components["schemas"]["Verbosity"];
             /** @default 3600 */
             timeoutSeconds: number;
             allowOverrides?: components["schemas"]["OverridableField"][];
@@ -956,6 +1110,9 @@ export interface components {
             description?: components["schemas"]["Description"];
             /** Format: uuid */
             executionEnvironmentId?: string;
+            /** Format: uuid */
+            projectId?: string;
+            entrypoint?: components["schemas"]["Entrypoint"];
             /**
              * Format: uuid
              * @description `null` removes the inventory
@@ -964,8 +1121,12 @@ export interface components {
             /** @description Replaces the template's credentials */
             credentialIds?: string[];
             command?: components["schemas"]["Command"];
+            arguments?: components["schemas"]["Arguments"];
             extraVars?: components["schemas"]["Variables"];
             limit?: string;
+            tags?: components["schemas"]["AnsibleTags"];
+            skipTags?: components["schemas"]["AnsibleTags"];
+            verbosity?: components["schemas"]["Verbosity"];
             timeoutSeconds?: number;
             allowOverrides?: components["schemas"]["OverridableField"][];
         };
@@ -980,6 +1141,8 @@ export interface components {
             extraVars?: components["schemas"]["Variables"];
             limit?: string;
             command?: components["schemas"]["Command"];
+            tags?: components["schemas"]["AnsibleTags"];
+            skipTags?: components["schemas"]["AnsibleTags"];
         };
         /**
          * @description `pending`: queued. `waiting`: the Kubernetes Job was created and the
@@ -1005,13 +1168,27 @@ export interface components {
         JobConfig: {
             jobType: components["schemas"]["JobType"];
             executionEnvironment: components["schemas"]["ExecutionEnvironmentRef"];
+            project: components["schemas"]["ProjectRef"] | null;
+            entrypoint: string;
             /** Format: uuid */
             inventoryId: string | null;
             credentialIds: string[];
             command: string[];
+            arguments: string[];
             extraVars: components["schemas"]["Variables"];
             limit: string;
+            tags: string;
+            skipTags: string;
+            verbosity: number;
             timeoutSeconds: number;
+        };
+        /** @description The project's repository as it was when the job was launched */
+        ProjectRef: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            scmUrl: string;
+            scmRef: string;
         };
         Job: {
             /** Format: uuid */
@@ -1031,6 +1208,8 @@ export interface components {
             exitCode: number | null;
             /** @description Why the job failed, errored or was canceled, if known */
             failureReason: string;
+            /** @description The commit the project was checked out at (empty if unknown) */
+            scmRevision: string;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -1047,7 +1226,14 @@ export interface components {
             seq: number;
             /** Format: date-time */
             time: string;
-            /** @description `stdout` for command output, `runner` for messages from the runner */
+            /**
+             * @description `stdout` for command output, `runner` for messages from the
+             *     runner. Ansible jobs also have structured events, whose `stdout`
+             *     is empty and whose `data` holds the details: `playbook_start`,
+             *     `play_start`, `task_start`, `host_ok`, `host_failed`,
+             *     `host_skipped`, `host_unreachable` (these four have a
+             *     `hostName`) and `playbook_stats`.
+             */
             type: string;
             stdout: string;
             hostName: string | null;
@@ -1058,6 +1244,26 @@ export interface components {
         JobEventList: {
             items: components["schemas"]["JobEvent"][];
         };
+        JobHostSummary: {
+            hostName: string;
+            /**
+             * @description The host's overall result, the worst of its task results
+             * @enum {string}
+             */
+            status: "ok" | "changed" | "failed" | "unreachable" | "skipped";
+            /** @description Tasks that succeeded, including changed ones */
+            ok: number;
+            changed: number;
+            failed: number;
+            unreachable: number;
+            skipped: number;
+            rescued: number;
+            /** @description Failed tasks with `ignore_errors` */
+            ignored: number;
+        };
+        JobHostSummaryList: {
+            items: components["schemas"]["JobHostSummary"][];
+        };
         RunnerJobSpec: {
             /** Format: uuid */
             jobId: string;
@@ -1066,8 +1272,20 @@ export interface components {
             extraVars: components["schemas"]["Variables"];
             limit: string;
             timeoutSeconds: number;
+            project: components["schemas"]["RunnerProject"] | null;
+            entrypoint: string;
+            arguments: string[];
+            tags: string;
+            skipTags: string;
+            verbosity: number;
             inventory: components["schemas"]["InventoryExport"] | null;
             credentials: components["schemas"]["RunnerCredential"][];
+        };
+        /** @description The git repository to check out */
+        RunnerProject: {
+            url: string;
+            ref: string;
+            credential: components["schemas"]["RunnerCredential"] | null;
         };
         RunnerCredential: {
             /** Format: uuid */
@@ -1106,6 +1324,8 @@ export interface components {
             status: "successful" | "failed" | "error" | "canceled";
             exitCode?: number;
             failureReason?: string;
+            /** @description The commit the project was checked out at */
+            scmRevision?: string;
         };
     };
     responses: {
@@ -1165,6 +1385,7 @@ export interface components {
         GroupId: string;
         CredentialId: string;
         ExecutionEnvironmentId: string;
+        ProjectId: string;
         JobTemplateId: string;
         JobId: string;
     };
@@ -2079,6 +2300,144 @@ export interface operations {
             409: components["responses"]["Conflict"];
         };
     };
+    listProjects: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of projects */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectCreate"];
+            };
+        };
+        responses: {
+            /** @description Project created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Project"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: components["parameters"]["ProjectId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The project */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Project"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: components["parameters"]["ProjectId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description A job template still uses the project */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    updateProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: components["parameters"]["ProjectId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated project */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Project"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
     listJobTemplates: {
         parameters: {
             query?: {
@@ -2325,6 +2684,8 @@ export interface operations {
             query?: {
                 afterSeq?: number;
                 limit?: number;
+                /** @description Only events about this host (Ansible jobs) */
+                hostName?: string;
             };
             header?: never;
             path: {
@@ -2341,6 +2702,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobEventList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listJobHosts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Host results */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobHostSummaryList"];
                 };
             };
             401: components["responses"]["Unauthorized"];

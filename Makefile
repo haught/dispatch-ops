@@ -15,6 +15,13 @@ KIND_CLUSTER := dispatch-ops
 KUBE_CONTEXT := kind-$(KIND_CLUSTER)
 DISPATCH_JOB_NAMESPACE ?= dispatch-jobs
 
+# In the dev container (.devcontainer), Docker runs on the host, so Postgres's
+# published port is on host.docker.internal rather than localhost.
+ifdef DISPATCH_DEVCONTAINER
+DISPATCH_DATABASE_URL := $(subst @localhost:,@host.docker.internal:,$(DISPATCH_DATABASE_URL))
+TEST_DATABASE_URL := $(subst @localhost:,@host.docker.internal:,$(TEST_DATABASE_URL))
+endif
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -34,7 +41,7 @@ deps: ## Install Go and npm dependencies
 
 .PHONY: generate
 generate: ## Regenerate Go server and TS client from api/openapi.yaml
-	go generate ./internal/api/apigen/
+	go generate ./internal/api/apigen/ ./internal/runner/runnerapi/
 	cd web && npm run gen:api
 
 # --- Database ----------------------------------------------------------------
@@ -78,21 +85,34 @@ web-dev: ## Run the Vite dev server with hot reload (proxies /api to :8080)
 .PHONY: kind-up
 kind-up: ## Create the kind cluster and the job namespace
 	@$(KIND) get clusters 2>/dev/null | grep -qx $(KIND_CLUSTER) || $(KIND) create cluster --config deploy/dev/kind.yaml
+ifdef DISPATCH_DEVCONTAINER
+	@$(MAKE) --no-print-directory kind-join
+endif
 	@kubectl --context $(KUBE_CONTEXT) get namespace $(DISPATCH_JOB_NAMESPACE) >/dev/null 2>&1 \
 		|| kubectl --context $(KUBE_CONTEXT) create namespace $(DISPATCH_JOB_NAMESPACE)
+
+.PHONY: kind-join
+kind-join: ## Dev container only: join the kind network and point kubectl at it (run after a rebuild)
+	@docker inspect -f '{{range $$k, $$v := .NetworkSettings.Networks}}{{$$k}} {{end}}' $$(hostname) | grep -qw kind \
+		|| docker network connect kind $$(hostname)
+	@$(KIND) export kubeconfig --name $(KIND_CLUSTER) --internal
 
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster
 	$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+EES := ee-shell ee-python ee-ansible
+
 .PHONY: images
-images: ## Build the runner-base and ee-shell images
+images: ## Build the runner-base image and the starter EEs (ee-shell, ee-python, ee-ansible)
 	docker build -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) -t dispatch-ops/runner-base:$(IMAGE_TAG) .
-	docker build --build-arg RUNNER_BASE=dispatch-ops/runner-base:$(IMAGE_TAG) -t dispatch-ops/ee-shell:$(IMAGE_TAG) images/ee-shell
+	for ee in $(EES); do \
+		docker build --build-arg RUNNER_BASE=dispatch-ops/runner-base:$(IMAGE_TAG) -t dispatch-ops/$$ee:$(IMAGE_TAG) images/$$ee || exit 1; \
+	done
 
 .PHONY: kind-load
 kind-load: images ## Build the images and load them into the kind cluster
-	$(KIND) load docker-image --name $(KIND_CLUSTER) dispatch-ops/runner-base:$(IMAGE_TAG) dispatch-ops/ee-shell:$(IMAGE_TAG)
+	$(KIND) load docker-image --name $(KIND_CLUSTER) dispatch-ops/runner-base:$(IMAGE_TAG) $(foreach ee,$(EES),dispatch-ops/$(ee):$(IMAGE_TAG))
 
 .PHONY: runner
 runner: ## Build static dispatch-runner binaries (linux amd64/arm64) for custom EE images

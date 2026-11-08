@@ -184,7 +184,7 @@ func TestCredentialsAreWriteOnly(t *testing.T) {
 	c := signedIn(t)
 
 	kinds := c.mustDo("GET", "/api/v1/credential-kinds", nil, 200)
-	if len(kinds["items"].([]any)) != 6 {
+	if len(kinds["items"].([]any)) != 7 {
 		t.Errorf("credential kinds = %v", kinds)
 	}
 
@@ -255,9 +255,9 @@ func TestExecutionEnvironmentsAndTemplates(t *testing.T) {
 
 	inv := c.mustDo("POST", "/api/v1/inventories", map[string]any{"name": unique("inv")}, 201)["id"].(string)
 
-	// Only container jobs are supported so far.
+	// Container templates need a command, and no project.
 	c.mustDo("POST", "/api/v1/job-templates", map[string]any{
-		"name": unique("jt"), "jobType": "ansible", "executionEnvironmentId": eeID, "command": []string{"x"},
+		"name": unique("jt"), "jobType": "container", "executionEnvironmentId": eeID,
 	}, 400)
 	c.mustDo("POST", "/api/v1/job-templates", map[string]any{
 		"name": unique("jt"), "jobType": "container", "executionEnvironmentId": eeID, "command": []string{},

@@ -16,6 +16,9 @@ type Field struct {
 	Secret    bool
 	Required  bool
 	Multiline bool
+	// Pattern, if set, restricts the value; PatternHelp describes it.
+	Pattern     *regexp.Regexp
+	PatternHelp string
 }
 
 // Kind describes a type of credential.
@@ -54,6 +57,12 @@ var Kinds = []Kind{
 		{Name: "username", Label: "Username"},
 		{Name: "password", Label: "Password or token", Secret: true},
 		{Name: "private_key", Label: "SSH private key", Secret: true, Multiline: true},
+		{Name: "passphrase", Label: "Key passphrase", Secret: true},
+	}},
+	{Name: "vault", Label: "Ansible Vault password", Fields: []Field{
+		{Name: "vault_id", Label: "Vault ID (optional)", Pattern: vaultID,
+			PatternHelp: "letters, digits, and . _ -"},
+		{Name: "password", Label: "Vault password", Secret: true, Required: true},
 	}},
 	{Name: "generic", Label: "Generic secrets (key/value)", Freeform: true},
 }
@@ -66,6 +75,8 @@ func Lookup(name string) (Kind, bool) {
 	}
 	return Kinds[i], true
 }
+
+var vaultID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // freeformName keeps generic input names usable as file and variable names.
 var freeformName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -108,6 +119,8 @@ func (k Kind) Split(inputs map[string]string) (public, secret map[string]string,
 			case v == "" && f.Required:
 				problems = append(problems, fmt.Sprintf("%q is required", f.Name))
 			case v == "":
+			case f.Pattern != nil && !f.Pattern.MatchString(v):
+				problems = append(problems, fmt.Sprintf("%q may only contain %s", f.Name, f.PatternHelp))
 			case f.Secret:
 				secret[f.Name] = v
 			default:

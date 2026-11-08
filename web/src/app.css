@@ -9,6 +9,7 @@
 	--accent-text: #ffffff;
 	--danger: #c0392b;
 	--ok: #1e8e3e;
+	--warn: #a15c00;
 	--radius: 8px;
 	font-family:
 		system-ui,
@@ -29,6 +30,7 @@
 		--accent: #4f8cff;
 		--danger: #ff6b5b;
 		--ok: #4cc26a;
+		--warn: #f0a33a;
 	}
 }
 

@@ -52,13 +52,29 @@ func (h *Handlers) CancelJob(ctx context.Context, req apigen.CancelJobRequestObj
 func (h *Handlers) ListJobEvents(ctx context.Context, req apigen.ListJobEventsRequestObject) (apigen.ListJobEventsResponseObject, error) {
 	limit := 1000
 	setIf(&limit, req.Params.Limit)
-	events, err := h.Store.ListJobEvents(ctx, req.JobId, deref(req.Params.AfterSeq), limit)
+	events, err := h.Store.ListJobEvents(ctx, req.JobId,
+		store.JobEventFilter{AfterSeq: deref(req.Params.AfterSeq), HostName: deref(req.Params.HostName)}, limit)
 	if err != nil {
 		return nil, orNotFound(err, "Job")
 	}
 	out := apigen.ListJobEvents200JSONResponse{Items: make([]apigen.JobEvent, 0, len(events))}
 	for _, e := range events {
 		out.Items = append(out.Items, toAPIJobEvent(e))
+	}
+	return out, nil
+}
+
+func (h *Handlers) ListJobHosts(ctx context.Context, req apigen.ListJobHostsRequestObject) (apigen.ListJobHostsResponseObject, error) {
+	hosts, err := h.Store.ListJobHostSummaries(ctx, req.JobId)
+	if err != nil {
+		return nil, orNotFound(err, "Job")
+	}
+	out := apigen.ListJobHosts200JSONResponse{Items: make([]apigen.JobHostSummary, 0, len(hosts))}
+	for _, s := range hosts {
+		out.Items = append(out.Items, apigen.JobHostSummary{
+			HostName: s.HostName, Status: apigen.JobHostSummaryStatus(s.Status()), Ok: s.OK, Changed: s.Changed,
+			Failed: s.Failed, Unreachable: s.Unreachable, Skipped: s.Skipped, Rescued: s.Rescued, Ignored: s.Ignored,
+		})
 	}
 	return out, nil
 }
@@ -141,7 +157,7 @@ func (s jobStream) VisitStreamJobResponse(w http.ResponseWriter) error {
 			}
 		}
 		for {
-			events, err := s.h.Store.ListJobEvents(ctx, s.jobID, after, streamBatch)
+			events, err := s.h.Store.ListJobEvents(ctx, s.jobID, store.JobEventFilter{AfterSeq: after}, streamBatch)
 			if err != nil {
 				return s.end(err)
 			}

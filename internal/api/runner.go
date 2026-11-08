@@ -16,10 +16,15 @@ import (
 // The runner protocol versions this server supports. Bump the maximum when
 // the runner API changes compatibly; raise the minimum only when support for
 // old execution environment images is dropped.
+//
+// Protocol 2 added projects and the ansible and script job types.
 const (
 	MinRunnerProtocol = 1
-	MaxRunnerProtocol = 1
+	MaxRunnerProtocol = 2
 )
+
+// minProtocolFor is the oldest runner protocol that can run each job type.
+var minProtocolFor = map[string]int{"container": 1, "ansible": 2, "script": 2}
 
 // runnerJob checks that the job token authenticates the job in the path.
 func runnerJob(ctx context.Context, pathJobID uuid.UUID) error {
@@ -58,6 +63,16 @@ func (h *Handlers) GetRunnerJobSpec(ctx context.Context, req apigen.GetRunnerJob
 		}
 		return nil, badRequest("%s", reason)
 	}
+	if need := minProtocolFor[job.Config.JobType]; req.Params.Protocol < need {
+		reason := fmt.Sprintf("The execution environment's runner (version %s, protocol %d) is too old to run %s jobs, "+
+			"which need protocol %d. Rebuild the image with a newer runner.",
+			req.Params.Version, req.Params.Protocol, job.Config.JobType, need)
+		log.WarnContext(ctx, "runner too old for job type")
+		if err := h.Store.EndJob(ctx, job.ID, store.JobError, nil, reason, store.JobWaiting); err != nil && !errors.Is(err, store.ErrJobState) {
+			return nil, err
+		}
+		return nil, badRequest("%s", reason)
+	}
 
 	spec, err := h.buildRunnerSpec(ctx, job)
 	var se *specError
@@ -86,8 +101,27 @@ func (h *Handlers) GetRunnerJobSpec(ctx context.Context, req apigen.GetRunnerJob
 func (h *Handlers) buildRunnerSpec(ctx context.Context, job store.Job) (apigen.RunnerJobSpec, error) {
 	c := job.Config
 	spec := apigen.RunnerJobSpec{
-		JobId: job.ID, JobType: apigen.JobType(c.JobType), Command: c.Command, ExtraVars: nonNilVars(c.ExtraVars),
-		Limit: c.Limit, TimeoutSeconds: c.TimeoutSeconds, Credentials: []apigen.RunnerCredential{},
+		JobId: job.ID, JobType: apigen.JobType(c.JobType), Command: nonNilSlice(c.Command),
+		ExtraVars: nonNilVars(c.ExtraVars), Limit: c.Limit, TimeoutSeconds: c.TimeoutSeconds,
+		Credentials: []apigen.RunnerCredential{}, Entrypoint: c.Entrypoint, Arguments: nonNilSlice(c.Arguments),
+		Tags: c.Tags, SkipTags: c.SkipTags, Verbosity: c.Verbosity,
+	}
+	if p := c.Project; p != nil {
+		spec.Project = &apigen.RunnerProject{Url: p.ScmURL, Ref: p.ScmRef}
+		if p.CredentialID != nil {
+			cred, err := h.Store.GetCredential(ctx, *p.CredentialID)
+			if errors.Is(err, store.ErrNotFound) {
+				return spec, &specError{"the project's credential no longer exists"}
+			}
+			if err != nil {
+				return spec, err
+			}
+			rc, err := h.runnerCredential(cred)
+			if err != nil {
+				return spec, err
+			}
+			spec.Project.Credential = &rc
+		}
 	}
 	if c.InventoryID != nil {
 		snap, err := h.Store.GetInventorySnapshot(ctx, *c.InventoryID)
@@ -109,16 +143,23 @@ func (h *Handlers) buildRunnerSpec(ctx context.Context, job store.Job) (apigen.R
 			return spec, err
 		}
 		for _, cred := range creds {
-			inputs, err := h.Vault.Inputs(cred)
+			rc, err := h.runnerCredential(cred)
 			if err != nil {
-				return spec, &specError{err.Error()}
+				return spec, err
 			}
-			spec.Credentials = append(spec.Credentials, apigen.RunnerCredential{
-				Id: cred.ID, Name: cred.Name, Kind: apigen.CredentialKind(cred.Kind), Inputs: inputs,
-			})
+			spec.Credentials = append(spec.Credentials, rc)
 		}
 	}
 	return spec, nil
+}
+
+// runnerCredential decrypts a credential for a runner.
+func (h *Handlers) runnerCredential(c store.Credential) (apigen.RunnerCredential, error) {
+	inputs, err := h.Vault.Inputs(c)
+	if err != nil {
+		return apigen.RunnerCredential{}, &specError{err.Error()}
+	}
+	return apigen.RunnerCredential{Id: c.ID, Name: c.Name, Kind: apigen.CredentialKind(c.Kind), Inputs: inputs}, nil
 }
 
 func (h *Handlers) PostRunnerJobEvents(ctx context.Context, req apigen.PostRunnerJobEventsRequestObject) (apigen.PostRunnerJobEventsResponseObject, error) {
@@ -160,9 +201,10 @@ func (h *Handlers) FinishRunnerJob(ctx context.Context, req apigen.FinishRunnerJ
 	}
 	b := req.Body
 	status := string(b.Status)
-	if err := h.Store.EndJob(ctx, req.JobId, status, b.ExitCode, deref(b.FailureReason), store.JobRunning); err != nil {
+	if err := h.Store.FinishJob(ctx, req.JobId, status, b.ExitCode, deref(b.FailureReason), deref(b.ScmRevision)); err != nil {
 		return nil, err
 	}
-	h.Log.InfoContext(ctx, "job finished", "job_id", req.JobId, "status", status, "exit_code", b.ExitCode)
+	h.Log.InfoContext(ctx, "job finished", "job_id", req.JobId, "status", status, "exit_code", b.ExitCode,
+		"scm_revision", deref(b.ScmRevision))
 	return apigen.FinishRunnerJob204Response{}, nil
 }

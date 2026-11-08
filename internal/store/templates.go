@@ -15,24 +15,34 @@ type JobTemplate struct {
 	Description            string
 	JobType                string
 	ExecutionEnvironmentID uuid.UUID
+	ProjectID              *uuid.UUID
+	Entrypoint             string
 	InventoryID            *uuid.UUID
 	CredentialIDs          []uuid.UUID
 	Command                []string
+	Arguments              []string
 	ExtraVars              map[string]any
 	Limit                  string
+	Tags                   string
+	SkipTags               string
+	Verbosity              int
 	TimeoutSeconds         int
 	AllowOverrides         []string
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 }
 
-const templateColumns = `t.id, t.name, t.description, t.job_type, t.execution_environment_id, t.inventory_id,
+const templateColumns = `t.id, t.name, t.description, t.job_type, t.execution_environment_id,
+	t.project_id, t.entrypoint, t.inventory_id,
 	ARRAY(SELECT tc.credential_id FROM job_template_credentials tc WHERE tc.job_template_id = t.id ORDER BY tc.credential_id),
-	t.command, t.extra_vars, t.limit_pattern, t.timeout_seconds, t.allow_overrides, t.created_at, t.updated_at`
+	t.command, t.arguments, t.extra_vars, t.limit_pattern, t.job_tags, t.skip_tags, t.verbosity,
+	t.timeout_seconds, t.allow_overrides, t.created_at, t.updated_at`
 
 func (t *JobTemplate) scanTargets() []any {
-	return []any{&t.ID, &t.Name, &t.Description, &t.JobType, &t.ExecutionEnvironmentID, &t.InventoryID,
-		&t.CredentialIDs, &t.Command, &t.ExtraVars, &t.Limit, &t.TimeoutSeconds, &t.AllowOverrides, &t.CreatedAt, &t.UpdatedAt}
+	return []any{&t.ID, &t.Name, &t.Description, &t.JobType, &t.ExecutionEnvironmentID,
+		&t.ProjectID, &t.Entrypoint, &t.InventoryID,
+		&t.CredentialIDs, &t.Command, &t.Arguments, &t.ExtraVars, &t.Limit, &t.Tags, &t.SkipTags, &t.Verbosity,
+		&t.TimeoutSeconds, &t.AllowOverrides, &t.CreatedAt, &t.UpdatedAt}
 }
 
 // JobTemplateFields are a job template's editable fields.
@@ -41,11 +51,17 @@ type JobTemplateFields struct {
 	Description            string
 	JobType                string
 	ExecutionEnvironmentID uuid.UUID
+	ProjectID              *uuid.UUID
+	Entrypoint             string
 	InventoryID            *uuid.UUID
 	CredentialIDs          []uuid.UUID
 	Command                []string
+	Arguments              []string
 	ExtraVars              map[string]any
 	Limit                  string
+	Tags                   string
+	SkipTags               string
+	Verbosity              int
 	TimeoutSeconds         int
 	AllowOverrides         []string
 }
@@ -74,18 +90,21 @@ func getJobTemplate(ctx context.Context, db querier, id uuid.UUID, forUpdate boo
 }
 
 // CreateJobTemplate inserts a job template. It returns ErrInvalidReference
-// if the execution environment, inventory or a credential does not exist.
+// if the execution environment, project, inventory or a credential does not
+// exist.
 func (s *Store) CreateJobTemplate(ctx context.Context, in JobTemplateFields) (JobTemplate, error) {
 	var out JobTemplate
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var id uuid.UUID
 		err := tx.QueryRow(ctx, `
-			INSERT INTO job_templates (name, description, job_type, execution_environment_id, inventory_id,
-				command, extra_vars, limit_pattern, timeout_seconds, allow_overrides)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			INSERT INTO job_templates (name, description, job_type, execution_environment_id, project_id, entrypoint,
+				inventory_id, command, arguments, extra_vars, limit_pattern, job_tags, skip_tags, verbosity,
+				timeout_seconds, allow_overrides)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			RETURNING id`,
-			in.Name, in.Description, in.JobType, in.ExecutionEnvironmentID, in.InventoryID,
-			nonNilStrings(in.Command), nonNil(in.ExtraVars), in.Limit, in.TimeoutSeconds, nonNilStrings(in.AllowOverrides),
+			in.Name, in.Description, in.JobType, in.ExecutionEnvironmentID, in.ProjectID, in.Entrypoint,
+			in.InventoryID, nonNilStrings(in.Command), nonNilStrings(in.Arguments), nonNil(in.ExtraVars), in.Limit,
+			in.Tags, in.SkipTags, in.Verbosity, in.TimeoutSeconds, nonNilStrings(in.AllowOverrides),
 		).Scan(&id)
 		if err != nil {
 			return mapErr(err)
@@ -110,19 +129,22 @@ func (s *Store) UpdateJobTemplate(ctx context.Context, id uuid.UUID, update func
 		}
 		f := JobTemplateFields{
 			Name: t.Name, Description: t.Description, JobType: t.JobType,
-			ExecutionEnvironmentID: t.ExecutionEnvironmentID, InventoryID: t.InventoryID,
-			CredentialIDs: t.CredentialIDs, Command: t.Command, ExtraVars: t.ExtraVars, Limit: t.Limit,
+			ExecutionEnvironmentID: t.ExecutionEnvironmentID, ProjectID: t.ProjectID, Entrypoint: t.Entrypoint,
+			InventoryID: t.InventoryID, CredentialIDs: t.CredentialIDs, Command: t.Command, Arguments: t.Arguments,
+			ExtraVars: t.ExtraVars, Limit: t.Limit, Tags: t.Tags, SkipTags: t.SkipTags, Verbosity: t.Verbosity,
 			TimeoutSeconds: t.TimeoutSeconds, AllowOverrides: t.AllowOverrides,
 		}
 		if err := update(&f); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE job_templates SET name = $2, description = $3, execution_environment_id = $4, inventory_id = $5,
-				command = $6, extra_vars = $7, limit_pattern = $8, timeout_seconds = $9, allow_overrides = $10
+			UPDATE job_templates SET name = $2, description = $3, execution_environment_id = $4, project_id = $5,
+				entrypoint = $6, inventory_id = $7, command = $8, arguments = $9, extra_vars = $10, limit_pattern = $11,
+				job_tags = $12, skip_tags = $13, verbosity = $14, timeout_seconds = $15, allow_overrides = $16
 			WHERE id = $1`,
-			id, f.Name, f.Description, f.ExecutionEnvironmentID, f.InventoryID,
-			nonNilStrings(f.Command), nonNil(f.ExtraVars), f.Limit, f.TimeoutSeconds, nonNilStrings(f.AllowOverrides),
+			id, f.Name, f.Description, f.ExecutionEnvironmentID, f.ProjectID, f.Entrypoint, f.InventoryID,
+			nonNilStrings(f.Command), nonNilStrings(f.Arguments), nonNil(f.ExtraVars), f.Limit,
+			f.Tags, f.SkipTags, f.Verbosity, f.TimeoutSeconds, nonNilStrings(f.AllowOverrides),
 		); err != nil {
 			return mapErr(err)
 		}

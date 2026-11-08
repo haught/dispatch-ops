@@ -1,7 +1,8 @@
 <script lang="ts">
-	import type { JobStatus } from '#lib/api/client.js';
+	import type { JobHostSummary, JobStatus } from '#lib/api/client.js';
 
-	let { status }: { status: JobStatus } = $props();
+	/** A job status, or a host's result in an Ansible job. */
+	let { status }: { status: JobStatus | JobHostSummary['status'] } = $props();
 </script>
 
 <span class="badge {status}">{status}</span>
@@ -23,12 +24,18 @@
 		color: var(--accent);
 	}
 
-	.successful {
+	.successful,
+	.ok {
 		color: var(--ok);
 	}
 
+	.changed {
+		color: var(--warn);
+	}
+
 	.failed,
-	.error {
+	.error,
+	.unreachable {
 		color: var(--danger);
 	}
 </style>

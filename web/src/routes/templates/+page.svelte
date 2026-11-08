@@ -66,7 +66,7 @@
 					<tr>
 						<th>Name</th>
 						<th>Type</th>
-						<th>Command</th>
+						<th>Runs</th>
 						<th></th>
 					</tr>
 				</thead>
@@ -78,7 +78,13 @@
 								{#if t.description}<div class="muted small">{t.description}</div>{/if}
 							</td>
 							<td>{t.jobType}</td>
-							<td><code class="command">{t.command.join(' ')}</code></td>
+							<td>
+								<code class="command"
+									>{t.jobType === 'container'
+										? t.command.join(' ')
+										: [t.entrypoint, ...t.arguments].join(' ')}</code
+								>
+							</td>
 							<td>
 								<button onclick={() => launch(t)} disabled={launching !== null}>
 									{launching === t.id ? 'Launching…' : 'Launch'}

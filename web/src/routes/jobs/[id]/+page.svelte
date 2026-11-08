@@ -1,7 +1,15 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { tick } from 'svelte';
-	import { api, errorMessage, finishedStatuses, type Job, type JobEvent } from '#lib/api/client.js';
+	import {
+		api,
+		errorMessage,
+		finishedStatuses,
+		hostEventTypes,
+		type Job,
+		type JobEvent,
+		type JobHostSummary
+	} from '#lib/api/client.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import { fmtDuration, fmtTime } from '#lib/format.js';
 
@@ -11,6 +19,13 @@
 	let live = $state(false);
 	let error = $state('');
 	let canceling = $state(false);
+
+	// Per-host results (Ansible jobs), and the task results of the host
+	// picked in the table.
+	let hosts = $state<JobHostSummary[]>([]);
+	let selectedHost = $state<string | null>(null);
+	let hostEvents = $state<JobEvent[]>([]);
+	let hostEventsError = $state('');
 
 	let logEl = $state<HTMLElement | null>(null);
 	let follow = $state(true);
@@ -25,10 +40,28 @@
 		job = null;
 		lines = [];
 		error = '';
+		hosts = [];
+		selectedHost = null;
 		let source: EventSource | null = null;
 		let pending: JobEvent[] = [];
 		let frame = 0;
 		let closed = false;
+		let hostsTimer: ReturnType<typeof setTimeout> | undefined;
+
+		const loadHosts = async () => {
+			const { data } = await api.GET('/api/v1/jobs/{jobId}/hosts', {
+				params: { path: { jobId: id } }
+			});
+			if (data && !closed) hosts = data.items;
+		};
+		// Host results change with every task; refresh them at most every 1.5s.
+		const scheduleHosts = () => {
+			hostsTimer ??= setTimeout(() => {
+				hostsTimer = undefined;
+				loadHosts();
+				if (selectedHost) loadHostEvents(id, selectedHost);
+			}, 1500);
+		};
 
 		// Batch incoming lines into one update per animation frame.
 		const flush = () => {
@@ -47,18 +80,30 @@
 					return;
 				}
 				job = data;
+				if (data.config.jobType === 'ansible') loadHosts();
 				source = new EventSource(`/api/v1/jobs/${id}/stream`);
 				live = true;
 				source.addEventListener('status', (e) => {
 					job = JSON.parse(e.data);
 				});
 				source.addEventListener('job_event', (e) => {
-					pending.push(JSON.parse(e.data));
-					if (!frame) frame = requestAnimationFrame(flush);
+					const ev: JobEvent = JSON.parse(e.data);
+					if (ev.type === 'stdout' || ev.type === 'runner') {
+						pending.push(ev);
+						if (!frame) frame = requestAnimationFrame(flush);
+					} else if (hostEventTypes.includes(ev.type) || ev.type === 'playbook_stats') {
+						scheduleHosts();
+					}
 				});
 				source.addEventListener('end', () => {
 					source?.close();
 					live = false;
+					if (job?.config.jobType === 'ansible') {
+						clearTimeout(hostsTimer);
+						hostsTimer = undefined;
+						loadHosts();
+						if (selectedHost) loadHostEvents(id, selectedHost);
+					}
 				});
 				source.onerror = () => {
 					// The browser reconnects by itself (resuming with Last-Event-ID)
@@ -75,9 +120,51 @@
 			closed = true;
 			source?.close();
 			if (frame) cancelAnimationFrame(frame);
+			clearTimeout(hostsTimer);
 			clearInterval(timer);
 		};
 	});
+
+	async function loadHostEvents(jobId: string, host: string) {
+		const { data, error: err } = await api.GET('/api/v1/jobs/{jobId}/events', {
+			params: { path: { jobId }, query: { hostName: host, limit: 5000 } }
+		});
+		if (selectedHost !== host) return;
+		if (data) {
+			hostEvents = data.items.filter((e) => hostEventTypes.includes(e.type));
+			hostEventsError = '';
+		} else {
+			hostEventsError = errorMessage(err);
+		}
+	}
+
+	function selectHost(host: string) {
+		if (!job) return;
+		if (selectedHost === host) {
+			selectedHost = null;
+			return;
+		}
+		selectedHost = host;
+		hostEvents = [];
+		hostEventsError = '';
+		loadHostEvents(job.id, host);
+	}
+
+	/** A task result's outcome, for its badge. */
+	function outcome(e: JobEvent): JobHostSummary['status'] {
+		switch (e.type) {
+			case 'host_ok':
+				return e.data?.changed ? 'changed' : 'ok';
+			case 'host_failed':
+				return 'failed';
+			case 'host_unreachable':
+				return 'unreachable';
+			default:
+				return 'skipped';
+		}
+	}
+
+	const hostExtras = $derived(hosts.some((h) => h.rescued || h.ignored));
 
 	async function scrollIfFollowing() {
 		if (!follow) return;
@@ -129,10 +216,41 @@
 
 	<section class="card details">
 		<dl>
+			<dt>Type</dt>
+			<dd>{job.config.jobType}</dd>
+			{#if job.config.project}
+				<dt>Project</dt>
+				<dd>
+					{job.config.project.name}
+					<span class="muted">
+						(<code>{job.config.project.scmUrl}</code> at <code>{job.config.project.scmRef}</code>)
+					</span>
+				</dd>
+				<dt>{job.config.jobType === 'ansible' ? 'Playbook' : 'Script'}</dt>
+				<dd><code>{[job.config.entrypoint, ...job.config.arguments].join(' ')}</code></dd>
+				<dt>Revision</dt>
+				<dd>
+					{#if job.scmRevision}<code title={job.scmRevision}>{job.scmRevision.slice(0, 12)}</code
+						>{:else}—{/if}
+				</dd>
+			{:else}
+				<dt>Command</dt>
+				<dd><code>{job.config.command.join(' ')}</code></dd>
+			{/if}
 			<dt>Image</dt>
 			<dd><code>{job.config.executionEnvironment.image}</code></dd>
-			<dt>Command</dt>
-			<dd><code>{job.config.command.join(' ')}</code></dd>
+			{#if job.config.limit}
+				<dt>Limit</dt>
+				<dd><code>{job.config.limit}</code></dd>
+			{/if}
+			{#if job.config.tags}
+				<dt>Tags</dt>
+				<dd><code>{job.config.tags}</code></dd>
+			{/if}
+			{#if job.config.skipTags}
+				<dt>Skip tags</dt>
+				<dd><code>{job.config.skipTags}</code></dd>
+			{/if}
 			<dt>Launched by</dt>
 			<dd>{job.launchedBy?.username ?? '—'} ({job.launchType})</dd>
 			<dt>Created</dt>
@@ -147,6 +265,96 @@
 			{/if}
 		</dl>
 	</section>
+
+	{#if job.config.jobType === 'ansible'}
+		<section class="card hosts">
+			<h2>Hosts</h2>
+			{#if hosts.length === 0}
+				<p class="muted">{finished ? 'No host results.' : 'No host results yet.'}</p>
+			{:else}
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th>Host</th>
+								<th>Result</th>
+								<th class="num">OK</th>
+								<th class="num">Changed</th>
+								<th class="num">Failed</th>
+								<th class="num">Unreachable</th>
+								<th class="num">Skipped</th>
+								{#if hostExtras}
+									<th class="num">Rescued</th>
+									<th class="num">Ignored</th>
+								{/if}
+							</tr>
+						</thead>
+						<tbody>
+							{#each hosts as h (h.hostName)}
+								<tr class:selected={selectedHost === h.hostName}>
+									<td>
+										<button
+											class="link"
+											aria-expanded={selectedHost === h.hostName}
+											onclick={() => selectHost(h.hostName)}>{h.hostName}</button
+										>
+									</td>
+									<td><StatusBadge status={h.status} /></td>
+									<td class="num">{h.ok}</td>
+									<td class="num">{h.changed}</td>
+									<td class="num">{h.failed}</td>
+									<td class="num">{h.unreachable}</td>
+									<td class="num">{h.skipped}</td>
+									{#if hostExtras}
+										<td class="num">{h.rescued}</td>
+										<td class="num">{h.ignored}</td>
+									{/if}
+								</tr>
+								{#if selectedHost === h.hostName}
+									<tr class="host-detail">
+										<td colspan={hostExtras ? 9 : 7}>
+											{#if hostEventsError}
+												<p class="error">{hostEventsError}</p>
+											{:else if hostEvents.length === 0}
+												<p class="muted">No task results.</p>
+											{:else}
+												<table class="tasks">
+													<thead>
+														<tr>
+															<th>Task</th>
+															<th>Result</th>
+															<th>Message</th>
+														</tr>
+													</thead>
+													<tbody>
+														{#each hostEvents as e (e.seq)}
+															<tr>
+																<td>
+																	{e.data?.task ?? ''}
+																	{#if e.data?.play}<div class="muted small">
+																			{e.data.play}
+																		</div>{/if}
+																</td>
+																<td>
+																	<StatusBadge status={outcome(e)} />
+																	{#if e.data?.ignored}<span class="muted small">ignored</span>{/if}
+																</td>
+																<td class="msg">{e.data?.msg ?? e.data?.stderr ?? ''}</td>
+															</tr>
+														{/each}
+													</tbody>
+												</table>
+											{/if}
+										</td>
+									</tr>
+								{/if}
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+		</section>
+	{/if}
 
 	<section class="card log-card">
 		<pre class="log" bind:this={logEl} onscroll={onScroll}>{#each lines as line (line.seq)}<span
@@ -209,6 +417,53 @@
 	dd {
 		margin: 0;
 		overflow-wrap: anywhere;
+	}
+
+	.hosts {
+		margin-bottom: 1rem;
+	}
+
+	.table-wrap {
+		overflow-x: auto;
+	}
+
+	.num {
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+	}
+
+	button.link {
+		padding: 0;
+		border: none;
+		background: none;
+		color: var(--accent);
+		text-align: left;
+	}
+
+	tr.selected > td {
+		background: var(--bg);
+	}
+
+	.host-detail > td {
+		background: var(--bg);
+		padding: 0.25rem 0.5rem 0.75rem 1.5rem;
+	}
+
+	.tasks th,
+	.tasks td {
+		font-size: 0.9rem;
+		vertical-align: top;
+	}
+
+	.msg {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.85rem;
+	}
+
+	.small {
+		font-size: 0.8rem;
 	}
 
 	.log-card {

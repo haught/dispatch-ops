@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Dispatch Ops API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     Dispatch Ops runs automation jobs (Ansible, scripts, or any container) on
     Kubernetes. This spec is the source of truth: the Go server, the
@@ -29,6 +29,7 @@ tags:
   - name: inventories
   - name: credentials
   - name: execution-environments
+  - name: projects
   - name: job-templates
   - name: jobs
   - name: runner
@@ -762,6 +763,112 @@ paths:
               schema:
                 $ref: "#/components/schemas/Problem"
 
+  # --- Projects --------------------------------------------------------------
+
+  /api/v1/projects:
+    get:
+      operationId: listProjects
+      tags: [projects]
+      summary: List projects (git repositories)
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200":
+          description: A page of projects
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createProject
+      tags: [projects]
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectCreate"
+      responses:
+        "201":
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/projects/{projectId}:
+    parameters:
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      operationId: getProject
+      tags: [projects]
+      summary: Get a project
+      responses:
+        "200":
+          description: The project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateProject
+      tags: [projects]
+      summary: Update a project
+      description: Jobs already launched keep the repository and ref they were launched with.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectUpdate"
+      responses:
+        "200":
+          description: The updated project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteProject
+      tags: [projects]
+      summary: Delete a project
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A job template still uses the project
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
   # --- Job templates ---------------------------------------------------------
 
   /api/v1/job-templates:
@@ -995,6 +1102,12 @@ paths:
             minimum: 1
             maximum: 5000
             default: 1000
+        - name: hostName
+          in: query
+          description: Only events about this host (Ansible jobs)
+          schema:
+            type: string
+            maxLength: 255
       responses:
         "200":
           description: Events after `afterSeq`
@@ -1002,6 +1115,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/JobEventList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/jobs/{jobId}/hosts:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      operationId: listJobHosts
+      tags: [jobs]
+      summary: Per-host results of an Ansible job
+      description: |
+        One entry per host the playbook ran against, by host name. While the
+        job runs, the counts come from the task results received so far; once
+        the playbook finishes they are Ansible's own recap. Jobs of other
+        types have no entries.
+      responses:
+        "200":
+          description: Host results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobHostSummaryList"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1246,6 +1383,13 @@ components:
         format: uuid
     ExecutionEnvironmentId:
       name: executionEnvironmentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProjectId:
+      name: projectId
       in: path
       required: true
       schema:
@@ -1675,7 +1819,7 @@ components:
 
     CredentialKind:
       type: string
-      enum: [ssh, username_password, api_token, registry, scm, generic]
+      enum: [ssh, username_password, api_token, registry, scm, vault, generic]
 
     CredentialKindInfo:
       type: object
@@ -1880,12 +2024,112 @@ components:
         total:
           type: integer
 
+    # --- Projects ---
+
+    ScmUrl:
+      type: string
+      minLength: 1
+      maxLength: 2048
+      pattern: '^[^\s-]\S*$'
+      description: |
+        Git repository URL: `https://`, `http://`, `ssh://`, `git://`,
+        `file://`, or scp-like `git@host:path`.
+
+    ScmRef:
+      type: string
+      minLength: 1
+      maxLength: 255
+      pattern: '^[^\s-]\S*$'
+      description: Branch, tag or commit to check out
+
+    Project:
+      type: object
+      required: [id, name, description, scmUrl, scmRef, credentialId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        scmUrl:
+          type: string
+        scmRef:
+          type: string
+        credentialId:
+          type: string
+          format: uuid
+          nullable: true
+          description: An `scm` credential used to clone the repository
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ProjectCreate:
+      type: object
+      required: [name, scmUrl]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        scmUrl:
+          $ref: "#/components/schemas/ScmUrl"
+        scmRef:
+          allOf:
+            - $ref: "#/components/schemas/ScmRef"
+          default: main
+        credentialId:
+          type: string
+          format: uuid
+
+    ProjectUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        description:
+          $ref: "#/components/schemas/Description"
+        scmUrl:
+          $ref: "#/components/schemas/ScmUrl"
+        scmRef:
+          $ref: "#/components/schemas/ScmRef"
+        credentialId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "`null` removes the credential"
+          x-go-type: nullable.Nullable[openapi_types.UUID]
+          x-go-type-skip-optional-pointer: true
+          x-go-type-import:
+            path: github.com/oapi-codegen/nullable
+
+    ProjectList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        total:
+          type: integer
+
     # --- Job templates ---
 
     JobType:
       type: string
       enum: [ansible, script, container]
-      description: Only `container` is supported so far; `ansible` and `script` arrive with projects.
+      description: |
+        `ansible` runs a playbook from a project with `ansible-playbook`.
+        `script` runs a script from a project. `container` runs a command in
+        the execution environment, without a project.
 
     Command:
       type: array
@@ -1896,9 +2140,35 @@ components:
         type: string
         maxLength: 65536
 
+    Arguments:
+      type: array
+      description: Arguments passed to the script
+      maxItems: 1000
+      items:
+        type: string
+        maxLength: 65536
+
+    Entrypoint:
+      type: string
+      maxLength: 1024
+      description: |
+        Path of the playbook (`ansible`) or script (`script`) within the
+        project, e.g. `playbooks/site.yml`.
+
+    AnsibleTags:
+      type: string
+      maxLength: 4096
+      description: Comma-separated Ansible tags
+
+    Verbosity:
+      type: integer
+      minimum: 0
+      maximum: 5
+      description: Ansible verbosity (the number of `-v` flags)
+
     OverridableField:
       type: string
-      enum: [inventory, extraVars, limit, command]
+      enum: [inventory, extraVars, limit, command, tags, skipTags]
 
     JobTemplate:
       type: object
@@ -1908,11 +2178,17 @@ components:
         - description
         - jobType
         - executionEnvironmentId
+        - projectId
+        - entrypoint
         - inventoryId
         - credentialIds
         - command
+        - arguments
         - extraVars
         - limit
+        - tags
+        - skipTags
+        - verbosity
         - timeoutSeconds
         - allowOverrides
         - createdAt
@@ -1930,6 +2206,14 @@ components:
         executionEnvironmentId:
           type: string
           format: uuid
+        projectId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The project (`ansible` and `script` jobs)
+        entrypoint:
+          type: string
+          description: Playbook or script path within the project
         inventoryId:
           type: string
           format: uuid
@@ -1941,6 +2225,12 @@ components:
             format: uuid
         command:
           type: array
+          description: The command (`container` jobs)
+          items:
+            type: string
+        arguments:
+          type: array
+          description: Arguments passed to the script (`script` jobs)
           items:
             type: string
         extraVars:
@@ -1948,6 +2238,14 @@ components:
         limit:
           type: string
           description: Host pattern to restrict the job to (Ansible `--limit`)
+        tags:
+          type: string
+          description: Only run tasks with these tags (Ansible `--tags`)
+        skipTags:
+          type: string
+          description: Skip tasks with these tags (Ansible `--skip-tags`)
+        verbosity:
+          type: integer
         timeoutSeconds:
           type: integer
         allowOverrides:
@@ -1963,7 +2261,10 @@ components:
 
     JobTemplateCreate:
       type: object
-      required: [name, jobType, executionEnvironmentId, command]
+      description: |
+        `ansible` and `script` templates need `projectId` and `entrypoint`;
+        `container` templates need `command`.
+      required: [name, jobType, executionEnvironmentId]
       additionalProperties: false
       properties:
         name:
@@ -1975,6 +2276,11 @@ components:
         executionEnvironmentId:
           type: string
           format: uuid
+        projectId:
+          type: string
+          format: uuid
+        entrypoint:
+          $ref: "#/components/schemas/Entrypoint"
         inventoryId:
           type: string
           format: uuid
@@ -1986,11 +2292,19 @@ components:
             format: uuid
         command:
           $ref: "#/components/schemas/Command"
+        arguments:
+          $ref: "#/components/schemas/Arguments"
         extraVars:
           $ref: "#/components/schemas/Variables"
         limit:
           type: string
           maxLength: 4096
+        tags:
+          $ref: "#/components/schemas/AnsibleTags"
+        skipTags:
+          $ref: "#/components/schemas/AnsibleTags"
+        verbosity:
+          $ref: "#/components/schemas/Verbosity"
         timeoutSeconds:
           type: integer
           minimum: 1
@@ -2013,6 +2327,11 @@ components:
         executionEnvironmentId:
           type: string
           format: uuid
+        projectId:
+          type: string
+          format: uuid
+        entrypoint:
+          $ref: "#/components/schemas/Entrypoint"
         inventoryId:
           type: string
           format: uuid
@@ -2031,11 +2350,19 @@ components:
             format: uuid
         command:
           $ref: "#/components/schemas/Command"
+        arguments:
+          $ref: "#/components/schemas/Arguments"
         extraVars:
           $ref: "#/components/schemas/Variables"
         limit:
           type: string
           maxLength: 4096
+        tags:
+          $ref: "#/components/schemas/AnsibleTags"
+        skipTags:
+          $ref: "#/components/schemas/AnsibleTags"
+        verbosity:
+          $ref: "#/components/schemas/Verbosity"
         timeoutSeconds:
           type: integer
           minimum: 1
@@ -2073,6 +2400,10 @@ components:
           maxLength: 4096
         command:
           $ref: "#/components/schemas/Command"
+        tags:
+          $ref: "#/components/schemas/AnsibleTags"
+        skipTags:
+          $ref: "#/components/schemas/AnsibleTags"
 
     # --- Jobs ---
 
@@ -2115,17 +2446,29 @@ components:
       required:
         - jobType
         - executionEnvironment
+        - project
+        - entrypoint
         - inventoryId
         - credentialIds
         - command
+        - arguments
         - extraVars
         - limit
+        - tags
+        - skipTags
+        - verbosity
         - timeoutSeconds
       properties:
         jobType:
           $ref: "#/components/schemas/JobType"
         executionEnvironment:
           $ref: "#/components/schemas/ExecutionEnvironmentRef"
+        project:
+          allOf:
+            - $ref: "#/components/schemas/ProjectRef"
+          nullable: true
+        entrypoint:
+          type: string
         inventoryId:
           type: string
           format: uuid
@@ -2139,12 +2482,37 @@ components:
           type: array
           items:
             type: string
+        arguments:
+          type: array
+          items:
+            type: string
         extraVars:
           $ref: "#/components/schemas/Variables"
         limit:
           type: string
+        tags:
+          type: string
+        skipTags:
+          type: string
+        verbosity:
+          type: integer
         timeoutSeconds:
           type: integer
+
+    ProjectRef:
+      type: object
+      description: The project's repository as it was when the job was launched
+      required: [id, name, scmUrl, scmRef]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scmUrl:
+          type: string
+        scmRef:
+          type: string
 
     Job:
       type: object
@@ -2159,6 +2527,7 @@ components:
         - cancelRequested
         - exitCode
         - failureReason
+        - scmRevision
         - createdAt
         - startedAt
         - finishedAt
@@ -2192,6 +2561,9 @@ components:
         failureReason:
           type: string
           description: Why the job failed, errored or was canceled, if known
+        scmRevision:
+          type: string
+          description: The commit the project was checked out at (empty if unknown)
         createdAt:
           type: string
           format: date-time
@@ -2227,7 +2599,13 @@ components:
           format: date-time
         type:
           type: string
-          description: "`stdout` for command output, `runner` for messages from the runner"
+          description: |
+            `stdout` for command output, `runner` for messages from the
+            runner. Ansible jobs also have structured events, whose `stdout`
+            is empty and whose `data` holds the details: `playbook_start`,
+            `play_start`, `task_start`, `host_ok`, `host_failed`,
+            `host_skipped`, `host_unreachable` (these four have a
+            `hostName`) and `playbook_stats`.
         stdout:
           type: string
         hostName:
@@ -2247,11 +2625,61 @@ components:
           items:
             $ref: "#/components/schemas/JobEvent"
 
+    JobHostSummary:
+      type: object
+      required: [hostName, status, ok, changed, failed, unreachable, skipped, rescued, ignored]
+      properties:
+        hostName:
+          type: string
+        status:
+          type: string
+          description: The host's overall result, the worst of its task results
+          enum: [ok, changed, failed, unreachable, skipped]
+        ok:
+          type: integer
+          description: Tasks that succeeded, including changed ones
+        changed:
+          type: integer
+        failed:
+          type: integer
+        unreachable:
+          type: integer
+        skipped:
+          type: integer
+        rescued:
+          type: integer
+        ignored:
+          type: integer
+          description: Failed tasks with `ignore_errors`
+
+    JobHostSummaryList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobHostSummary"
+
     # --- Runner ---
 
     RunnerJobSpec:
       type: object
-      required: [jobId, jobType, command, extraVars, limit, timeoutSeconds, inventory, credentials]
+      required:
+        - jobId
+        - jobType
+        - command
+        - extraVars
+        - limit
+        - timeoutSeconds
+        - inventory
+        - credentials
+        - project
+        - entrypoint
+        - arguments
+        - tags
+        - skipTags
+        - verbosity
       properties:
         jobId:
           type: string
@@ -2268,6 +2696,22 @@ components:
           type: string
         timeoutSeconds:
           type: integer
+        project:
+          allOf:
+            - $ref: "#/components/schemas/RunnerProject"
+          nullable: true
+        entrypoint:
+          type: string
+        arguments:
+          type: array
+          items:
+            type: string
+        tags:
+          type: string
+        skipTags:
+          type: string
+        verbosity:
+          type: integer
         inventory:
           allOf:
             - $ref: "#/components/schemas/InventoryExport"
@@ -2276,6 +2720,20 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RunnerCredential"
+
+    RunnerProject:
+      type: object
+      description: The git repository to check out
+      required: [url, ref, credential]
+      properties:
+        url:
+          type: string
+        ref:
+          type: string
+        credential:
+          allOf:
+            - $ref: "#/components/schemas/RunnerCredential"
+          nullable: true
 
     RunnerCredential:
       type: object
@@ -2352,3 +2810,7 @@ components:
         failureReason:
           type: string
           maxLength: 4096
+        scmRevision:
+          type: string
+          maxLength: 255
+          description: The commit the project was checked out at
