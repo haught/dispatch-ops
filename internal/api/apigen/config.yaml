@@ -1,0 +1,10 @@
+# oapi-codegen configuration. Regenerate with `make generate`.
+package: apigen
+output: apigen.gen.go
+generate:
+  std-http-server: true
+  strict-server: true
+  models: true
+  embedded-spec: true
+output-options:
+  skip-prune: true

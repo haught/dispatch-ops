@@ -1,0 +1,10 @@
+# Build output
+/bin/
+/coverage.out
+
+# Local configuration
+.env
+
+# OS / editors
+.DS_Store
+.idea/

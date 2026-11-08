@@ -1,0 +1,321 @@
+openapi: 3.0.3
+info:
+  title: Dispatch Ops API
+  version: 0.1.0
+  description: |
+    Dispatch Ops runs automation jobs (Ansible, scripts, or any container) on
+    Kubernetes. This spec is the source of truth: the Go server and the
+    TypeScript client are generated from it.
+
+    Authentication is either a browser session cookie (from `POST /auth/login`)
+    or an API token sent as `Authorization: Bearer <token>`.
+
+tags:
+  - name: system
+  - name: auth
+  - name: tokens
+
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+paths:
+  /api/v1/health:
+    get:
+      operationId: getHealth
+      tags: [system]
+      summary: Service health
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: A dependency is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Sign in with a local username and password
+      description: Starts a browser session. The session token is set as an HTTP-only cookie.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Signed in
+          headers:
+            Set-Cookie:
+              description: Session cookie
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: End the current session
+      responses:
+        "204":
+          description: Signed out
+          headers:
+            Set-Cookie:
+              description: Clears the session cookie
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/me:
+    get:
+      operationId: getCurrentUser
+      tags: [auth]
+      summary: The signed-in user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tokens:
+    get:
+      operationId: listApiTokens
+      tags: [tokens]
+      summary: List your API tokens
+      responses:
+        "200":
+          description: Your API tokens (secrets are never returned)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ApiToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createApiToken
+      tags: [tokens]
+      summary: Create an API token
+      description: |
+        The token secret is returned only in this response. Tokens can only be
+        created from a browser session, not with another API token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiTokenRequest"
+      responses:
+        "201":
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedApiToken"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/tokens/{tokenId}:
+    parameters:
+      - name: tokenId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: deleteApiToken
+      tags: [tokens]
+      summary: Revoke one of your API tokens
+      responses:
+        "204":
+          description: Token revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: dispatch_session
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  responses:
+    BadRequest:
+      description: The request was invalid
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: Not signed in, or the credentials are invalid
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: Signed in, but not allowed to do this
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: The resource does not exist
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    Problem:
+      description: RFC 9457 problem details
+      type: object
+      required: [title, status]
+      properties:
+        type:
+          type: string
+          default: about:blank
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+
+    Health:
+      type: object
+      required: [status, database]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        database:
+          type: string
+          enum: [ok, unavailable]
+        version:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 255
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+
+    User:
+      type: object
+      required: [id, username, displayName, email, authSource, isAdmin, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        displayName:
+          type: string
+        email:
+          type: string
+        authSource:
+          type: string
+          enum: [local, oidc]
+        isAdmin:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ApiToken:
+      type: object
+      required: [id, name, prefix, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        prefix:
+          type: string
+          description: First characters of the token, to help tell tokens apart
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateApiTokenRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        expiresInDays:
+          type: integer
+          minimum: 1
+          maximum: 3650
+          description: Omit for a token that never expires
+
+    CreatedApiToken:
+      allOf:
+        - $ref: "#/components/schemas/ApiToken"
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: The token secret. Shown only once.

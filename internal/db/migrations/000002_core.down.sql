@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS job_events;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS job_template_credentials;
+DROP TABLE IF EXISTS job_templates;
+DROP TABLE IF EXISTS execution_environments;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS credentials;
+DROP TABLE IF EXISTS inventory_group_hosts;
+DROP TABLE IF EXISTS hosts;
+DROP TABLE IF EXISTS inventory_group_children;
+DROP TABLE IF EXISTS inventory_groups;
+DROP TABLE IF EXISTS inventories;

@@ -1,0 +1,6 @@
+# Package Managers
+package-lock.json
+
+# Generated
+src/lib/api/schema.d.ts
+build
