@@ -80,7 +80,7 @@ func NewHandler(h *Handlers) (http.Handler, error) {
 		},
 	})
 
-	return identify(h.Store, h.Log, validate(mux)), nil
+	return identify(h.Store, h.Log, h.SecureCookies, withOIDCState(h.SecureCookies, validate(mux))), nil
 }
 
 // recordOperation notes the OpenAPI operation a request matched, for
@@ -99,7 +99,8 @@ func recordOperation(f apigen.StrictHandlerFunc, operationID string) apigen.Stri
 // request itself: whether an operation needs a caller is decided by the spec
 // (see authenticate). A request carrying invalid credentials is treated as
 // anonymous.
-func identify(st *store.Store, log *slog.Logger, next http.Handler) http.Handler {
+func identify(st *store.Store, log *slog.Logger, secureCookies bool, next http.Handler) http.Handler {
+	cookieName := sessionCookieName(secureCookies)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r))
 
@@ -117,7 +118,7 @@ func identify(st *store.Store, log *slog.Logger, next http.Handler) http.Handler
 			return
 		}
 
-		secret, kind, method := credentialsFrom(r)
+		secret, kind, method := credentialsFrom(r, cookieName)
 		if secret != "" && auth.LooksLikeToken(secret) {
 			tok, user, err := st.LookupToken(r.Context(), auth.HashToken(secret))
 			switch {
@@ -143,7 +144,7 @@ func identify(st *store.Store, log *slog.Logger, next http.Handler) http.Handler
 
 // credentialsFrom returns the token secret the request presents. API tokens
 // come in the Authorization header; sessions only in the cookie.
-func credentialsFrom(r *http.Request) (secret string, kind store.TokenKind, method auth.Method) {
+func credentialsFrom(r *http.Request, cookieName string) (secret string, kind store.TokenKind, method auth.Method) {
 	if h := r.Header.Get("Authorization"); h != "" {
 		scheme, token, ok := strings.Cut(h, " ")
 		if ok && strings.EqualFold(scheme, "Bearer") && strings.HasPrefix(token, auth.APITokenPrefix) {
@@ -151,7 +152,7 @@ func credentialsFrom(r *http.Request) (secret string, kind store.TokenKind, meth
 		}
 		return "", "", ""
 	}
-	if c, err := r.Cookie(SessionCookieName); err == nil && strings.HasPrefix(c.Value, auth.SessionTokenPrefix) {
+	if c, err := r.Cookie(cookieName); err == nil && strings.HasPrefix(c.Value, auth.SessionTokenPrefix) {
 		return c.Value, store.TokenKindSession, auth.MethodSession
 	}
 	return "", "", ""

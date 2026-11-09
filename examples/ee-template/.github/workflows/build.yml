@@ -3,7 +3,10 @@
 #   :sha-<commit>  every push to main
 #   :main, :latest the newest build of main
 #   :1.2.3         a v1.2.3 tag
-# Pull requests are built and tested, not pushed.
+# Pull requests are built and tested, not pushed, and never get write access
+# to packages: only the push job, which pull requests don't run, has it.
+# Actions are pinned to commit SHAs; Renovate (renovate.json) keeps them
+# current.
 name: build
 
 on:
@@ -15,34 +18,59 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  build:
+  # Builds the image for amd64 and runs its self-test. No write access.
+  test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read # pull a starter EE from a private GHCR package
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      # Also lets the build pull a starter EE published to a private GHCR package.
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build for the self-test
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           load: true
           tags: ee:test
           cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Self-test
         run: docker run --rm ee:test selftest
 
+  # Builds for every platform and pushes, after the self-test passed. Pull
+  # requests skip it.
+  push:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -51,8 +79,7 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
       - name: Build and push
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64

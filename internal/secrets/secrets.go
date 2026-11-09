@@ -16,6 +16,22 @@ import (
 // KeySize is the length of an encryption key in bytes.
 const KeySize = 32
 
+// PublishedDevKey is the example key earlier versions shipped in
+// .env.example ("dev-only-dispatch-ops-key-32byte"). It is public, so it
+// must never encrypt anything: see CheckCurrentKey.
+const PublishedDevKey = "ZGV2LW9ubHktZGlzcGF0Y2gtb3BzLWtleS0zMmJ5dGU="
+
+// CheckCurrentKey refuses a key that is public knowledge as the key new
+// values are encrypted with. It may still be given as an old key, so values
+// encrypted with it can be read and re-encrypted.
+func CheckCurrentKey(key string) error {
+	if strings.TrimSpace(key) == PublishedDevKey {
+		return errors.New("DISPATCH_ENCRYPTION_KEY is the example key published in .env.example, so anyone can decrypt what it encrypts. " +
+			"Generate your own with `dispatch-ops gen-key`, and move this one to DISPATCH_OLD_ENCRYPTION_KEYS so values already encrypted with it can still be read")
+	}
+	return nil
+}
+
 // Keyring encrypts with the current key and decrypts with any known key, so
 // the key can be rotated: add the old key to the decrypt-only list, set a new
 // current key, and values are re-encrypted with it as they are next saved.

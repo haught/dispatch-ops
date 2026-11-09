@@ -245,6 +245,12 @@ func (h *Handlers) UpdateSchedule(ctx context.Context, req apigen.UpdateSchedule
 				return err
 			}
 		}
+		// Whoever changes what the schedule runs, or turns it back on (say,
+		// after it was disabled because its owner lost access), becomes its
+		// owner: it then runs with their access.
+		if b.Overrides != nil || (f.Enabled && !cur.Enabled) {
+			f.Owner = &caller(ctx).UserID
+		}
 		// Only a change of timing plans the next run afresh; otherwise a
 		// run that is due right now would be skipped.
 		if f.Cron != cur.Cron || f.Timezone != cur.Timezone || f.Enabled != cur.Enabled {

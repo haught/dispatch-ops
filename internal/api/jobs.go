@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -297,11 +296,10 @@ func (h *Handlers) RelaunchJob(ctx context.Context, req apigen.RelaunchJobReques
 	if j.Config.JobType == store.JobTypeInventorySync {
 		return h.relaunchSync(ctx, j, req.Body)
 	}
-	if err := h.authorizeRelaunch(ctx, j); err != nil {
+	cfg, overrides, err := h.relaunchConfig(ctx, j)
+	if err != nil {
 		return nil, err
 	}
-
-	cfg := j.Config
 	hosts := apigen.RelaunchRequestHostsAll
 	if req.Body != nil && req.Body.Hosts != nil {
 		hosts = *req.Body.Hosts
@@ -320,6 +318,7 @@ func (h *Handlers) RelaunchJob(ctx context.Context, req apigen.RelaunchJobReques
 
 	job, err := h.Store.CreateJob(ctx, store.NewJob{
 		TemplateID: j.TemplateID, Name: j.Name, LaunchType: "relaunch", LaunchedBy: &p.UserID, Config: cfg, RelaunchOf: &j.ID,
+		Overrides: overrides,
 	})
 	if err != nil {
 		return nil, err
@@ -356,40 +355,49 @@ func (h *Handlers) relaunchSync(ctx context.Context, j store.Job, body *apigen.R
 // execute on its template, and use on whatever the job used that the
 // template no longer references, since the job reruns with its own
 // configuration rather than the template's current one.
-func (h *Handlers) authorizeRelaunch(ctx context.Context, j store.Job) error {
+// relaunchConfig returns the config and overrides for relaunching job j.
+// A relaunch is a new launch of the job's template, as it is now, with the
+// overrides j was launched with: it needs execute on the template, the
+// template must still allow those overrides, and they pass the same checks
+// as at launch (use on an overridden inventory, no Jinja or ansible_* extra
+// vars). So a relaunch picks up the template's current project, credentials,
+// execution environment and command, and can't bring back what a template
+// admin has since changed or a launcher could no longer set.
+//
+// Jobs from before overrides were kept are relaunched without overrides.
+// A job whose template was deleted can only be relaunched by a system
+// admin, as it ran.
+func (h *Handlers) relaunchConfig(ctx context.Context, j store.Job) (store.JobConfig, *store.LaunchOverrides, error) {
 	p := caller(ctx)
-	if p.IsAdmin {
-		return nil
-	}
 	if j.TemplateID == nil {
-		return forbidden("The job's template was deleted; only system administrators can relaunch it")
+		if !p.IsAdmin {
+			return store.JobConfig{}, nil, forbidden("The job's template was deleted; only system administrators can relaunch it")
+		}
+		return j.Config, j.Overrides, nil
 	}
 	if err := h.authorize(ctx, rbac.JobTemplate, *j.TemplateID, rbac.Execute); err != nil {
-		return forbidden("Relaunching needs the execute role on the job's template")
+		return store.JobConfig{}, nil, forbidden("Relaunching needs the execute role on the job's template")
 	}
 	t, err := h.Store.GetJobTemplate(ctx, *j.TemplateID)
 	if err != nil {
-		return err
+		return store.JobConfig{}, nil, orNotFound(err, "Job template")
 	}
-	c := j.Config
-	if c.InventoryID != nil && (t.InventoryID == nil || *t.InventoryID != *c.InventoryID) {
-		if err := h.authorize(ctx, rbac.Inventory, *c.InventoryID, rbac.Use); err != nil {
-			return forbidden("The job ran against an inventory its template no longer uses; relaunching it needs the use role on that inventory")
-		}
+	var o store.LaunchOverrides
+	if j.Overrides != nil {
+		o = *j.Overrides
 	}
-	if c.Project != nil && (t.ProjectID == nil || *t.ProjectID != c.Project.ID) {
-		if err := h.authorize(ctx, rbac.Project, c.Project.ID, rbac.Use); err != nil {
-			return forbidden("The job ran from a project its template no longer uses; relaunching it needs the use role on that project")
-		}
+	if err := h.checkOverrideRefs(ctx, t, o); err != nil {
+		return store.JobConfig{}, nil, err
 	}
-	for _, id := range c.CredentialIDs {
-		if !slices.Contains(t.CredentialIDs, id) {
-			if err := h.authorize(ctx, rbac.Credential, id, rbac.Use); err != nil {
-				return forbidden("The job used a credential its template no longer uses; relaunching it needs the use role on that credential")
-			}
-		}
+	cfg, err := h.Store.ResolveJobConfig(ctx, t, o)
+	var le *store.LaunchError
+	if errors.As(err, &le) {
+		return store.JobConfig{}, nil, badRequest("the job can't be relaunched as it was launched: %s; launch the template instead", le.Msg)
 	}
-	return nil
+	if err != nil {
+		return store.JobConfig{}, nil, err
+	}
+	return cfg, &o, nil
 }
 
 // failedHostsLimit is the limit pattern selecting the hosts that failed or

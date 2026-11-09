@@ -1,5 +1,9 @@
-# Keeps the SHA-pinned GitHub Actions in .github/workflows current. Dependabot
-# updates the SHA and its "# vX.Y.Z" comment together.
+# Keeps pinned dependencies current. Dependabot updates a pinned SHA or
+# digest together with its "# vX.Y.Z" comment or tag.
+#   github-actions  the SHA-pinned actions in .github/workflows
+#   docker          the digest-pinned base images (FROM lines) of the release
+#                   images; ee-ansible's pip and Galaxy pins are ARGs in its
+#                   Dockerfile, which Dependabot can't see: bump those by hand
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -8,4 +12,13 @@ updates:
       interval: weekly
     groups:
       actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /images/runner-base
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
         patterns: ["*"]

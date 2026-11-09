@@ -1,0 +1,13 @@
+# Grype settings for the image scan in .github/workflows/ci.yml, which fails
+# on High or Critical vulnerabilities that have a fix available.
+#
+# To accept one (say, it's in code the image never runs, or the fix isn't
+# released for the base image yet), add it here with a reason and a date to
+# look again, e.g.:
+#
+# ignore:
+#   - vulnerability: CVE-2026-12345
+#     package:
+#       name: libexample
+#     # Not reachable: only used by a tool the image doesn't ship. Recheck 2027-01.
+ignore: []

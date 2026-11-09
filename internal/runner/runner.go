@@ -29,7 +29,7 @@ import (
 type Config struct {
 	APIURL string    // DISPATCH_API_URL
 	JobID  uuid.UUID // DISPATCH_JOB_ID
-	Token  string    // read from DISPATCH_JOB_TOKEN_FILE
+	Token  string    // from DISPATCH_JOB_TOKEN (see ConfigFromEnv)
 	// APICA holds PEM certificates to trust, besides the system's roots,
 	// when reaching the API (read from DISPATCH_API_CA_FILE).
 	APICA     []byte
@@ -64,13 +64,21 @@ func ConfigFromEnv(version string) (Config, error) {
 		errs = append(errs, fmt.Errorf("DISPATCH_JOB_ID is not a job ID: %q", os.Getenv("DISPATCH_JOB_ID")))
 	}
 	c.JobID = id
-	tokenFile := os.Getenv("DISPATCH_JOB_TOKEN_FILE")
-	if tokenFile == "" {
-		errs = append(errs, errors.New("DISPATCH_JOB_TOKEN_FILE is not set"))
-	} else if b, err := os.ReadFile(tokenFile); err != nil {
-		errs = append(errs, fmt.Errorf("read job token: %w", err))
+	// The token comes in DISPATCH_JOB_TOKEN, not a file the job's code could
+	// read (see Harden). It is removed from the environment at once; child
+	// processes never get DISPATCH_* variables anyway (see baseEnv).
+	// DISPATCH_JOB_TOKEN_FILE is for running the runner by hand.
+	if tok := os.Getenv(JobTokenEnv); tok != "" {
+		c.Token = strings.TrimSpace(tok)
+		_ = os.Unsetenv(JobTokenEnv)
+	} else if tokenFile := os.Getenv("DISPATCH_JOB_TOKEN_FILE"); tokenFile != "" {
+		if b, err := os.ReadFile(tokenFile); err != nil {
+			errs = append(errs, fmt.Errorf("read job token: %w", err))
+		} else {
+			c.Token = strings.TrimSpace(string(b))
+		}
 	} else {
-		c.Token = strings.TrimSpace(string(b))
+		errs = append(errs, errors.New(JobTokenEnv+" is not set"))
 	}
 	if caFile := os.Getenv("DISPATCH_API_CA_FILE"); caFile != "" {
 		if c.APICA, err = os.ReadFile(caFile); err != nil {
@@ -85,6 +93,9 @@ func ConfigFromEnv(version string) (Config, error) {
 	}
 	return c, errors.Join(errs...)
 }
+
+// JobTokenEnv carries the job's runner token into the runner.
+const JobTokenEnv = "DISPATCH_JOB_TOKEN"
 
 // Run runs the job. It returns an error only if the outcome could not be
 // reported; a failed command is a successfully reported failure.
@@ -474,9 +485,12 @@ type workspace struct {
 	dir     string // the working directory
 	secrets string // memory-backed in job pods; credentials go here
 	// env is the command's environment, pointing at the files below.
-	env        []string
-	inventory  string // the inventory file, or "" if the job has none
-	vars       string // the extra vars file
+	env       []string
+	inventory string // the inventory file, or "" if the job has none
+	vars      string // the extra vars file
+	// knownHosts is the machine credential's known_hosts file, or "" if it
+	// has none; with one, Ansible checks host keys against it.
+	knownHosts string
 	projectDir string // where the project is checked out, or "" if none
 	// ansibleEnv is extra environment for ansible-playbook: the search
 	// paths of the roles and collections installed from the project's
@@ -492,7 +506,8 @@ func (w *workspace) path(elem ...string) string {
 	return filepath.Join(append([]string{w.dir, ".dispatch"}, elem...)...)
 }
 
-// secret returns a path for runner-written secrets.
+// secret returns a path for runner-written secrets, on the memory-backed
+// secrets volume in job pods.
 func (w *workspace) secret(elem ...string) string {
 	return filepath.Join(append([]string{w.secrets, "runner"}, elem...)...)
 }
@@ -529,14 +544,16 @@ func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) (*workspace, error) {
 		set("DISPATCH_PROJECT_DIR", ws.projectDir)
 	}
 
+	// The inventory and extra vars often hold secrets (host vars, passwords
+	// in vars), so they go on the memory-backed secrets volume, not disk.
 	if spec.Inventory != nil {
-		ws.inventory = filepath.Join(ws.dir, "inventory.json")
+		ws.inventory = filepath.Join(ws.secrets, "inventory.json")
 		if err := writeJSON(ws.inventory, spec.Inventory, 0o600); err != nil {
 			return nil, err
 		}
 		set("DISPATCH_INVENTORY", ws.inventory)
 	}
-	ws.vars = filepath.Join(ws.dir, "vars.json")
+	ws.vars = filepath.Join(ws.secrets, "vars.json")
 	if err := writeJSON(ws.vars, spec.ExtraVars, 0o600); err != nil {
 		return nil, err
 	}

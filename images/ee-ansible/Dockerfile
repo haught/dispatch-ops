@@ -20,11 +20,19 @@ USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv git openssh-client sshpass \
     && rm -rf /var/lib/apt/lists/*
+# Pinned, so a rebuild gives the same image; bump these deliberately.
 ARG ANSIBLE_CORE_VERSION=2.22.0
+ARG REQUESTS_VERSION=2.34.2
+ARG NETADDR_VERSION=1.3.0
+ARG ANSIBLE_POSIX_VERSION=2.2.2
+ARG COMMUNITY_GENERAL_VERSION=14.0.0
+ARG ANSIBLE_UTILS_VERSION=6.1.1
 RUN python3 -m venv /opt/ansible \
-    && /opt/ansible/bin/pip install --no-cache-dir "ansible-core==${ANSIBLE_CORE_VERSION}" requests netaddr \
+    && /opt/ansible/bin/pip install --no-cache-dir "ansible-core==${ANSIBLE_CORE_VERSION}" \
+        "requests==${REQUESTS_VERSION}" "netaddr==${NETADDR_VERSION}" \
     && /opt/ansible/bin/ansible-galaxy collection install -p /usr/share/ansible/collections \
-        ansible.posix community.general ansible.utils
+        "ansible.posix:==${ANSIBLE_POSIX_VERSION}" "community.general:==${COMMUNITY_GENERAL_VERSION}" \
+        "ansible.utils:==${ANSIBLE_UTILS_VERSION}"
 ENV PATH=/opt/ansible/bin:$PATH \
     DISPATCH_EE_PIP=/opt/ansible/bin/pip \
     DISPATCH_EE_COLLECTIONS=/usr/share/ansible/collections \

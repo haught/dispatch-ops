@@ -37,6 +37,9 @@ type Config struct {
 	SecureCookies bool
 	// SessionTTL is how long a browser session lasts (DISPATCH_SESSION_TTL).
 	SessionTTL time.Duration
+	// JobMaxOutput caps the output one job may store, in bytes
+	// (DISPATCH_JOB_MAX_OUTPUT, default 256Mi); 0 means no cap.
+	JobMaxOutput int64
 	// AutoMigrate applies pending migrations when the server starts
 	// (DISPATCH_AUTO_MIGRATE).
 	AutoMigrate bool
@@ -225,6 +228,9 @@ func Load() (Config, error) {
 	collect(err)
 	c.SessionTTL, err = getduration("DISPATCH_SESSION_TTL", 12*time.Hour)
 	collect(err)
+	maxOutput, err := getquantity("DISPATCH_JOB_MAX_OUTPUT", "256Mi")
+	c.JobMaxOutput = maxOutput.Value()
+	collect(err)
 	c.Login.Window, err = getduration("DISPATCH_LOGIN_THROTTLE_WINDOW", 15*time.Minute)
 	collect(err)
 	c.Login.MaxPerUsername, err = getint("DISPATCH_LOGIN_MAX_FAILURES_PER_USER", 10)
@@ -313,6 +319,9 @@ func Load() (Config, error) {
 func (c Config) Keyring() (*secrets.Keyring, error) {
 	if c.EncryptionKey == "" {
 		return nil, errors.New("DISPATCH_ENCRYPTION_KEY is required; generate one with `dispatch-ops gen-key`")
+	}
+	if err := secrets.CheckCurrentKey(c.EncryptionKey); err != nil {
+		return nil, err
 	}
 	return secrets.NewKeyring(c.EncryptionKey, c.OldEncryptionKeys...)
 }

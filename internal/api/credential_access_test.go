@@ -90,7 +90,7 @@ func TestRelaunchRefusesFileLimits(t *testing.T) {
 	host := "@/runner/secrets/credentials.json"
 	if _, err := e.st.AppendJobEvents(ctx, j.ID, []store.JobEvent{
 		{Seq: 1, Time: time.Now(), Type: "host_failed", HostName: &host},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.st.FinishJob(ctx, j.ID, store.JobFailed, new(2), "", ""); err != nil {

@@ -1076,10 +1076,16 @@ export interface paths {
         put?: never;
         /**
          * Run a job again
-         * @description Queues a new job with the same configuration as this one (the same
-         *     resolved template, overrides, image and project ref), whether or not
-         *     the template has changed since. With `hosts: failed`, an Ansible job
-         *     is rerun only against the hosts that failed or were unreachable.
+         * @description Launches the job's template again, as it is now, with the launch
+         *     overrides this job was started with. It needs the execute role on
+         *     the template, the template must still allow those overrides, and
+         *     they are checked as at launch (400 otherwise). So a relaunch uses
+         *     the template's current project, credentials, execution environment
+         *     and command. Jobs from before overrides were recorded are relaunched
+         *     without overrides. A job whose template was deleted can only be
+         *     relaunched by a system administrator, with its original
+         *     configuration. With `hosts: failed`, an Ansible job is rerun only
+         *     against the hosts that failed or were unreachable.
          */
         post: operations["relaunchJob"];
         delete?: never;
@@ -2391,6 +2397,15 @@ export interface components {
             lastJobId: string | null;
             /** @description Why the last run could not launch a job (empty if it did) */
             lastError: string;
+            /**
+             * @description The schedule's owner: whoever created it, or last changed its
+             *     overrides or turned it back on. Each run launches with the
+             *     owner's current access; if the owner was deleted or deactivated,
+             *     or lost the execute role on the template (use on an overridden
+             *     inventory, or admin on a synced inventory), the run is refused
+             *     and the schedule disabled, with the reason in `lastError`.
+             *     Re-enabling it makes the caller its owner.
+             */
             createdBy: components["schemas"]["UserRef"] | null;
             /** Format: date-time */
             createdAt: string;
@@ -2969,10 +2984,7 @@ export interface operations {
             };
             header?: never;
             path?: never;
-            cookie?: {
-                /** @description The login state set by `GET /api/v1/auth/oidc/login` */
-                dispatch_oidc?: string;
-            };
+            cookie?: never;
         };
         requestBody?: never;
         responses: {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -111,6 +112,9 @@ type Job struct {
 	RelaunchOf *uuid.UUID
 	// The inventory an inventory_sync job syncs, if it still exists.
 	SyncInventoryID *uuid.UUID
+	// Overrides are the launch overrides the job was started with; nil for
+	// jobs from before they were kept, and for inventory syncs.
+	Overrides *LaunchOverrides
 }
 
 // ScheduleRef identifies a schedule.
@@ -123,7 +127,7 @@ const jobColumns = `j.id, j.job_template_id, j.name, j.status, j.launch_type, j.
 	j.config, j.cancel_requested, j.cancel_requested_at, j.exit_code, j.failure_reason,
 	j.k8s_namespace, j.k8s_job_name, j.runner_version, j.scm_revision,
 	j.created_at, j.dispatched_at, j.started_at, j.finished_at, j.last_heartbeat_at,
-	j.schedule_id, sc.name, j.relaunch_of, j.sync_inventory_id`
+	j.schedule_id, sc.name, j.relaunch_of, j.sync_inventory_id, j.overrides`
 
 const jobFrom = `jobs j LEFT JOIN users u ON u.id = j.launched_by LEFT JOIN schedules sc ON sc.id = j.schedule_id`
 
@@ -141,7 +145,7 @@ func (j *jobRow) scanTargets() []any {
 		&j.Config, &j.CancelRequested, &j.CancelRequestedAt, &j.ExitCode, &j.FailureReason,
 		&j.K8sNamespace, &j.K8sJobName, &j.RunnerVersion, &j.ScmRevision,
 		&j.CreatedAt, &j.DispatchedAt, &j.StartedAt, &j.FinishedAt, &j.LastHeartbeatAt,
-		&j.scheduleID, &j.scheduleName, &j.RelaunchOf, &j.SyncInventoryID}
+		&j.scheduleID, &j.scheduleName, &j.RelaunchOf, &j.SyncInventoryID, &j.Overrides}
 }
 
 func (j *jobRow) job() Job {
@@ -171,6 +175,9 @@ type NewJob struct {
 	RelaunchOf *uuid.UUID
 	// SyncInventoryID is the inventory an inventory_sync job syncs.
 	SyncInventoryID *uuid.UUID
+	// Overrides are the launch overrides Config was resolved with, kept so
+	// a relaunch can resolve them again against the current template.
+	Overrides *LaunchOverrides
 }
 
 // CreateJob queues a job as pending.
@@ -185,9 +192,9 @@ func (s *Store) CreateJob(ctx context.Context, in NewJob) (Job, error) {
 func createJob(ctx context.Context, db querier, in NewJob) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := db.QueryRow(ctx, `
-		INSERT INTO jobs (job_template_id, name, launch_type, launched_by, config, schedule_id, relaunch_of, sync_inventory_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-		in.TemplateID, in.Name, in.LaunchType, in.LaunchedBy, in.Config, in.ScheduleID, in.RelaunchOf, in.SyncInventoryID).Scan(&id)
+		INSERT INTO jobs (job_template_id, name, launch_type, launched_by, config, schedule_id, relaunch_of, sync_inventory_id, overrides)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+		in.TemplateID, in.Name, in.LaunchType, in.LaunchedBy, in.Config, in.ScheduleID, in.RelaunchOf, in.SyncInventoryID, in.Overrides).Scan(&id)
 	if err != nil {
 		return uuid.Nil, mapErr(err)
 	}
@@ -486,19 +493,36 @@ type JobEvent struct {
 	Data     map[string]any
 }
 
+// recapAllowance is how far past the output cap a job's Ansible recap
+// (playbook_stats events) may still be stored, so its per-host results
+// survive a truncated log without letting a job bypass the cap.
+const recapAllowance = 16 << 20
+
 // AppendJobEvents stores events for a running job, skipping any whose seq is
 // already stored, and notifies stream listeners. It also counts as a
 // heartbeat, and reports whether the job should be canceled.
-func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobEvent) (cancelRequested bool, err error) {
-	n := len(events)
-	seqs, times := make([]int64, n), make([]time.Time, n)
-	types, hosts, stdouts, data := make([]string, n), make([]*string, n), make([]string, n), make([]*string, n)
+//
+// maxOutput, if positive, caps the bytes of output a job may store (stdout,
+// host name and data of its events). The event that would cross it is
+// replaced by a runner event saying so; later events are dropped, except
+// the recap, within recapAllowance. The job keeps running.
+func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobEvent, maxOutput int64) (cancelRequested bool, err error) {
+	type row struct {
+		seq    int64
+		at     time.Time
+		typ    string
+		host   *string
+		stdout string
+		data   *string
+		size   int64
+	}
+	all := make([]row, len(events))
 	for i, e := range events {
-		seqs[i], times[i], types[i], hosts[i] = e.Seq, e.Time, e.Type, e.HostName
-		stdouts[i] = stripNUL(e.Stdout)
-		if hosts[i] != nil {
-			h := stripNUL(*hosts[i])
-			hosts[i] = &h
+		r := row{seq: e.Seq, at: e.Time, typ: e.Type, stdout: stripNUL(e.Stdout)}
+		if e.HostName != nil {
+			h := stripNUL(*e.HostName)
+			r.host = &h
+			r.size += int64(len(h))
 		}
 		if e.Data != nil {
 			b, err := json.Marshal(e.Data)
@@ -507,19 +531,71 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 			}
 			// PostgreSQL's jsonb rejects the NUL escape.
 			d := strings.ReplaceAll(string(b), `\u0000`, ``)
-			data[i] = &d
+			r.data = &d
+			r.size += int64(len(d))
 		}
+		r.size += int64(len(r.stdout))
+		all[i] = r
 	}
 
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		var used int64
+		var truncated bool
 		err := tx.QueryRow(ctx, `
 			UPDATE jobs SET last_heartbeat_at = now() WHERE id = $1 AND status = 'running'
-			RETURNING cancel_requested`, id).Scan(&cancelRequested)
+			RETURNING cancel_requested, output_bytes, output_truncated`, id).Scan(&cancelRequested, &used, &truncated)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrJobState
 		}
 		if err != nil {
 			return err
+		}
+
+		keep := all
+		if maxOutput > 0 {
+			// A retried batch's events are already stored; don't count them twice.
+			seqs := make([]int64, len(all))
+			for i, r := range all {
+				seqs[i] = r.seq
+			}
+			rows, err := tx.Query(ctx, `SELECT seq FROM job_events WHERE job_id = $1 AND seq = ANY($2)`, id, seqs)
+			if err != nil {
+				return err
+			}
+			stored, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+			if err != nil {
+				return err
+			}
+			wasTruncated := truncated
+			keep = make([]row, 0, len(all))
+			for _, r := range all {
+				switch {
+				case slices.Contains(stored, r.seq):
+				case r.typ == "playbook_stats" && used+r.size <= maxOutput+recapAllowance:
+					keep, used = append(keep, r), used+r.size
+				case truncated:
+				case used+r.size > maxOutput:
+					truncated = true
+					keep = append(keep, row{seq: r.seq, at: r.at, typ: "runner", stdout: fmt.Sprintf(
+						"This job's output reached the limit of %s; later output is not kept (the job keeps running)", formatBytes(maxOutput))})
+				default:
+					keep, used = append(keep, r), used+r.size
+				}
+			}
+			if _, err := tx.Exec(ctx, `UPDATE jobs SET output_bytes = $2, output_truncated = $3 WHERE id = $1`,
+				id, used, truncated || wasTruncated); err != nil {
+				return err
+			}
+		}
+		if len(keep) == 0 {
+			return nil
+		}
+
+		n := len(keep)
+		seqs, times := make([]int64, n), make([]time.Time, n)
+		types, hosts, stdouts, data := make([]string, n), make([]*string, n), make([]string, n), make([]*string, n)
+		for i, r := range keep {
+			seqs[i], times[i], types[i], hosts[i], stdouts[i], data[i] = r.seq, r.at, r.typ, r.host, r.stdout, r.data
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO job_events (job_id, seq, created_at, event_type, host_name, stdout, data)
@@ -534,6 +610,24 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 		return err
 	})
 	return cancelRequested, err
+}
+
+// formatBytes formats n bytes in binary units, e.g. "256 MiB".
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d bytes", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit && exp < 4; m /= unit {
+		div *= unit
+		exp++
+	}
+	v := float64(n) / float64(div)
+	if v == float64(int64(v)) {
+		return fmt.Sprintf("%d %ciB", int64(v), "KMGTP"[exp])
+	}
+	return fmt.Sprintf("%.1f %ciB", v, "KMGTP"[exp])
 }
 
 func stripNUL(s string) string {

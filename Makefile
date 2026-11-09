@@ -40,8 +40,11 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: setup-env
-setup-env: ## Create .env from .env.example
-	@test -f .env && echo ".env already exists" || cp .env.example .env
+setup-env: ## Create .env from .env.example, with a new encryption key
+	@test -f .env && echo ".env already exists" || \
+		{ key=$$(go run ./cmd/dispatch-ops gen-key) && \
+		  sed "s|^DISPATCH_ENCRYPTION_KEY=.*|DISPATCH_ENCRYPTION_KEY=$$key|" .env.example > .env && \
+		  echo "created .env with a new DISPATCH_ENCRYPTION_KEY"; }
 
 .PHONY: deps
 deps: ## Install Go and npm dependencies

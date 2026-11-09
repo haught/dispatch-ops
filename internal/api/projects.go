@@ -29,7 +29,7 @@ func checkScmURL(u string) error {
 	if scheme, _, ok := strings.Cut(u, "://"); ok {
 		for _, s := range scmSchemes {
 			if strings.EqualFold(scheme, s) {
-				return nil
+				return checkScmUserinfo(u)
 			}
 		}
 		return badRequest("scmUrl: the %q scheme is not supported; use %s, or scp-like git@host:path",
@@ -40,6 +40,47 @@ func checkScmURL(u string) error {
 	}
 	return badRequest("scmUrl: %q is not a git URL; use %s://…, or scp-like git@host:path",
 		u, strings.Join(scmSchemes, "://…, "))
+}
+
+// checkScmUserinfo refuses a secret in a repository URL, where everyone who
+// can read the project (or a job that used it) would see it: a password in
+// any URL, and for HTTP(S) any user info at all, since tokens are commonly
+// given as the user name (https://<token>@host/...). A user name alone is
+// fine for SSH (ssh://git@host/...). Secrets belong in an scm credential.
+func checkScmUserinfo(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return nil
+	}
+	_, hasPassword := u.User.Password()
+	httpish := strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")
+	if hasPassword || (httpish && u.User.Username() != "") {
+		return badRequest("scmUrl: don't put a user name, password or token in the URL, where everyone who can read the project sees it; " +
+			"use an scm credential on the project instead")
+	}
+	return nil
+}
+
+// redactScmURL hides user info that may be a secret in a repository URL
+// stored before checkScmUserinfo existed: a password, or any HTTP(S) user
+// name. Saving the redacted URL back is refused, so the secret has to move
+// to a credential.
+func redactScmURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil || !strings.Contains(raw, "://") {
+		return raw
+	}
+	_, hasPassword := u.User.Password()
+	httpish := strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")
+	switch {
+	case httpish:
+		u.User = url.User("REDACTED")
+	case hasPassword:
+		u.User = url.UserPassword(u.User.Username(), "REDACTED")
+	default:
+		return raw
+	}
+	return u.String()
 }
 
 // scmOrigin is where git sends a credential for the repository URL u: its
@@ -223,7 +264,7 @@ func (h *Handlers) DeleteProject(ctx context.Context, req apigen.DeleteProjectRe
 
 func toAPIProject(p store.Project) apigen.Project {
 	return apigen.Project{
-		Id: p.ID, Name: p.Name, Description: p.Description, ScmUrl: p.ScmURL, ScmRef: p.ScmRef,
+		Id: p.ID, Name: p.Name, Description: p.Description, ScmUrl: redactScmURL(p.ScmURL), ScmRef: p.ScmRef,
 		CredentialId: p.CredentialID, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
 	}
 }

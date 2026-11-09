@@ -1,7 +1,8 @@
 # Publishes a release when a vX.Y.Z tag is pushed:
 #
 #   verify   the tag must point at a commit on main, and the full CI suite
-#            (ci.yml) must pass on it; nothing is published otherwise
+#            (ci.yml), including the image vulnerability scan, must pass on
+#            it; nothing is published otherwise
 #   images   every image to ghcr.io/<owner>/<repo>/<name> for amd64 and arm64,
 #            tagged X.Y.Z, X.Y and latest (a prerelease, vX.Y.Z-rc.1, only
 #            gets its own tag), each signed with cosign (keyless)

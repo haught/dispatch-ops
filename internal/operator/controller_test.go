@@ -1,8 +1,6 @@
 package operator
 
 import (
-	"time"
-
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -11,6 +9,7 @@ import (
 	"encoding/pem"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -28,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"dispatch-ops/internal/operator/api/v1alpha1"
+	"dispatch-ops/internal/tlscert"
 )
 
 const ns = "ops"
@@ -474,9 +474,8 @@ func TestAPIServesTLS(t *testing.T) {
 	if v, _ := envValue(tc, "DISPATCH_RUNNER_API_TLS_DIR"); v.Value != "/var/run/dispatch-ops/api-tls" {
 		t.Errorf("DISPATCH_RUNNER_API_TLS_DIR = %q", v.Value)
 	}
-	if vols := tm.Spec.Template.Spec.Volumes; len(vols) != 1 || vols[0].Secret.SecretName != "dops-api-tls" {
-		t.Errorf("task manager volumes = %+v", vols)
-	}
+	// L7: the task manager gets the certificate to trust, never the key.
+	checkTrustVolume(t, tm.Spec.Template.Spec.Volumes, "dops-api-tls")
 
 	var svc corev1.Service
 	e.get("dops-api", &svc)
@@ -501,9 +500,172 @@ func TestAPIServesTLS(t *testing.T) {
 	e.reconcile()
 	e.get("dops-api", &api)
 	e.get("dops-task-manager", &tm)
-	if api.Spec.Template.Spec.Volumes[0].Secret.SecretName != "from-cert-manager" ||
-		tm.Spec.Template.Spec.Volumes[0].Secret.SecretName != "from-cert-manager" {
-		t.Errorf("volumes don't use the given Secret: %+v / %+v", api.Spec.Template.Spec.Volumes, tm.Spec.Template.Spec.Volumes)
+	if api.Spec.Template.Spec.Volumes[0].Secret.SecretName != "from-cert-manager" {
+		t.Errorf("API volumes don't use the given Secret: %+v", api.Spec.Template.Spec.Volumes)
+	}
+	checkTrustVolume(t, tm.Spec.Template.Spec.Volumes, "from-cert-manager")
+}
+
+// checkTrustVolume checks that vols is only the public half of the API
+// certificate Secret: tls.crt required, ca.crt optional (a certificate from
+// a public CA may have none), and no tls.key.
+func checkTrustVolume(t *testing.T, vols []corev1.Volume, secret string) {
+	t.Helper()
+	if len(vols) != 1 || vols[0].Projected == nil || vols[0].Secret != nil {
+		t.Fatalf("task manager volumes = %+v, want one projected volume", vols)
+	}
+	keys := map[string]bool{}
+	for _, src := range vols[0].Projected.Sources {
+		if src.Secret == nil || src.Secret.Name != secret {
+			t.Errorf("projection %+v isn't Secret %s", src, secret)
+			continue
+		}
+		optional := src.Secret.Optional != nil && *src.Secret.Optional
+		for _, it := range src.Secret.Items {
+			keys[it.Key] = true
+			if want := it.Key == "ca.crt"; optional != want {
+				t.Errorf("%s optional = %v, want %v", it.Key, optional, want)
+			}
+		}
+	}
+	if !keys["tls.crt"] || !keys["ca.crt"] || keys["tls.key"] || len(keys) != 2 {
+		t.Errorf("task manager mounts keys %v, want tls.crt and ca.crt only", keys)
+	}
+}
+
+// L11: generated certificates are renewed before they expire and when the
+// names they must cover change; the database restarts onto its new one.
+// Certificates you provide are never touched.
+func TestGeneratedCertificatesRenew(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{ExternalURL: "https://dispatch.example.com"}})
+	e.deploy()
+	e.deploymentsAvailable()
+	if res, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err != nil || res.RequeueAfter != certRecheck {
+		t.Errorf("ready reconcile = %+v, %v; want a requeue after %s for renewal", res, err, certRecheck)
+	}
+
+	certOf := func(name string) (*x509.Certificate, corev1.Secret) {
+		t.Helper()
+		var s corev1.Secret
+		if !e.get(name, &s) {
+			t.Fatalf("no Secret %s", name)
+		}
+		block, _ := pem.Decode(s.Data["tls.crt"])
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cert, s
+	}
+	stsHash := func() string {
+		var sts appsv1.StatefulSet
+		e.get("dops-postgres", &sts)
+		return sts.Spec.Template.Annotations[postgresCertAnnotation]
+	}
+
+	api, _ := certOf("dops-api-tls")
+	if d := time.Until(api.NotAfter); d > selfSignedValidity || d < selfSignedValidity-48*time.Hour {
+		t.Errorf("certificate valid for %s, want about %s", d, selfSignedValidity)
+	}
+	db, dbSecret := certOf("dops-postgres-tls")
+	if h := stsHash(); h == "" || h != certHash(&dbSecret) {
+		t.Errorf("database pod cert annotation = %q, want %q", h, certHash(&dbSecret))
+	}
+
+	// Nothing to do: the same certificates.
+	e.reconcile()
+	if again, _ := certOf("dops-api-tls"); again.SerialNumber.Cmp(api.SerialNumber) != 0 {
+		t.Error("renewed a certificate that didn't need it")
+	}
+
+	// Close to expiry: renewed, and the database rolls.
+	expiring := func(name string, hosts []string) {
+		t.Helper()
+		certPEM, keyPEM, err := tlscert.SelfSigned(hosts, renewBefore-time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, s := certOf(name)
+		s.Data = map[string][]byte{"tls.crt": certPEM, "tls.key": keyPEM, "ca.crt": certPEM}
+		if err := e.c.Update(e.ctx, &s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	in := install{DispatchOps: e.cr()}
+	expiring("dops-postgres-tls", in.postgresCertHosts())
+	e.reconcile()
+	renewed, s := certOf("dops-postgres-tls")
+	if renewed.SerialNumber.Cmp(db.SerialNumber) == 0 || time.Until(renewed.NotAfter) < renewBefore {
+		t.Errorf("database certificate not renewed: expires %s", renewed.NotAfter)
+	}
+	if _, err := tls.X509KeyPair(s.Data["tls.crt"], s.Data["tls.key"]); err != nil {
+		t.Errorf("renewed key pair: %v", err)
+	}
+	if h := stsHash(); h != certHash(&s) {
+		t.Errorf("database pod cert annotation = %q, want the renewed %q", h, certHash(&s))
+	}
+
+	// A new public name: the API certificate is reissued to cover it.
+	cur := e.cr()
+	cur.Spec.ExternalURL = "https://ops.example.org"
+	if err := e.c.Update(e.ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	if c, _ := certOf("dops-api-tls"); c.VerifyHostname("ops.example.org") != nil {
+		t.Errorf("API certificate not reissued for the new name: %v", c.DNSNames)
+	}
+
+	// A Secret the operator didn't generate is left alone, even expiring.
+	_, s = certOf("dops-api-tls")
+	delete(s.Annotations, generatedAnnotation)
+	if err := e.c.Update(e.ctx, &s); err != nil {
+		t.Fatal(err)
+	}
+	expiring("dops-api-tls", install{DispatchOps: e.cr()}.apiCertHosts())
+	before, _ := certOf("dops-api-tls")
+	e.reconcile()
+	if after, _ := certOf("dops-api-tls"); after.SerialNumber.Cmp(before.SerialNumber) != 0 {
+		t.Error("renewed a certificate Secret the operator didn't generate")
+	}
+}
+
+// L11: once the first migration has created the administrator, their
+// password Secret may be deleted: it isn't made again, and later upgrades
+// migrate without it.
+func TestAdminPasswordSecretMayBeDeleted(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{})
+	e.deploy()
+	var admin corev1.Secret
+	if !e.get("dops-admin-password", &admin) {
+		t.Fatal("no admin password Secret")
+	}
+	if err := e.c.Delete(e.ctx, &admin); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	if e.get("dops-admin-password", &admin) {
+		t.Error("admin password Secret made again after the administrator was created")
+	}
+
+	cur := e.cr()
+	cur.Spec.Image = "dispatch-ops:2.0"
+	if err := e.c.Update(e.ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	var job batchv1.Job
+	if !e.get(install{DispatchOps: e.cr()}.migrationJobName("dispatch-ops:2.0"), &job) {
+		t.Fatal("no migration job for the upgrade")
+	}
+	pod := job.Spec.Template.Spec
+	if len(pod.InitContainers) != 0 || len(pod.Containers) != 1 || pod.Containers[0].Name != "migrate" || len(pod.Volumes) != 0 {
+		t.Errorf("upgrade migration without the admin Secret = init %+v, containers %+v, volumes %+v",
+			pod.InitContainers, pod.Containers, pod.Volumes)
+	}
+	e.finishMigration("dispatch-ops:2.0", true)
+	if cr := e.reconcile(); cr.Status.Image != "dispatch-ops:2.0" {
+		t.Errorf("status image = %s after the upgrade", cr.Status.Image)
 	}
 }
 
@@ -894,6 +1056,25 @@ func TestDatabaseURLMovesToTLS(t *testing.T) {
 	}
 	if api.Spec.Template.Annotations["prometheus.io/scrape"] != "true" {
 		t.Errorf("annotations = %v", api.Spec.Template.Annotations)
+	}
+}
+
+func TestMaxJobOutput(t *testing.T) {
+	limit := resource.MustParse("1Gi")
+	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{API: v1alpha1.APISpec{MaxJobOutput: &limit}}})
+	e.deploy()
+	var api appsv1.Deployment
+	e.get("dops-api", &api)
+	if v, _ := envValue(api.Spec.Template.Spec.Containers[0], "DISPATCH_JOB_MAX_OUTPUT"); v.Value != "1Gi" {
+		t.Errorf("DISPATCH_JOB_MAX_OUTPUT = %q", v.Value)
+	}
+
+	// Unset by default, so the server's own default applies.
+	e = newEnv(t, &v1alpha1.DispatchOps{})
+	e.deploy()
+	e.get("dops-api", &api)
+	if v, ok := envValue(api.Spec.Template.Spec.Containers[0], "DISPATCH_JOB_MAX_OUTPUT"); ok {
+		t.Errorf("DISPATCH_JOB_MAX_OUTPUT = %q without maxJobOutput", v.Value)
 	}
 }
 

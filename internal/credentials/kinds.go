@@ -47,11 +47,13 @@ var Kinds = []Kind{
 		{Name: "private_key", Label: "Private key", Secret: true, Required: true, Multiline: true},
 		{Name: "passphrase", Label: "Key passphrase", Secret: true},
 		{Name: "become_password", Label: "Become (sudo) password", Secret: true},
+		{Name: "known_hosts", Label: "Known hosts (optional; checks host keys)", Multiline: true, Destination: true},
 	}},
 	{Name: "username_password", Label: "Username and password", Fields: []Field{
 		{Name: "username", Label: "Username", Required: true},
 		{Name: "password", Label: "Password", Secret: true, Required: true},
 		{Name: "become_password", Label: "Become (sudo) password", Secret: true},
+		{Name: "known_hosts", Label: "Known hosts (optional; checks host keys)", Multiline: true, Destination: true},
 	}},
 	{Name: "api_token", Label: "API token", Fields: []Field{
 		{Name: "url", Label: "API URL", Destination: true},
@@ -67,6 +69,7 @@ var Kinds = []Kind{
 		{Name: "password", Label: "Password or token", Secret: true},
 		{Name: "private_key", Label: "SSH private key", Secret: true, Multiline: true},
 		{Name: "passphrase", Label: "Key passphrase", Secret: true},
+		{Name: "known_hosts", Label: "Known hosts (optional; checks host keys)", Multiline: true, Destination: true},
 	}},
 	{Name: "vault", Label: "Ansible Vault password", Fields: []Field{
 		{Name: "vault_id", Label: "Vault ID (optional)", Pattern: vaultID,

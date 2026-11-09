@@ -25,9 +25,8 @@ const (
 
 // Paths inside job pods. The runner reads these from its environment.
 const (
-	tokenDir     = "/var/run/dispatch-ops"
-	tokenFile    = tokenDir + "/token"
-	apiCAFile    = tokenDir + "/ca.crt"
+	caDir        = "/var/run/dispatch-ops"
+	apiCAFile    = caDir + "/ca.crt"
 	workDir      = "/runner"
 	secretsDir   = workDir + "/secrets"
 	containerApp = "runner"
@@ -96,8 +95,11 @@ func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.J
 	// manager's reconcile loop fail to stop the job.
 	deadline := int64(job.Config.TimeoutSeconds) + int64(cfg.StartTimeout.Seconds()) + 300
 	ttl := int32(cfg.JobTTL.Seconds())
-	tokenMode := int32(0o444) // the image's (non-root) user must be able to read it
-	secretsSize := resource.MustParse("16Mi")
+	caMode := int32(0o444) // the image's (non-root) user must be able to read it
+	// Credentials, plus the job's inventory and extra vars, which can hold
+	// secrets too; an inventory report is at most 32 MiB. Memory-backed, so
+	// it counts against the job's memory limit only as far as it is used.
+	secretsSize := resource.MustParse("64Mi")
 	var workSize *resource.Quantity
 	if !cfg.JobWorkSizeLimit.IsZero() {
 		workSize = new(cfg.JobWorkSizeLimit.DeepCopy())
@@ -119,11 +121,16 @@ func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.J
 			Env: []corev1.EnvVar{
 				{Name: "DISPATCH_JOB_ID", Value: id},
 				{Name: "DISPATCH_API_URL", Value: cfg.RunnerAPIURL},
-				{Name: "DISPATCH_JOB_TOKEN_FILE", Value: tokenFile},
+				// An environment variable, not a mounted file: the job's code
+				// runs as the runner's user, so it could read any file the
+				// runner can, but the runner's environment is hidden from it
+				// once the runner makes itself non-dumpable (runner.Harden).
+				{Name: "DISPATCH_JOB_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: tokenSecretName(id)}, Key: "token",
+				}}},
 				{Name: "DISPATCH_WORKDIR", Value: workDir},
 			},
 			VolumeMounts: []corev1.VolumeMount{
-				{Name: "token", MountPath: tokenDir, ReadOnly: true},
 				{Name: "work", MountPath: workDir},
 				{Name: "secrets", MountPath: secretsDir},
 			},
@@ -133,11 +140,11 @@ func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.J
 			},
 			// So one job can't starve the node of CPU or memory.
 			Resources: *cfg.JobResources.DeepCopy(),
+			// A runner that fails before it reaches the API (say, one too old
+			// for this task manager) explains itself in the job's failure.
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		}},
 		Volumes: []corev1.Volume{
-			{Name: "token", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-				SecretName: tokenSecretName(id), DefaultMode: &tokenMode,
-			}}},
 			// Capped, so one job can't fill the node's disk.
 			{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: workSize}}},
 			// Credentials are written here, in memory, never to the node's disk.
@@ -147,8 +154,14 @@ func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.J
 		},
 	}
 	if withCA {
+		// Only the certificates, never the token, from the job's Secret.
 		c := &pod.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: "DISPATCH_API_CA_FILE", Value: apiCAFile})
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "api-ca", MountPath: caDir, ReadOnly: true})
+		pod.Volumes = append(pod.Volumes, corev1.Volume{Name: "api-ca", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: tokenSecretName(id), DefaultMode: &caMode,
+			Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+		}}})
 	}
 	if withPullSecret {
 		pod.ImagePullSecrets = []corev1.LocalObjectReference{{Name: pullSecretName(id)}}

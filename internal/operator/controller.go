@@ -82,6 +82,11 @@ type Reconciler struct {
 // another namespace re-checks that the namespace still allows it.
 const jobNamespaceRecheck = 5 * time.Minute
 
+// certRecheck is how often a ready installation is reconciled anyway, so
+// generated certificates are renewed (well within renewBefore of expiry)
+// even when nothing else changes.
+const certRecheck = 12 * time.Hour
+
 // SetupWithManager registers the reconciler and what it watches.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -188,7 +193,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// notice a namespace's opt-in label being removed.
 		return ctrl.Result{RequeueAfter: jobNamespaceRecheck}, nil
 	}
-	return ctrl.Result{}, nil
+	// Nothing else may happen to a ready installation for months; this is
+	// when its generated certificates get renewed.
+	return ctrl.Result{RequeueAfter: certRecheck}, nil
 }
 
 type setCondition func(t string, ok bool, reason, msg string)
@@ -239,7 +246,8 @@ func randomString(n int) string {
 }
 
 // ensureSecrets creates the Secrets the operator generates if they don't
-// exist. They have no owner, so deleting the DispatchOps keeps them.
+// exist, and renews the certificates among them. They have no owner, so
+// deleting the DispatchOps keeps them.
 func (r *Reconciler) ensureSecrets(ctx context.Context, in install) error {
 	var want []*corev1.Secret
 	if in.Spec.EncryptionKeySecret == nil {
@@ -248,7 +256,10 @@ func (r *Reconciler) ensureSecrets(ctx context.Context, in install) error {
 		want = append(want, in.generatedSecret("encryption-key", in.encryptionKeySecretName(),
 			map[string]string{"key": base64.StdEncoding.EncodeToString(key)}))
 	}
-	if in.Spec.Admin.PasswordSecret == nil {
+	// The administrator's initial password is only needed until the first
+	// migration has created them; after that the Secret may be deleted (as
+	// the README recommends) and isn't made again.
+	if in.Spec.Admin.PasswordSecret == nil && in.Status.Image == "" {
 		sel := in.adminPasswordSecret()
 		want = append(want, in.generatedSecret("admin", sel.Name,
 			map[string]string{"username": in.Spec.Admin.Username, sel.Key: randomString(12)}))
@@ -265,14 +276,43 @@ func (r *Reconciler) ensureSecrets(ctx context.Context, in install) error {
 	}
 	// Making a certificate costs more than the others, so only when needed.
 	if in.tlsEnabled() && in.Spec.API.TLS.SecretName == "" {
-		if err := r.ensureSecret(ctx, in.apiTLSSecretName(), in.Namespace, in.generatedTLSSecret); err != nil {
+		if err := r.ensureCert(ctx, in.apiTLSSecretName(), in.Namespace, in.apiCertHosts(), in.generatedTLSSecret); err != nil {
 			return err
 		}
 	}
 	if in.Spec.Database.Managed != nil {
-		if err := r.ensureSecret(ctx, in.postgresTLSSecretName(), in.Namespace, in.generatedPostgresTLSSecret); err != nil {
+		if err := r.ensureCert(ctx, in.postgresTLSSecretName(), in.Namespace, in.postgresCertHosts(), in.generatedPostgresTLSSecret); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ensureCert creates a generated certificate Secret, or renews it when it
+// nears expiry or no longer covers hosts (see certNeedsRenewal). The API
+// server reloads its certificate files when they change, and the task
+// manager reads the API's for each job; the managed database's pod is
+// restarted through its certificate annotation.
+func (r *Reconciler) ensureCert(ctx context.Context, name, namespace string, hosts []string, generate func() (*corev1.Secret, error)) error {
+	var existing corev1.Secret
+	err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &existing)
+	if apierrors.IsNotFound(err) {
+		return r.ensureSecret(ctx, name, namespace, generate)
+	}
+	if err != nil {
+		return fmt.Errorf("secret %s: %w", name, err)
+	}
+	if !certNeedsRenewal(&existing, hosts, time.Now()) {
+		return nil
+	}
+	fresh, err := generate()
+	if err != nil {
+		return err
+	}
+	log.FromContext(ctx).Info("renewing generated certificate", "secret", name)
+	existing.Data = fresh.Data
+	if err := r.Update(ctx, &existing); err != nil {
+		return fmt.Errorf("secret %s: %w", name, err)
 	}
 	return nil
 }
@@ -319,6 +359,11 @@ func (r *Reconciler) reconcileDatabase(ctx context.Context, cr *v1alpha1.Dispatc
 	if err := r.applyNetworkPolicy(ctx, cr, *in, in.postgresNetworkPolicy()); err != nil {
 		return false, err
 	}
+	var cert corev1.Secret
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: in.Namespace, Name: in.postgresTLSSecretName()}, &cert); err != nil {
+		return false, fmt.Errorf("secret %s: %w", in.postgresTLSSecretName(), err)
+	}
+	in.postgresCertHash = certHash(&cert)
 	if err := r.apply(ctx, cr, in.postgresService()); err != nil {
 		return false, err
 	}
@@ -389,6 +434,20 @@ func (r *Reconciler) migrate(ctx context.Context, cr *v1alpha1.DispatchOps, in i
 	if !dbReady {
 		set(CondMigrated, false, "WaitingForDatabase", "Migrations for "+image+" wait for the database")
 		return false, nil
+	}
+	if cr.Status.Image != "" {
+		// An upgrade: the administrator was created by an earlier
+		// migration. If their password Secret has since been deleted,
+		// migrate without it rather than wait for a Secret that won't come.
+		sel := in.adminPasswordSecret()
+		var s corev1.Secret
+		err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: in.Namespace, Name: sel.Name}, &s)
+		switch {
+		case apierrors.IsNotFound(err):
+			in.skipAdmin = true
+		case err != nil:
+			return false, fmt.Errorf("secret %s: %w", sel.Name, err)
+		}
 	}
 	job := in.migrationJob(image)
 	var existing batchv1.Job

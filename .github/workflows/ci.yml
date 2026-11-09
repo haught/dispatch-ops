@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_USER: dispatch
           POSTGRES_PASSWORD: dispatch
@@ -94,7 +94,11 @@ jobs:
       - name: Package
         run: make chart CHART_VERSION=0.0.0-ci
 
-  # Builds every image for amd64 and runs the selftest in each starter EE.
+  # Builds every image for amd64, runs the selftest in each starter EE, and
+  # scans every image for known vulnerabilities. release.yml runs this
+  # workflow first, so a release with a fixable High or Critical
+  # vulnerability publishes nothing. The scanner runs here, with read-only
+  # permissions, not in the jobs that can publish.
   images:
     runs-on: ubuntu-latest
     steps:
@@ -117,3 +121,23 @@ jobs:
             docker run --rm "dispatch-ops/$ee:dev" selftest
             echo "::endgroup::"
           done
+      - id: grype
+        uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+      # Fails on High or Critical vulnerabilities that have a fix available.
+      # To accept one, add it to .grype.yaml with a reason.
+      - name: Scan the images
+        env:
+          GRYPE: ${{ steps.grype.outputs.cmd }}
+        run: |
+          failed=()
+          for image in server operator runner runner-base ee-shell ee-python ee-ansible; do
+            echo "::group::$image"
+            if ! "$GRYPE" "docker:dispatch-ops/$image:dev" --only-fixed --fail-on high; then
+              failed+=("$image")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::Fixable High or Critical vulnerabilities in: ${failed[*]}"
+            exit 1
+          fi

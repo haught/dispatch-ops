@@ -57,3 +57,17 @@ func TestNewKeyringRejectsBadKeys(t *testing.T) {
 		}
 	}
 }
+
+// I7: the key .env.example used to publish can't encrypt, only decrypt.
+func TestCheckCurrentKeyRefusesPublishedDevKey(t *testing.T) {
+	if err := CheckCurrentKey(PublishedDevKey); err == nil {
+		t.Error("the published dev key was accepted as the current key")
+	}
+	if err := CheckCurrentKey(GenerateKey()); err != nil {
+		t.Errorf("a generated key was refused: %v", err)
+	}
+	// As an old key it still decrypts what it encrypted.
+	if _, err := NewKeyring(GenerateKey(), PublishedDevKey); err != nil {
+		t.Errorf("the published dev key as an old key: %v", err)
+	}
+}

@@ -1,0 +1,14 @@
+# Kept out of the packaged chart (helm package).
+# ci/ holds values for chart testing only.
+ci/
+# VCS, editor and OS files.
+.git/
+.gitignore
+.DS_Store
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/

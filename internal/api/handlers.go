@@ -21,8 +21,24 @@ import (
 	"dispatch-ops/internal/store"
 )
 
-// SessionCookieName must match the cookieAuth scheme in api/openapi.yaml.
-const SessionCookieName = "dispatch_session"
+// SessionCookieName is the session cookie's name without secure cookies;
+// SecureSessionCookieName is its name with them (the default). The __Host-
+// prefix makes browsers refuse the cookie unless this host set it over
+// HTTPS with Path=/, so a sibling subdomain or a plain HTTP response can't
+// plant a session (signing a victim in as someone else). The cookieAuth
+// scheme in api/openapi.yaml documents both.
+const (
+	SessionCookieName       = "dispatch_session"
+	SecureSessionCookieName = "__Host-" + SessionCookieName
+)
+
+// sessionCookieName is the session cookie's name for these handlers.
+func sessionCookieName(secure bool) string {
+	if secure {
+		return SecureSessionCookieName
+	}
+	return SessionCookieName
+}
 
 // Handlers implements apigen.StrictServerInterface.
 type Handlers struct {
@@ -42,6 +58,9 @@ type Handlers struct {
 	// LoginLimits throttles failed password sign-ins; the zero value
 	// doesn't.
 	LoginLimits store.LoginLimits
+	// MaxJobOutput caps the bytes of output one job may store; 0 means no
+	// cap (see store.AppendJobEvents).
+	MaxJobOutput int64
 	// StreamRecheck is how often a live job stream re-checks that its caller
 	// may still see the job; zero means DefaultStreamRecheck.
 	StreamRecheck time.Duration
@@ -377,7 +396,7 @@ func tokenAudit(t apigen.ApiToken, username string) map[string]any {
 
 func (h *Handlers) sessionCookie(value string, expires time.Time) *http.Cookie {
 	return &http.Cookie{
-		Name:     SessionCookieName,
+		Name:     sessionCookieName(h.SecureCookies),
 		Value:    value,
 		Path:     "/",
 		Expires:  expires,

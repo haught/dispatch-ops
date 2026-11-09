@@ -189,7 +189,15 @@ Edit the `DispatchOps` (or `.env`), not the Deployments: the operator reverts
 changes to the objects it created.
 
 Keep `DISPATCH_ENCRYPTION_KEY` for as long as you keep the database. If it
-changes, stored credentials can no longer be decrypted.
+changes, stored credentials can no longer be decrypted. To change it, move
+the old key to `DISPATCH_OLD_ENCRYPTION_KEYS` and set a new one.
+
+`make setup-env` generates the key. Older `.env.example` files shipped a
+fixed example key, which the server now refuses as the current key because
+it is public. If your `.env` still has it
+(`ZGV2LW9ubHktZGlzcGF0Y2gtb3BzLWtleS0zMmJ5dGU=`), move it to
+`DISPATCH_OLD_ENCRYPTION_KEYS` and set `DISPATCH_ENCRYPTION_KEY` to the output
+of `go run ./cmd/dispatch-ops gen-key`; existing credentials stay readable.
 
 ### Single sign-on in development
 
@@ -449,7 +457,7 @@ docker run --rm -e DISPATCH_DATABASE_URL=... -e DISPATCH_ENCRYPTION_KEY=... \
 
 | Target | |
 |---|---|
-| `setup-env` | Create `.env` from `.env.example` |
+| `setup-env` | Create `.env` from `.env.example`, with a new encryption key |
 | `deps` | Go modules and npm packages |
 | `db-init` | Create the role and the `dispatch` and `dispatch_test` databases |
 | `dev` / `dev-down` | Start the kind cluster and Tilt / remove what Tilt deployed |

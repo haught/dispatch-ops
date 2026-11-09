@@ -30,7 +30,7 @@ To work on Dispatch Ops itself, see [DEVELOP.md](DEVELOP.md).
   container command.
 - Live job output in the browser, and per-host results for Ansible jobs
   (each play, task and host result, plus Ansible's recap).
-- Relaunch any job with the configuration it ran with, or rerun an Ansible
+- Relaunch any job with the launch options it ran with, or rerun an Ansible
   job on just the hosts that failed.
 - Job templates hold everything a job needs; launchers may override only the
   fields the template allows (limit, tags, inventory and so on).
@@ -125,7 +125,8 @@ To work on Dispatch Ops itself, see [DEVELOP.md](DEVELOP.md).
 2. The task manager claims it when there is room under the concurrency
    limit. It creates a Secret with a one-time job token, an image pull Secret
    if the execution environment needs a registry credential, and a
-   Kubernetes Job. The job becomes `waiting`.
+   Kubernetes Job. The job becomes `waiting`. The token reaches the runner as
+   the `DISPATCH_JOB_TOKEN` environment variable, never as a file.
 3. The pod starts the execution environment image, whose entrypoint is
    `dispatch-runner`. The runner fetches the job spec from the API (the job
    becomes `running`), clones the project, and writes the inventory, extra
@@ -197,6 +198,11 @@ attempts per client address, sees the client's address from
 that header; a client could otherwise choose its own address. It is unset
 by default.
 
+Each job may store at most 256 MiB of output, so one runaway job can't fill
+the database. Past the cap the job keeps running, its log says the output was
+cut, and only its Ansible recap is still kept. Change it with
+`spec.api.maxJobOutput` (e.g. `1Gi`, or `0` for no cap).
+
 The API server sends a strict `Content-Security-Policy` on every response,
 `Cache-Control: no-store` on API responses, and `Strict-Transport-Security`
 (two years, including subdomains) on the HTTPS connections it terminates
@@ -234,10 +240,15 @@ it, or by creating a `DispatchOps`:
   names it would use is taken, it reports an error instead.
 
 A separate job namespace is safer than the default (the installation's own
-namespace, where the task manager can also read the installation's
-Secrets): `kubectl create namespace dispatch-jobs`, opt it in, and set
-`spec.taskManager.jobNamespace`. It isn't the default because it has to be
-created and opted in first.
+namespace): `kubectl create namespace dispatch-jobs`, opt it in, and set
+`spec.taskManager.jobNamespace`. The task manager's Secret access is only
+in its job namespace, so it then can't read the installation's other
+Secrets, such as the OIDC client secret, the administrator's initial
+password, the database password, or anything else kept in that namespace.
+(It holds the encryption key and database URL either way, since it needs
+them.) It isn't the default because the namespace has to be created and
+opted in first. The task manager gets only the public half of the API's
+certificate, never its private key.
 
 ### Sizing
 
@@ -352,7 +363,11 @@ helm upgrade --install dispatch-ops-operator \
 
 Instead of `existingSecret`, `database.url`, `encryptionKey.key` and
 `oidc.clientSecret` take the values themselves and the chart creates the
-Secrets; keep those in a separate values file out of version control. The
+Secrets. Prefer `existingSecret`: Helm stores every release's values in the
+release history (Secrets named `sh.helm.release.v1.*`), so a value passed to
+the chart stays readable there, by anyone who can read Secrets in the
+chart's namespace, after you change or remove it. If you do pass values,
+keep them in a separate values file out of version control. The
 installation's namespace must exist. Helm can't create a `DispatchOps` in the
 same install that first creates its CRD, so on a new cluster run
 `helm upgrade --install` twice; the chart's notes say when. Uninstalling the
@@ -370,6 +385,18 @@ Changing the Secret later doesn't change the password.
 kubectl -n dispatch-ops get secret dispatch-ops-admin-password \
   -o jsonpath='{.data.password}' | base64 -d
 ```
+
+After signing in, change the password (or set up single sign-on and another
+administrator) and delete the Secret, so the initial password doesn't stay
+readable in the cluster:
+
+```sh
+kubectl -n dispatch-ops delete secret dispatch-ops-admin-password
+```
+
+The operator doesn't make it again once the first migration has created the
+administrator, and later upgrades migrate without it. Nothing else depends
+on it.
 
 To make a single sign-on user an administrator after their first sign-in,
 run `dispatch-ops user grant-admin <username>` in an API pod, or grant
@@ -421,11 +448,18 @@ is not supported. Back up the database before upgrading.
 ### TLS
 
 The API server always serves HTTPS on port 8443. By default the operator
-generates a self-signed ECDSA P-384 certificate, valid for 10 years, in the
+generates a self-signed ECDSA P-384 certificate, valid for one year, in the
 `<name>-api-tls` Secret. It covers the Service's names, `localhost`, and the
-ingress and `externalURL` hosts as they were when it was generated; delete
-the Secret to have it generated again. Every installation gets its own key;
-none is built into the image.
+ingress and `externalURL` hosts. The operator renews it 30 days before it
+expires, and reissues it when those hosts change; the API server picks up
+the new one without a restart. (The managed database's `<name>-postgres-tls`
+certificate is renewed the same way, and its pod restarts to serve it.) A
+certificate Secret you provide is never touched. Every installation gets its
+own key; none is built into the image.
+
+A renewed self-signed certificate is a new CA too: anything outside the
+cluster that pinned the old one (an ingress controller verifying the
+backend, or an API client) has to trust the new one.
 
 Job pods trust the certificate (the task manager hands them the Secret's
 `ca.crt`). An nginx Ingress gets
@@ -652,7 +686,9 @@ commit it ran. URLs may be `https://`, `http://`, `ssh://`, `git://`,
 A project may have an `scm` credential: a username and password or token for
 HTTP(S), or an SSH private key (decrypted in the pod if it has a passphrase).
 SSH host keys are accepted on first use, since job pods start without known
-hosts. A username and password are given only to the project URL's own
+hosts, unless the credential's optional `known_hosts` input lists the
+server's keys (in `ssh-keyscan` / `known_hosts` format): then git only
+connects to a server presenting one of them. A username and password are given only to the project URL's own
 server (scheme, host and port): a submodule or a `requirements.yml` source
 on another server gets none. The credential's files are deleted before the
 playbook or script starts.
@@ -673,7 +709,13 @@ credentials:
 
 A template takes at most one machine credential (`ssh` or
 `username_password`) and one vault password per vault ID. Host key checking
-is off.
+is off unless the machine credential has a `known_hosts` input: then
+Ansible connects only to hosts whose key it lists
+(`ANSIBLE_HOST_KEY_CHECKING=True`, `StrictHostKeyChecking=yes`). Without
+it, whoever can intercept a first connection can capture a connection or
+become password. Changing `known_hosts` needs the credential's secrets
+given again, like its other destination fields. The job's inventory and
+extra vars are written to the in-memory secrets volume, not to disk.
 
 The runner adds a callback plugin, `dispatch_events`, through
 `ANSIBLE_CALLBACK_PLUGINS` (this replaces a `callback_plugins` setting in the
@@ -768,7 +810,16 @@ the `haught.akips.akips_inventory` plugin:
 ### Execution environments
 
 An execution environment is an image whose entrypoint is `dispatch-runner`
-and that runs as a numeric non-root user. Register it by name and image on
+and that runs as a numeric non-root user. The job's own commands run as that
+same user, so the runner keeps its job token from them: it gets the token
+in its environment and, before starting anything, makes itself
+non-dumpable, which hides its environment and memory from other processes of
+the same user. So the entrypoint must be `dispatch-runner` itself, or a
+wrapper that `exec`s it; a wrapper that starts it as a child keeps a
+readable copy of the token. Images built on a runner from before this
+change look for a token file job pods no longer mount, and fail with *The
+job pod ended before the runner started ... rebuild the image on the current
+runner-base*; rebuild them on the current starter or `runner` image. Register it by name and image on
 the *Execution environments* page, with a registry credential if it is
 private. The starter images, published with each release as
 `ghcr.io/haught/dispatch-ops/<name>:<version>`, are:
@@ -846,13 +897,17 @@ going launches nothing and says why.
 
 ### Relaunching
 
-The *Relaunch* button queues a new job with the old one's configuration: the
-same overrides, image and project ref, even if the template has changed
-since. *Relaunch on failed hosts* reruns a finished Ansible job with its limit
-set to the hosts that failed or were unreachable. Relaunching needs
-`execute` on the template, plus `use` on anything the job used that the
-template no longer references (only system administrators can relaunch jobs
-whose template was deleted).
+The *Relaunch* button launches the job's template again, as it is now, with
+the launch overrides the job was started with. The relaunch uses the
+template's current project, credentials, execution environment and command,
+so it can't bring back anything a template admin has since changed. It needs
+`execute` on the template, and the overrides must still be allowed and pass
+the same checks as a launch (for example, `use` on an overridden inventory).
+If they don't, launch the template instead. Jobs from before overrides were
+recorded are relaunched without overrides. Only system administrators can
+relaunch a job whose template was deleted; it runs with its original
+configuration. *Relaunch on failed hosts* reruns a finished Ansible job with
+its limit set to the hosts that failed or were unreachable.
 
 ### Notifications
 
@@ -895,8 +950,9 @@ without the operator.
 | `DISPATCH_LISTEN_ADDR` | `:8443`, or `:8080` without TLS | |
 | `DISPATCH_TLS` | `true` | Serve HTTPS. Set `false` only where something else encrypts traffic to the server |
 | `DISPATCH_TLS_CERT_FILE`, `DISPATCH_TLS_KEY_FILE` | | A PEM certificate (chain) and key, reloaded when the files change. Without them, the server makes a self-signed ECDSA P-384 certificate at startup, held only in memory |
-| `DISPATCH_SECURE_COOKIES` | `true` | Set `false` only for plain-HTTP development |
+| `DISPATCH_SECURE_COOKIES` | `true` | Secure, `__Host-` cookies (`__Host-dispatch_session`), which a sibling subdomain or a plain-HTTP response can't plant. Set `false` only for plain-HTTP development; the cookies are then `dispatch_session` and `dispatch_oidc`. Upgrading from a version with plain cookie names signs everyone out once |
 | `DISPATCH_SESSION_TTL` | `12h` | Browser session lifetime |
+| `DISPATCH_JOB_MAX_OUTPUT` | `256Mi` | Output one job may store (its events' text and data). Past it, the job keeps running and a note says the output was cut; only its Ansible recap is still kept. `0` for no cap |
 | `DISPATCH_LOGIN_THROTTLE_WINDOW` | `15m` | Period over which failed password sign-ins are counted |
 | `DISPATCH_LOGIN_MAX_FAILURES_PER_USER` | `10` | Failed sign-ins a username may have in the window before further attempts get `429`; a success resets it. `0` turns this limit off |
 | `DISPATCH_LOGIN_MAX_FAILURES_PER_IP` | `100` | Failed sign-ins one client address may have in the window. `0` turns this limit off |

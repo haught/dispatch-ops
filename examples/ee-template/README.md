@@ -25,10 +25,14 @@ need to. For anything else, add `RUN` steps to the `Dockerfile` before its final
 3. Edit the three files, and keep them even when they list nothing.
 4. Push. `.github/workflows/build.yml` builds the image, runs
    `dispatch-runner selftest` in it, and pushes it to
-   `ghcr.io/<owner>/<repo>`. Pull requests are only built and tested.
+   `ghcr.io/<owner>/<repo>`. Pull requests are only built and tested, in a
+   job that can't write packages.
 5. Turn on [Renovate](https://docs.renovatebot.com/) so the repository gets a
    pull request whenever a new starter EE is released. Rebuilding picks up the
    new runner, so the image keeps working when the server moves to a newer runner protocol.
+   Renovate also keeps the workflow's actions pinned to commit SHAs and
+   updates them, and suggests versions for what `requirements.txt` and
+   `requirements.yml` list; pin those so rebuilds give the same image.
 
 ## Build and check locally
 

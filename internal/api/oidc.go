@@ -18,9 +18,36 @@ import (
 )
 
 // oidcCookieName holds a sign-in's state between the redirect to the
-// provider and the callback. It must match the cookie parameter of
-// oidcCallback in api/openapi.yaml.
-const oidcCookieName = "dispatch_oidc"
+// provider and the callback; secureOIDCCookieName is its name with secure
+// cookies. The __Host- prefix makes browsers refuse the cookie unless this
+// host set it over HTTPS with Path=/, so a sibling subdomain or a plain
+// HTTP response can't plant one. The state is also encrypted with the
+// server's keyring, so it can't be forged or read.
+const (
+	oidcCookieName       = "dispatch_oidc"
+	secureOIDCCookieName = "__Host-" + oidcCookieName
+)
+
+// oidcStateAAD binds encrypted OIDC state to its purpose, so no other
+// ciphertext made with the keyring is accepted as one.
+var oidcStateAAD = []byte("dispatch-ops oidc login state")
+
+type oidcStateKey struct{}
+
+// withOIDCState puts the OIDC state cookie's value, read by the name secure
+// cookies call for, in the request context for OidcCallback.
+func withOIDCState(secure bool, next http.Handler) http.Handler {
+	name := oidcCookieName
+	if secure {
+		name = secureOIDCCookieName
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie(name); err == nil {
+			r = r.WithContext(context.WithValue(r.Context(), oidcStateKey{}, c.Value))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // oidcLoginTTL is how long a user has to sign in at the provider.
 const oidcLoginTTL = 10 * time.Minute
@@ -31,6 +58,42 @@ var errOIDCDisabled = &apiError{http.StatusNotFound, "Not found", "Single sign-o
 type oidcLogin struct {
 	oidc.Login
 	Next string `json:"next"`
+	// Expires is when the sign-in expires (Unix seconds), checked on the
+	// server rather than trusting the cookie's own expiry.
+	Expires int64 `json:"exp"`
+}
+
+// sealOIDCState encrypts a sign-in's state for its cookie.
+func (h *Handlers) sealOIDCState(login oidcLogin) (string, error) {
+	b, err := json.Marshal(login)
+	if err != nil {
+		return "", err
+	}
+	ct, keyID, err := h.Vault.Keys.Encrypt(b, oidcStateAAD)
+	if err != nil {
+		return "", err
+	}
+	return keyID + "." + base64.RawURLEncoding.EncodeToString(ct), nil
+}
+
+// openOIDCState decrypts a state cookie, and reports false if it isn't one
+// this server made or it has expired.
+func (h *Handlers) openOIDCState(value string) (oidcLogin, bool) {
+	var login oidcLogin
+	keyID, enc, ok := strings.Cut(value, ".")
+	if !ok {
+		return login, false
+	}
+	ct, err := base64.RawURLEncoding.DecodeString(enc)
+	if err != nil {
+		return login, false
+	}
+	b, err := h.Vault.Keys.Decrypt(ct, keyID, oidcStateAAD)
+	if err != nil || json.Unmarshal(b, &login) != nil || login.State == "" ||
+		time.Now().Unix() > login.Expires {
+		return oidcLogin{}, false
+	}
+	return login, true
 }
 
 // redirect is a 302 response that may set cookies. It serves both OIDC
@@ -88,10 +151,15 @@ func isLocalPath(p string) bool {
 }
 
 func (h *Handlers) oidcCookie(value string, maxAge int) *http.Cookie {
+	name := oidcCookieName
+	if h.SecureCookies {
+		name = secureOIDCCookieName
+	}
 	return &http.Cookie{
-		Name:     oidcCookieName,
-		Value:    value,
-		Path:     "/api/v1/auth/oidc/",
+		Name:  name,
+		Value: value,
+		// __Host- cookies must have Path=/.
+		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   h.SecureCookies,
@@ -109,11 +177,13 @@ func (h *Handlers) OidcLogin(ctx context.Context, req apigen.OidcLoginRequestObj
 		h.Log.ErrorContext(ctx, "OIDC sign-in could not start", "err", err)
 		return redirect{location: loginError("The sign-on provider is unavailable. Try again later.")}, nil
 	}
-	state, err := json.Marshal(oidcLogin{Login: login, Next: safeNext(deref(req.Params.Next))})
+	state, err := h.sealOIDCState(oidcLogin{
+		Login: login, Next: safeNext(deref(req.Params.Next)), Expires: time.Now().Add(oidcLoginTTL).Unix(),
+	})
 	if err != nil {
 		return nil, err
 	}
-	cookie := h.oidcCookie(base64.RawURLEncoding.EncodeToString(state), int(oidcLoginTTL.Seconds()))
+	cookie := h.oidcCookie(state, int(oidcLoginTTL.Seconds()))
 	return redirect{location: authURL, cookies: []*http.Cookie{cookie}}, nil
 }
 
@@ -140,10 +210,9 @@ func (h *Handlers) OidcCallback(ctx context.Context, req apigen.OidcCallbackRequ
 		}
 		return fail(msg)
 	}
-	var login oidcLogin
-	raw, err := base64.RawURLEncoding.DecodeString(deref(p.DispatchOidc))
-	if err != nil || json.Unmarshal(raw, &login) != nil || login.State == "" ||
-		subtle.ConstantTimeCompare([]byte(login.State), []byte(deref(p.State))) != 1 {
+	raw, _ := ctx.Value(oidcStateKey{}).(string)
+	login, ok := h.openOIDCState(raw)
+	if !ok || subtle.ConstantTimeCompare([]byte(login.State), []byte(deref(p.State))) != 1 {
 		return fail("Your sign-in expired or was started in another browser. Try again.")
 	}
 	if deref(p.Code) == "" {

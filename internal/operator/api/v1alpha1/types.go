@@ -202,6 +202,12 @@ type APISpec struct {
 	// +kubebuilder:validation:items:Pattern=`^[0-9a-fA-F:.]+(/[0-9]{1,3})?$`
 	// +optional
 	TrustedProxies []string `json:"trustedProxies,omitempty"`
+	// MaxJobOutput caps the output one job may store (its events' text and
+	// data), e.g. 1Gi. Past it, the job keeps running and its log says the
+	// output was cut; only its Ansible recap is still kept. 0 means no cap.
+	// Defaults to 256Mi.
+	// +optional
+	MaxJobOutput *resource.Quantity `json:"maxJobOutput,omitempty"`
 }
 
 // APITLSSpec configures the API server's certificate.

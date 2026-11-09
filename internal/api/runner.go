@@ -52,6 +52,14 @@ func (h *Handlers) GetRunnerJobSpec(ctx context.Context, req apigen.GetRunnerJob
 	if job.Status != store.JobWaiting {
 		return nil, conflict("the job specification can only be fetched once, before the job starts")
 	}
+	// Canceled while its pod was starting: end it here, before the spec (and
+	// its decrypted credentials) goes out.
+	if job.CancelRequested {
+		if err := h.Store.EndJob(ctx, job.ID, store.JobCanceled, nil, "Canceled before it started", store.JobWaiting); err != nil && !errors.Is(err, store.ErrJobState) {
+			return nil, err
+		}
+		return nil, conflict("the job was canceled before it started")
+	}
 
 	log := h.Log.With("job_id", job.ID, "runner_version", req.Params.Version, "runner_protocol", req.Params.Protocol)
 	if p := req.Params.Protocol; p < MinRunnerProtocol || p > MaxRunnerProtocol {
@@ -178,7 +186,7 @@ func (h *Handlers) PostRunnerJobEvents(ctx context.Context, req apigen.PostRunne
 			events[i].Data = *e.Data
 		}
 	}
-	cancel, err := h.Store.AppendJobEvents(ctx, req.JobId, events)
+	cancel, err := h.Store.AppendJobEvents(ctx, req.JobId, events, h.MaxJobOutput)
 	if err != nil {
 		return nil, err
 	}

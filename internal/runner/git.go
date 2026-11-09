@@ -161,9 +161,21 @@ func gitEnv(cfg Config, ws *workspace, p *runnerapi.RunnerProject) (env []string
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ALLOW_PROTOCOL="+gitProtocols,
 	)
-	sshCmd := []string{"ssh", "-o", "BatchMode=yes",
-		// Job pods start without known hosts; trust the key seen first.
-		"-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + shellQuote(ws.path("known_hosts"))}
+	// Job pods start without known hosts: trust the key seen first, unless
+	// the credential lists the server's keys, which are then required.
+	hostKeys := []string{"-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + shellQuote(ws.path("known_hosts"))}
+	if cred != nil && strings.TrimSpace(cred.Inputs["known_hosts"]) != "" {
+		kh := cred.Inputs["known_hosts"]
+		if !strings.HasSuffix(kh, "\n") {
+			kh += "\n"
+		}
+		p := filepath.Join(dir, "known_hosts")
+		if err := os.WriteFile(p, []byte(kh), 0o600); err != nil {
+			return nil, cleanup, err
+		}
+		hostKeys = []string{"-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + shellQuote(p)}
+	}
+	sshCmd := append([]string{"ssh", "-o", "BatchMode=yes"}, hostKeys...)
 
 	if cred != nil {
 		in := cred.Inputs

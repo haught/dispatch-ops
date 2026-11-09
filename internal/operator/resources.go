@@ -2,9 +2,12 @@ package operator
 
 import (
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"maps"
+	"net"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -44,8 +47,13 @@ const (
 	// serves it, and in the task manager, which hands its CA to job pods.
 	apiTLSPath   = "/var/run/dispatch-ops/tls"
 	runnerCAPath = "/var/run/dispatch-ops/api-tls"
-	// selfSignedValidity is how long the generated certificate is valid.
-	selfSignedValidity = 10 * 365 * 24 * time.Hour
+	// selfSignedValidity is how long a generated certificate is valid. The
+	// operator renews it renewBefore its expiry (see certNeedsRenewal).
+	selfSignedValidity = 365 * 24 * time.Hour
+	renewBefore        = 30 * 24 * time.Hour
+	// generatedAnnotation marks the Secrets the operator made; it only ever
+	// renews those, never one you provide.
+	generatedAnnotation = "dispatch-ops.io/generated"
 	// ManagedBy is the app.kubernetes.io/managed-by label of every object
 	// the operator creates. (Job pods, which the task manager creates, are
 	// labeled managed-by=dispatch-ops instead.)
@@ -81,7 +89,18 @@ type install struct {
 	// dbSSLMode is the managed database URL's sslmode, recorded on the
 	// servers' pods (empty with an external database).
 	dbSSLMode string
+	// postgresCertHash identifies the managed database's certificate, so
+	// its pod restarts (PostgreSQL reads it only at start) when renewed.
+	postgresCertHash string
+	// skipAdmin leaves the administrator out of the migration Job: the
+	// installation has migrated before and the password Secret was deleted
+	// after first sign-in, as the README recommends.
+	skipAdmin bool
 }
+
+// postgresCertAnnotation records on the managed database's pod which
+// certificate it serves.
+const postgresCertAnnotation = "dispatch-ops.io/tls-cert-sha256"
 
 // dbSSLModeAnnotation records on server pods which sslmode the managed
 // database's URL had when they were created.
@@ -170,19 +189,24 @@ func (in install) postgresURL(password string) string {
 func (in install) postgresTLSSecretName() string { return in.name(componentDatabase) + "-tls" }
 
 // generatedPostgresTLSSecret is a self-signed certificate for the managed
-// database. Like the other generated Secrets, it is never changed.
+// database. The operator renews it before it expires.
 func (in install) generatedPostgresTLSSecret() (*corev1.Secret, error) {
+	return in.selfSignedSecret(componentDatabase, in.postgresTLSSecretName(), in.postgresCertHosts())
+}
+
+// postgresCertHosts are the names the managed database's certificate is
+// valid for.
+func (in install) postgresCertHosts() []string {
 	svc := in.name(componentDatabase)
-	hosts := []string{svc + "." + in.Namespace + ".svc", svc, svc + "." + in.Namespace,
+	return []string{svc + "." + in.Namespace + ".svc", svc, svc + "." + in.Namespace,
 		svc + "." + in.Namespace + ".svc.cluster.local", "localhost", "127.0.0.1"}
-	return in.selfSignedSecret(componentDatabase, in.postgresTLSSecretName(), hosts)
 }
 
 // generatedSecret is a Secret the operator creates once and never changes
 // or deletes: losing one would lose data or access.
 func (in install) generatedSecret(component, name string, data map[string]string) *corev1.Secret {
 	s := &corev1.Secret{ObjectMeta: in.meta(component, name), Type: corev1.SecretTypeOpaque, StringData: data}
-	s.Annotations = map[string]string{"dispatch-ops.io/generated": "true"}
+	s.Annotations = map[string]string{generatedAnnotation: "true"}
 	return s
 }
 
@@ -236,7 +260,8 @@ func (in install) apiCertHosts() []string {
 }
 
 // generatedTLSSecret is a new self-signed ECDSA P-384 certificate for the
-// API server. Like the other generated Secrets, it is never changed.
+// API server. The operator renews it before it expires, and when the names
+// it must be valid for change.
 func (in install) generatedTLSSecret() (*corev1.Secret, error) {
 	return in.selfSignedSecret(componentAPI, in.apiTLSSecretName(), in.apiCertHosts())
 }
@@ -256,13 +281,75 @@ func (in install) selfSignedSecret(component, name string, hosts []string) (*cor
 			"ca.crt": certPEM,
 		},
 	}
-	s.Annotations = map[string]string{"dispatch-ops.io/generated": "true"}
+	s.Annotations = map[string]string{generatedAnnotation: "true"}
 	return s, nil
 }
 
+// certNeedsRenewal reports whether a generated certificate Secret should be
+// replaced: it expires within renewBefore of now, isn't valid for exactly
+// hosts, or can't be read. Secrets the operator didn't generate are never
+// renewed.
+func certNeedsRenewal(s *corev1.Secret, hosts []string, now time.Time) bool {
+	if s.Annotations[generatedAnnotation] != "true" {
+		return false
+	}
+	block, _ := pem.Decode(s.Data[corev1.TLSCertKey])
+	if block == nil {
+		return true
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil || len(s.Data[corev1.TLSPrivateKeyKey]) == 0 {
+		return true
+	}
+	if cert.NotAfter.Sub(now) < renewBefore {
+		return true
+	}
+	have := map[string]bool{}
+	for _, h := range cert.DNSNames {
+		have[h] = true
+	}
+	for _, ip := range cert.IPAddresses {
+		have[ip.String()] = true
+	}
+	want := map[string]bool{}
+	for _, h := range hosts {
+		if h = strings.TrimSpace(h); h != "" {
+			if ip := net.ParseIP(h); ip != nil {
+				h = ip.String()
+			}
+			want[h] = true
+		}
+	}
+	return !maps.Equal(have, want)
+}
+
+// certHash identifies a certificate Secret's certificate.
+func certHash(s *corev1.Secret) string {
+	sum := sha256.Sum256(s.Data[corev1.TLSCertKey])
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// apiTLSVolume is the API certificate Secret, key included, for the API
+// server that serves it.
 func (in install) apiTLSVolume(name string) corev1.Volume {
 	return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 		SecretName: in.apiTLSSecretName(),
+	}}}
+}
+
+// apiTrustVolume is only the public half of the API certificate Secret, for
+// the task manager, which hands it to job pods to trust: tls.crt, and
+// ca.crt when the Secret has one (a certificate from a public CA may not).
+// The private key stays out of the task manager.
+func (in install) apiTrustVolume(name string) corev1.Volume {
+	secret := corev1.LocalObjectReference{Name: in.apiTLSSecretName()}
+	return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+		Sources: []corev1.VolumeProjection{
+			{Secret: &corev1.SecretProjection{LocalObjectReference: secret,
+				Items: []corev1.KeyToPath{{Key: corev1.TLSCertKey, Path: corev1.TLSCertKey}}}},
+			{Secret: &corev1.SecretProjection{LocalObjectReference: secret, Optional: new(true),
+				Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}}}},
+		},
 	}}}
 }
 
@@ -374,11 +461,18 @@ func (in install) migrationJob(image string) *batchv1.Job {
 		Env:          in.commonEnv(),
 		VolumeMounts: []corev1.VolumeMount{{Name: "admin", MountPath: adminPassPath, ReadOnly: true}},
 	}
-	pod := in.serverPod(componentMigrate, []corev1.Container{admin}, []corev1.Container{migrate})
+	var pod corev1.PodTemplateSpec
+	if in.skipAdmin {
+		// The administrator exists and their password Secret is gone:
+		// migrate only.
+		pod = in.serverPod(componentMigrate, []corev1.Container{migrate}, nil)
+	} else {
+		pod = in.serverPod(componentMigrate, []corev1.Container{admin}, []corev1.Container{migrate})
+		pod.Spec.Volumes = []corev1.Volume{{Name: "admin", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: pass.Name, Items: []corev1.KeyToPath{{Key: pass.Key, Path: "password"}},
+		}}}}
+	}
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
-	pod.Spec.Volumes = []corev1.Volume{{Name: "admin", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-		SecretName: pass.Name, Items: []corev1.KeyToPath{{Key: pass.Key, Path: "password"}},
-	}}}}
 	job := &batchv1.Job{
 		ObjectMeta: in.meta(componentMigrate, in.migrationJobName(image)),
 		Spec: batchv1.JobSpec{
@@ -410,6 +504,9 @@ func (in install) apiEnv() []corev1.EnvVar {
 	}
 	if p := in.Spec.API.TrustedProxies; len(p) > 0 {
 		env = append(env, corev1.EnvVar{Name: "DISPATCH_TRUSTED_PROXIES", Value: strings.Join(p, ",")})
+	}
+	if q := in.Spec.API.MaxJobOutput; q != nil {
+		env = append(env, corev1.EnvVar{Name: "DISPATCH_JOB_MAX_OUTPUT", Value: q.String()})
 	}
 	if in.Spec.ExternalURL != "" {
 		env = append(env, corev1.EnvVar{Name: "DISPATCH_EXTERNAL_URL", Value: in.Spec.ExternalURL})
@@ -633,7 +730,7 @@ func (in install) taskManagerDeployment() *appsv1.Deployment {
 	}
 	pod := in.serverPod(componentTaskManager, []corev1.Container{c}, nil)
 	if in.tlsEnabled() {
-		pod.Spec.Volumes = []corev1.Volume{in.apiTLSVolume("api-tls")}
+		pod.Spec.Volumes = []corev1.Volume{in.apiTrustVolume("api-tls")}
 	}
 	in.withMetrics(&pod)
 	pod.Spec.ServiceAccountName = in.name(componentTaskManager)
@@ -730,6 +827,10 @@ func (in install) postgresStatefulSet() *appsv1.StatefulSet {
 		},
 	}
 	secretMode := int32(0o440) // readable through fsGroup
+	var postgresAnnotations map[string]string
+	if in.postgresCertHash != "" {
+		postgresAnnotations = map[string]string{postgresCertAnnotation: in.postgresCertHash}
+	}
 	small := resource.MustParse("1Mi")
 	scratch := resource.MustParse("64Mi")
 	return &appsv1.StatefulSet{
@@ -739,7 +840,7 @@ func (in install) postgresStatefulSet() *appsv1.StatefulSet {
 			ServiceName: in.name(componentDatabase),
 			Selector:    &metav1.LabelSelector{MatchLabels: in.selector(componentDatabase)},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: in.labels(componentDatabase)},
+				ObjectMeta: metav1.ObjectMeta{Labels: in.labels(componentDatabase), Annotations: postgresAnnotations},
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: new(false),
 					EnableServiceLinks:           new(false),

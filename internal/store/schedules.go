@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -74,6 +75,8 @@ type ScheduleFields struct {
 	Enabled     bool
 	Overrides   LaunchOverrides
 	NextRunAt   *time.Time
+	// Owner, if set by an update, makes that user the schedule's owner.
+	Owner *uuid.UUID
 }
 
 // ScheduleFilter narrows ListSchedules.
@@ -150,7 +153,9 @@ func (s *Store) CreateSchedule(ctx context.Context, target ScheduleTarget, creat
 }
 
 // UpdateSchedule loads a schedule, lets update change its fields, and saves
-// them. update gets the current schedule too.
+// them. update gets the current schedule too. If update sets f.Owner, that
+// user becomes the schedule's owner (its created_by): a schedule runs with
+// the access of whoever last decided what it runs (see checkScheduleOwner).
 func (s *Store) UpdateSchedule(ctx context.Context, id uuid.UUID, update func(Schedule, *ScheduleFields) error) (Schedule, error) {
 	var out Schedule
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
@@ -167,9 +172,9 @@ func (s *Store) UpdateSchedule(ctx context.Context, id uuid.UUID, update func(Sc
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE schedules SET name = $2, description = $3, cron = $4, timezone = $5, enabled = $6,
-				overrides = $7, next_run_at = $8
+				overrides = $7, next_run_at = $8, created_by = coalesce($9, created_by)
 			WHERE id = $1`,
-			id, f.Name, f.Description, f.Cron, f.Timezone, f.Enabled, f.Overrides, f.NextRunAt); err != nil {
+			id, f.Name, f.Description, f.Cron, f.Timezone, f.Enabled, f.Overrides, f.NextRunAt, f.Owner); err != nil {
 			return mapErr(err)
 		}
 		out, err = getSchedule(ctx, tx, id, false)
@@ -257,6 +262,18 @@ func runSchedule(ctx context.Context, tx pgx.Tx, id uuid.UUID) (ScheduleRun, err
 		next = &n
 	}
 
+	// A schedule launches with its owner's access, checked now rather than
+	// when it was set up: one whose owner was deleted, deactivated or lost
+	// the roles it needs is disabled instead of running.
+	if run.Err == nil {
+		if err := checkScheduleOwner(ctx, tx, sc); err != nil {
+			if !isLaunchProblem(err) {
+				return ScheduleRun{}, err
+			}
+			run.Err, next = fmt.Errorf("schedule disabled: %w", err), nil
+		}
+	}
+
 	if run.Err == nil {
 		run.JobID, run.Err = launchScheduled(ctx, tx, sc)
 		if run.Err != nil && !isLaunchProblem(run.Err) {
@@ -281,6 +298,69 @@ func runSchedule(ctx context.Context, tx pgx.Tx, id uuid.UUID) (ScheduleRun, err
 	}
 	run.Schedule = sc
 	return run, nil
+}
+
+// checkScheduleOwner returns a LaunchError if the schedule's owner may no
+// longer launch what it launches: they must exist and be active, and hold
+// execute on the template (and use on an overridden inventory), or admin on
+// the inventory a sync schedule syncs. System admins may launch anything.
+func checkScheduleOwner(ctx context.Context, tx pgx.Tx, sc Schedule) error {
+	if sc.CreatedBy == nil {
+		return &LaunchError{"the user who set it up no longer exists; whoever turns it back on becomes its owner"}
+	}
+	var (
+		targetType rbac.ResourceType
+		targetID   uuid.UUID
+		want       rbac.Role
+		invID      *uuid.UUID
+	)
+	switch {
+	case sc.TemplateID != nil:
+		targetType, targetID, want, invID = rbac.JobTemplate, *sc.TemplateID, rbac.Execute, sc.Overrides.InventoryID
+	case sc.InventoryID != nil:
+		targetType, targetID, want = rbac.Inventory, *sc.InventoryID, rbac.Admin
+	default:
+		return nil // launchScheduled reports it
+	}
+	var (
+		active, admin         bool
+		targetRoles, invRoles []string
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT u.is_active,
+			EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.resource_type IS NULL AND r.role = 'system_admin'),
+			ARRAY(SELECT DISTINCT r.role::text FROM user_roles r WHERE r.user_id = u.id
+				AND r.resource_type = $2 AND (r.resource_id IS NULL OR r.resource_id = $3)),
+			ARRAY(SELECT DISTINCT r.role::text FROM user_roles r WHERE r.user_id = u.id
+				AND r.resource_type = 'inventory' AND (r.resource_id IS NULL OR r.resource_id = $4))
+		FROM users u WHERE u.id = $1`,
+		sc.CreatedBy.ID, targetType, targetID, invID).Scan(&active, &admin, &targetRoles, &invRoles)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &LaunchError{"the user who set it up no longer exists; whoever turns it back on becomes its owner"}
+	}
+	if err != nil {
+		return err
+	}
+	who := sc.CreatedBy.Username
+	switch {
+	case !active:
+		return &LaunchError{fmt.Sprintf("%s, who set it up, is deactivated", who)}
+	case admin:
+		return nil
+	case !rbac.Allows(asRoles(targetRoles), want):
+		return &LaunchError{fmt.Sprintf("%s, who set it up, no longer has the %s role on its %s", who, want, strings.ReplaceAll(string(targetType), "_", " "))}
+	case invID != nil && !rbac.Allows(asRoles(invRoles), rbac.Use):
+		return &LaunchError{fmt.Sprintf("%s, who set it up, no longer has the use role on the inventory it overrides", who)}
+	}
+	return nil
+}
+
+func asRoles(names []string) []rbac.Role {
+	out := make([]rbac.Role, len(names))
+	for i, n := range names {
+		out[i] = rbac.Role(n)
+	}
+	return out
 }
 
 func isLaunchProblem(err error) bool {
@@ -315,8 +395,9 @@ func launchScheduled(ctx context.Context, tx pgx.Tx, sc Schedule) (*uuid.UUID, e
 	if err != nil {
 		return nil, err
 	}
+	overrides := sc.Overrides
 	jobID, err := createJob(ctx, tx, NewJob{
-		TemplateID: &t.ID, Name: t.Name, LaunchType: "schedule", Config: cfg, ScheduleID: &sc.ID,
+		TemplateID: &t.ID, Name: t.Name, LaunchType: "schedule", Config: cfg, ScheduleID: &sc.ID, Overrides: &overrides,
 	})
 	if err != nil {
 		return nil, err

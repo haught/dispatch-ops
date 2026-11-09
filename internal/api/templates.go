@@ -368,7 +368,7 @@ func (h *Handlers) LaunchJobTemplate(ctx context.Context, req apigen.LaunchJobTe
 		launchType = "manual"
 	}
 	job, err := h.Store.CreateJob(ctx, store.NewJob{
-		TemplateID: &t.ID, Name: t.Name, LaunchType: launchType, LaunchedBy: &p.UserID, Config: cfg,
+		TemplateID: &t.ID, Name: t.Name, LaunchType: launchType, LaunchedBy: &p.UserID, Config: cfg, Overrides: &overrides,
 	})
 	if err != nil {
 		return nil, err
@@ -457,7 +457,7 @@ func toAPIJob(j store.Job) apigen.Job {
 		},
 	}
 	if p := c.Project; p != nil {
-		out.Config.Project = &apigen.ProjectRef{Id: p.ID, Name: p.Name, ScmUrl: p.ScmURL, ScmRef: p.ScmRef}
+		out.Config.Project = &apigen.ProjectRef{Id: p.ID, Name: p.Name, ScmUrl: redactScmURL(p.ScmURL), ScmRef: p.ScmRef}
 	}
 	if j.LaunchedBy != nil {
 		out.LaunchedBy = &apigen.UserRef{Id: j.LaunchedBy.ID, Username: j.LaunchedBy.Username}

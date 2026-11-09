@@ -84,8 +84,10 @@ func TestSchedules(t *testing.T) {
 	if off["enabled"] != false || off["nextRunAt"] != nil {
 		t.Errorf("disabled schedule = %v", off)
 	}
+	// Turning it back on makes the admin its owner: it now runs with their
+	// access, and bob, no longer its owner, can't change it.
 	on := admin.mustDo("PATCH", scPath, map[string]any{"enabled": true, "cron": "*/5 * * * *", "timezone": "UTC"}, 200)
-	if on["nextRunAt"] == nil || on["cron"] != "*/5 * * * *" {
+	if on["nextRunAt"] == nil || on["cron"] != "*/5 * * * *" || on["createdBy"].(map[string]any)["id"] == bobID {
 		t.Errorf("re-enabled schedule = %v", on)
 	}
 	// Changing only the description keeps the planned run.
@@ -101,7 +103,8 @@ func TestSchedules(t *testing.T) {
 		t.Errorf("audit entries = %v", audit["total"])
 	}
 
-	bob.mustDo("DELETE", scPath, nil, 204)
+	bob.mustDo("DELETE", scPath, nil, 403)
+	admin.mustDo("DELETE", scPath, nil, 204)
 	bob.mustDo("GET", scPath, nil, 404)
 }
 
@@ -147,7 +150,7 @@ func TestRelaunch(t *testing.T) {
 		{Seq: 1, Time: time.Now(), Type: "host_ok", HostName: host("web1")},
 		{Seq: 2, Time: time.Now(), Type: "host_failed", HostName: host("web2")},
 		{Seq: 3, Time: time.Now(), Type: "host_unreachable", HostName: host("db1")},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.st.FinishJob(ctx, ans.ID, store.JobFailed, new(2), "", ""); err != nil {
@@ -177,8 +180,9 @@ func TestRelaunchNeedsExecute(t *testing.T) {
 	grant(admin, map[string]any{"role": "read", "resourceType": "job_template", "resourceId": jt["id"], "userId": bobID})
 	bob.mustDo("POST", relaunch, nil, 403)
 	grant(admin, map[string]any{"role": "execute", "resourceType": "job_template", "resourceId": jt["id"], "userId": bobID})
-	// The job ran against an inventory the template doesn't use, which bob can't use.
-	bob.mustDo("POST", relaunch, nil, 403)
+	// The job overrode the inventory with one bob can't use; as at launch,
+	// it is reported as missing.
+	bob.mustDo("POST", relaunch, nil, 400)
 	grant(admin, map[string]any{"role": "use", "resourceType": "inventory", "resourceId": other["id"], "userId": bobID})
 	bob.mustDo("POST", relaunch, nil, 201)
 }

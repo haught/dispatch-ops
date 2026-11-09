@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -333,7 +334,7 @@ func (m *Manager) check(ctx context.Context, now time.Time, j store.Job, kj *bat
 				m.end(ctx, j, store.JobError, "The job's Kubernetes Job is missing", false)
 			}
 		case jobDone(kj):
-			m.end(ctx, j, store.JobError, "The job pod ended before the runner started"+describePods(pods), false)
+			m.end(ctx, j, store.JobError, "The job pod ended before the runner started"+describePods(pods)+oldRunnerHint(pods), false)
 		case since(j.DispatchedAt) > cfg.ImagePullTimeout && imagePullProblem(pods) != "":
 			m.end(ctx, j, store.JobError, fmt.Sprintf("Cannot pull image %s: %s",
 				j.Config.ExecutionEnvironment.Image, imagePullProblem(pods)), true)
@@ -456,6 +457,20 @@ func imagePullProblem(pods []corev1.Pod) string {
 					}
 					return w.Reason
 				}
+			}
+		}
+	}
+	return ""
+}
+
+// oldRunnerHint explains a runner that looked for the token file job pods
+// used to mount: its image was built on a runner-base from before the token
+// moved to DISPATCH_JOB_TOKEN.
+func oldRunnerHint(pods []corev1.Pod) string {
+	for _, p := range pods {
+		for _, cs := range p.Status.ContainerStatuses {
+			if t := cs.State.Terminated; t != nil && strings.Contains(t.Message, "DISPATCH_JOB_TOKEN_FILE") {
+				return ". The execution environment's runner is too old for this version of Dispatch Ops: rebuild the image on the current runner-base"
 			}
 		}
 	}

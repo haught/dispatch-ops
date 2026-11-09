@@ -166,6 +166,7 @@ func serve() error {
 		SecureCookies: cfg.SecureCookies,
 		Version:       version,
 		Notifier:      &notify.Sender{ExternalURL: cfg.ExternalURL, Version: version},
+		MaxJobOutput:  cfg.JobMaxOutput,
 		LoginLimits: store.LoginLimits{
 			Window: cfg.Login.Window, MaxPerUsername: cfg.Login.MaxPerUsername, MaxPerIP: cfg.Login.MaxPerIP,
 		},

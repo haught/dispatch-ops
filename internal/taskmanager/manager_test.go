@@ -60,12 +60,31 @@ func TestBuildJob(t *testing.T) {
 		t.Errorf("container = %+v", c)
 	}
 	env := map[string]string{}
+	var tokenRef *corev1.SecretKeySelector
 	for _, e := range c.Env {
 		env[e.Name] = e.Value
+		if e.Name == "DISPATCH_JOB_TOKEN" && e.ValueFrom != nil {
+			tokenRef = e.ValueFrom.SecretKeyRef
+		}
 	}
-	if env["DISPATCH_API_URL"] != "http://api:8080" || env["DISPATCH_JOB_ID"] != j.ID.String() || env["DISPATCH_JOB_TOKEN_FILE"] != tokenFile ||
+	if env["DISPATCH_API_URL"] != "http://api:8080" || env["DISPATCH_JOB_ID"] != j.ID.String() ||
 		env["DISPATCH_API_CA_FILE"] != apiCAFile {
 		t.Errorf("env = %v", env)
+	}
+	// L8: the token comes from the Secret as an environment variable, and no
+	// volume exposes it as a file the job's code could read.
+	if tokenRef == nil || tokenRef.Name != tokenSecretName(j.ID.String()) || tokenRef.Key != "token" {
+		t.Errorf("DISPATCH_JOB_TOKEN = %+v, want a reference to the job's token Secret", tokenRef)
+	}
+	if _, ok := env["DISPATCH_JOB_TOKEN_FILE"]; ok {
+		t.Error("DISPATCH_JOB_TOKEN_FILE is set")
+	}
+	for _, v := range pod.Volumes {
+		if s := v.Secret; s != nil && s.SecretName == tokenSecretName(j.ID.String()) {
+			if len(s.Items) != 1 || s.Items[0].Key != "ca.crt" {
+				t.Errorf("volume %s mounts the token Secret's %v, want only ca.crt", v.Name, s.Items)
+			}
+		}
 	}
 	for _, e := range buildJob(j, Config{}, false, false).Spec.Template.Spec.Containers[0].Env {
 		if e.Name == "DISPATCH_API_CA_FILE" {

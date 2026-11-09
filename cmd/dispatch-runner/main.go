@@ -29,6 +29,11 @@ func main() {
 	if dir := os.Getenv(runner.AskpassDirEnv); dir != "" {
 		os.Exit(runner.Askpass(dir, os.Args[1:], os.Stdout))
 	}
+	// Before reading the token, and before any job code runs.
+	if err := runner.Harden(); err != nil {
+		fmt.Fprintln(os.Stderr, "dispatch-runner:", err)
+		os.Exit(2)
+	}
 	cfg, err := runner.ConfigFromEnv(version)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dispatch-runner:", err)

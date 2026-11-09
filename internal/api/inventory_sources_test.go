@@ -255,9 +255,10 @@ func TestInventorySyncSchedules(t *testing.T) {
 	// afterwards so they don't pile up.
 	invID := uuid.MustParse(e.inv)
 	past := time.Now().Add(-time.Minute)
+	owner := uuid.MustParse(e.c.mustDo("GET", "/api/v1/me", nil, 200)["id"].(string))
 	mine := map[uuid.UUID]bool{}
 	for _, name := range []string{"a", "b"} {
-		sc, err := e.st.CreateSchedule(ctx, store.ScheduleTarget{InventoryID: &invID}, nil, store.ScheduleFields{
+		sc, err := e.st.CreateSchedule(ctx, store.ScheduleTarget{InventoryID: &invID}, &owner, store.ScheduleFields{
 			Name: name, Cron: "@daily", Timezone: "UTC", Enabled: true, NextRunAt: &past,
 		})
 		if err != nil {

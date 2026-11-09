@@ -125,7 +125,7 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 	}
 	argv := []string{"ansible-playbook"}
 	if spec.Inventory != nil {
-		inv := ws.path("inventory.json")
+		inv := ws.secret("inventory.json")
 		if err := writeJSON(inv, staticInventory(*spec.Inventory), 0o600); err != nil {
 			return command{}, err
 		}
@@ -166,6 +166,7 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 	if err != nil {
 		return command{}, err
 	}
+	env = append(env, ws.hostKeyEnv()...)
 	marker := "\x1edispatch-event:" + rand.Text()[:12] + ":"
 	env = append(env,
 		"DISPATCH_EVENT_MARKER="+marker,
@@ -182,13 +183,28 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 // ansibleEnv is the environment of the Ansible commands the runner runs:
 // the job's, plus settings for running in a job pod and the search paths
 // of the project's requirements.
+// hostKeyEnv turns host key checking on when the machine credential has
+// known_hosts: Ansible then refuses hosts whose key isn't listed, instead
+// of trusting whatever key a host (or someone in the way) presents.
+// Later entries override ansibleEnv's ANSIBLE_HOST_KEY_CHECKING=False.
+func (ws *workspace) hostKeyEnv() []string {
+	if ws.knownHosts == "" {
+		return nil
+	}
+	return []string{
+		"ANSIBLE_HOST_KEY_CHECKING=True",
+		"ANSIBLE_SSH_COMMON_ARGS=-o UserKnownHostsFile=" + shellQuote(ws.knownHosts) + " -o StrictHostKeyChecking=yes",
+	}
+}
+
 func ansibleEnv(ws *workspace) ([]string, error) {
 	tmp := ws.path("ansible", "tmp")
 	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return nil, err
 	}
 	env := append(ws.env[:len(ws.env):len(ws.env)],
-		// Job pods start without known hosts.
+		// Job pods start without known hosts; a machine credential's
+		// known_hosts turns checking on (see hostKeyEnv).
 		"ANSIBLE_HOST_KEY_CHECKING=False",
 		// Output is a pipe, not a terminal; the web log renders ANSI colors.
 		"ANSIBLE_FORCE_COLOR=True",
@@ -359,6 +375,16 @@ func ansibleCredentialArgs(creds []runnerapi.RunnerCredential, ws *workspace) ([
 					return nil, err
 				}
 				args = append(args, "--become-password-file", p)
+			}
+			if kh := in["known_hosts"]; strings.TrimSpace(kh) != "" {
+				if !strings.HasSuffix(kh, "\n") {
+					kh += "\n"
+				}
+				p, err := file("known_hosts", kh)
+				if err != nil {
+					return nil, err
+				}
+				ws.knownHosts = p
 			}
 		case runnerapi.Vault:
 			// Not executable: Ansible would run it as a script.

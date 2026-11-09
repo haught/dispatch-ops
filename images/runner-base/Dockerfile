@@ -14,7 +14,7 @@
 
 # The runner is cross-compiled on the build platform, so multi-platform
 # builds don't run Go under emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd/dispatch-runner ./cmd/dispatch-runner
@@ -31,7 +31,7 @@ COPY --from=build /out/dispatch-runner /dispatch-runner
 ENTRYPOINT ["/dispatch-runner"]
 
 # The last stage is the default target: runner-base.
-FROM debian:trixie-slim AS runner-base
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runner-base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
