@@ -32,7 +32,10 @@ ENTRYPOINT ["/dispatch-runner"]
 
 # The last stage is the default target: runner-base.
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runner-base
+# The upgrade applies Debian security fixes released since the base image
+# was last rebuilt.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home --home-dir /home/runner --shell /bin/bash runner
