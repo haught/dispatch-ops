@@ -234,7 +234,8 @@ func (s *Sender) sendWebhook(ctx context.Context, c WebhookConfig, secrets map[s
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.URL, bytes.NewReader(body))
 	if err != nil {
-		return &PermanentError{err}
+		// The error would quote the URL, which may carry a token.
+		return &PermanentError{errors.New("the webhook target's url is not a valid URL")}
 	}
 	h := req.Header
 	h.Set("Content-Type", "application/json")
@@ -269,7 +270,7 @@ func (s *Sender) post(req *http.Request) error {
 	req.Header.Set("User-Agent", "dispatch-ops/"+s.Version)
 	resp, err := s.client().Do(req)
 	if err != nil {
-		return err
+		return redactURL(req.URL, err)
 	}
 	defer resp.Body.Close()
 	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -288,6 +289,44 @@ func (s *Sender) post(req *http.Request) error {
 	}
 	return err
 }
+
+// redactURL rewrites a transport error from sending to u so that it names
+// only u's host. Go's *url.Error quotes the whole URL ("Post \"https://…\":
+// …"), and for Slack and Google Chat the path and query are the secret. The
+// result is stored as a delivery's last error, which every reader of the job
+// sees, and logged.
+func redactURL(u *url.URL, err error) error {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		err = ue.Err
+	}
+	msg := err.Error()
+	// The inner error shouldn't quote the URL either, but make sure.
+	for _, secret := range []string{u.String(), u.RawQuery, u.EscapedPath(), u.Path} {
+		if secret != "" && secret != "/" {
+			msg = strings.ReplaceAll(msg, secret, "…")
+		}
+	}
+	if q := u.Query(); len(q) > 0 {
+		for _, vs := range q {
+			for _, v := range vs {
+				if len(v) >= 4 {
+					msg = strings.ReplaceAll(msg, v, "…")
+				}
+			}
+		}
+	}
+	return &redactedError{msg: u.Host + ": " + msg, err: err}
+}
+
+// redactedError is a transport error with a message that doesn't quote the
+// target URL. It still unwraps to the cause, so timeouts stay detectable.
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.err }
 
 // --- Slack ---------------------------------------------------------------------
 
@@ -321,7 +360,8 @@ func (s *Sender) sendSlack(ctx context.Context, webhookURL string, ev Event) err
 	body, _ := json.Marshal(map[string]string{"text": s.SlackText(ev)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body))
 	if err != nil {
-		return &PermanentError{err}
+		// The error would quote the URL, which is the secret.
+		return &PermanentError{errors.New("the Slack target's webhookUrl is not a valid URL")}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return s.post(req)
@@ -401,7 +441,8 @@ func (s *Sender) sendGoogleChat(ctx context.Context, webhookURL string, ev Event
 	}
 	u, err := url.Parse(webhookURL)
 	if err != nil {
-		return &PermanentError{fmt.Errorf("webhookUrl: %w", err)}
+		// The error would quote the URL, whose key and token are secret.
+		return &PermanentError{errors.New("the Google Chat target's webhookUrl is not a valid URL")}
 	}
 	if ev.Job != nil {
 		q := u.Query()
@@ -415,7 +456,7 @@ func (s *Sender) sendGoogleChat(ctx context.Context, webhookURL string, ev Event
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
-		return &PermanentError{err}
+		return &PermanentError{errors.New("the Google Chat target's webhookUrl is not a valid URL")}
 	}
 	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 	return s.post(req)

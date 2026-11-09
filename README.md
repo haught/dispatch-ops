@@ -150,8 +150,8 @@ finished Kubernetes Jobs after a TTL (1 hour by default).
 
 | | Requirement |
 |---|---|
-| **Kubernetes** | A cluster you can install a CRD and a cluster-scoped operator into. Job pods run in a namespace you choose. |
-| **PostgreSQL** | 15 or later. Use an external, backed-up database for production. The operator can run one for you (`postgres:17` on a 10 Gi PersistentVolume by default), but it has no backups or replication. |
+| **Kubernetes** | A cluster you can install a CRD and the operator into. Job pods run in a namespace you choose. A network plugin that enforces NetworkPolicy (Calico, Cilium and so on) for the isolation described under [Network paths](#network-paths). |
+| **PostgreSQL** | 15 or later. Use an external, backed-up database for production. The operator can run one for you (PostgreSQL 17, digest-pinned, on a 10 Gi PersistentVolume by default, as a non-root user with a read-only root filesystem, serving TLS), but it has no backups or replication. |
 | **Container registry** | Access to `ghcr.io`, where releases publish the server, operator, runner and starter execution environment images (`ghcr.io/haught/dispatch-ops/<name>`, amd64 and arm64) that the Helm chart uses by default. Without it, mirror them, or build your own (see [Building images and releases](DEVELOP.md#building-images-and-releases)), into a registry your cluster can pull from and set `image.repository` and `serverImage.repository`. Your own execution environments go in a registry too. |
 | **Ingress** | An ingress controller and a DNS name for the UI and API. The API server speaks HTTPS to the ingress controller too. |
 | **TLS certificate** | Optional. Without one, the operator generates a self-signed certificate for the API server. cert-manager works well. |
@@ -174,8 +174,70 @@ finished Kubernetes Jobs after a TTL (1 hour by default).
 | Nodes | Container registry | Pull execution environment images |
 | Prometheus | Pods, port 9090 (`metrics`) | Metrics, plain HTTP, not exposed by the Service |
 
-If you use NetworkPolicies, the job namespace needs egress to the API Service
-and to everything your playbooks touch.
+The operator creates NetworkPolicies (turn them off with
+`spec.networkPolicy.enabled: false`). They take effect only where the
+cluster's network plugin enforces NetworkPolicy:
+
+- `<name>-postgres`: the managed database accepts connections only from the
+  API server, task manager and migration pods.
+- `<name>-api`, `<name>-task-manager`: anyone may reach the API port, and
+  any pod but a job pod the unauthenticated metrics port. The chart adds the
+  same for the operator's metrics (`networkPolicy.enabled`).
+- `<name>-jobs`, in the job namespace: job pods accept no connections, and
+  may connect only to the API server, DNS (port 53), and any address outside
+  169.254.0.0/16, fe80::/10 and fd00:ec2::254 (the cloud metadata services).
+  To keep jobs away from the rest of the cluster too, add its pod and
+  service CIDRs (and any internal networks jobs shouldn't reach) to
+  `spec.networkPolicy.jobEgressExcept`.
+
+Behind an ingress controller or load balancer, set `spec.api.trustedProxies`
+to its addresses or CIDRs, so sign-in throttling, which counts failed
+attempts per client address, sees the client's address from
+`X-Forwarded-For` rather than the proxy's. List only proxies that overwrite
+that header; a client could otherwise choose its own address. It is unset
+by default.
+
+The API server sends a strict `Content-Security-Policy` on every response,
+`Cache-Control: no-store` on API responses, and `Strict-Transport-Security`
+(two years, including subdomains) on the HTTPS connections it terminates
+itself. Browsers only see the ingress controller's TLS, so have the ingress
+send HSTS too (for ingress-nginx, its default with TLS enabled).
+
+### Operator permissions
+
+What the operator may do decides how much an attacker gains by compromising
+it, or by creating a `DispatchOps`:
+
+- **Watching all namespaces** (`watchNamespaces` empty, the default), the
+  operator has a ClusterRole that can read and write every Secret, create
+  Deployments, StatefulSets and Jobs, and write Roles and RoleBindings in
+  every namespace. That is effectively cluster-admin: whoever controls the
+  operator's pod or token controls the cluster. Use this mode on clusters
+  where only cluster admins administer Dispatch Ops.
+- **Watching some namespaces** (`watchNamespaces` set), the chart gives it a
+  Role in each of them and in each of `allowedJobNamespaces`, and nothing
+  cluster-wide but the `DispatchOps` CRD. Prefer this in production.
+- **Job namespaces.** The task manager may read Secrets and create Jobs in
+  its job namespace, and the operator grants it that. So a `DispatchOps` may
+  only use its own namespace, or one that is opted in: listed in the chart's
+  `allowedJobNamespaces`, or, when the operator watches all namespaces,
+  labeled `dispatch-ops.io/allow-jobs-from=<the DispatchOps's namespace>`
+  (which takes rights to label namespaces). Otherwise the installation
+  reports `TaskManagerReady=False` (`JobNamespaceNotAllowed`) and the task
+  manager isn't deployed. Removing the opt-in removes its Role and
+  RoleBinding within five minutes.
+- **Creating a `DispatchOps`** lets you choose the server image, and so run
+  any code with the task manager's permissions in its namespace and job
+  namespace (including reading their Secrets). Grant it only to those who
+  could have those permissions anyway.
+- The operator never takes over an object it didn't create: if one of the
+  names it would use is taken, it reports an error instead.
+
+A separate job namespace is safer than the default (the installation's own
+namespace, where the task manager can also read the installation's
+Secrets): `kubectl create namespace dispatch-jobs`, opt it in, and set
+`spec.taskManager.jobNamespace`. It isn't the default because it has to be
+created and opted in first.
 
 ### Sizing
 
@@ -186,6 +248,9 @@ and to everything your playbooks touch.
 - **Jobs:** each job is a pod. `spec.taskManager.maxConcurrentJobs` (default
   10) caps how many wait or run at once; the rest queue. Size the job
   namespace's nodes or quotas for that many execution environment pods.
+  Each requests 100m CPU and 256Mi of memory and is limited to 2 CPUs, 2Gi
+  of memory and a 4Gi working directory; change that with
+  `spec.taskManager.jobResources` and `jobWorkSizeLimit`.
 - **Database:** job output is the bulk of the data. Retention
   (`spec.retention.jobs`, 90 days by default) keeps it bounded.
 
@@ -216,8 +281,15 @@ The chart runs the images of its own version from
 The chart installs the `DispatchOps` CRD (group `dispatch-ops.io`, short name
 `dops`). The CRD is kept when the chart is uninstalled, so installations
 survive. `serverImage` sets the server image that installations without
-`spec.image` run, and `watchNamespaces` limits the operator to some
-namespaces.
+`spec.image` run, `watchNamespaces` limits the operator to some
+namespaces, and `allowedJobNamespaces` lists the namespaces installations
+may run jobs in besides their own. See
+[Operator permissions](#operator-permissions) for what these mean for
+security; in production, set both:
+
+```sh
+  --set 'watchNamespaces={dispatch-ops}' --set 'allowedJobNamespaces={dispatch-jobs}'
+```
 
 ### 2. Create an installation
 
@@ -238,7 +310,8 @@ for production, start from
 [deploy/examples/dispatchops.yaml](deploy/examples/dispatchops.yaml), which
 uses an external database, an encryption key you provide, an Ingress, a
 cert-manager certificate, single sign-on, a separate job namespace and
-retention periods. Create the Secrets and namespaces it names first.
+retention periods. Create the Secrets and namespaces it names first, and
+opt the job namespace in (see [Operator permissions](#operator-permissions)).
 `kubectl explain dispatchops.spec` documents every field.
 
 `kubectl get dops` shows whether an installation is ready and which image it
@@ -309,11 +382,12 @@ For an installation named `<name>`:
 | Object | |
 |---|---|
 | `<name>-api` Deployment and Service | The API server and UI, HTTPS on port 8443 (`https`) |
-| `<name>-task-manager` Deployment, ServiceAccount, Role and RoleBinding | The task manager, with the permissions it needs in the job namespace |
+| `<name>-task-manager` Deployment, ServiceAccount, Role and RoleBinding | The task manager, with the permissions it needs in the job namespace (where the Role and RoleBinding are named `<namespace>-<name>-task-manager` if it isn't the installation's) |
 | `<name>-postgres` StatefulSet and Service | The managed database (unless `spec.database.external`) |
 | `<name>-migrate-<hash>` Job | Database migrations for one image, then the administrator if missing |
 | `<name>` Ingress | If `spec.api.ingress` is set |
-| `<name>-encryption-key`, `<name>-admin-password`, `<name>-postgres`, `<name>-api-tls` Secrets | Generated unless the spec names your own |
+| `<name>-api`, `<name>-task-manager`, `<name>-postgres`, `<name>-jobs` NetworkPolicies | See [Network paths](#network-paths) |
+| `<name>-encryption-key`, `<name>-admin-password`, `<name>-postgres`, `<name>-postgres-tls`, `<name>-api-tls` Secrets | Generated unless the spec names your own |
 
 Edit the `DispatchOps`, not these objects: the operator reverts changes to
 what it created. Changes to Secrets the operator reads (for example the OIDC
@@ -504,18 +578,47 @@ pages (or `/api/v1/role-grants`):
 - Lists show only what the caller can read. A resource they can't read is
   reported as not found; an action their roles don't allow is forbidden.
 - Changing a template's project, inventory or credentials needs `use` on the
-  new ones. Overriding the inventory at launch needs `use` on it.
+  new ones. Changing what its jobs run, or where (see
+  [below](#roles-that-amount-to-credential-access)), also needs `use` on all
+  the credentials it keeps. Overriding the inventory at launch needs `use`
+  on it.
 - A job can be seen by whoever launched it and by anyone with a role on its
   template. It can be canceled by whoever launched it and by those with
   `execute` on its template.
 - An inventory's source is set, changed and synced by those with `admin` on
-  the inventory (and `use` on the project and credentials they add). Its
-  sync jobs can be seen by anyone with a role on the inventory, and canceled
-  by its admins.
+  the inventory (and `use` on the project and credentials they add, or on
+  all its credentials when they change its project, path or execution
+  environment). Its sync jobs can be seen by anyone with a role on the
+  inventory, and canceled by its admins.
 - Everyone can use execution environments; only system administrators
   manage them, and users and teams.
 - `dispatch-ops user grant-admin <username>` makes an existing user a system
   administrator, for example to recover access.
+
+#### Roles that amount to credential access
+
+A job holds its credentials in plain form while it runs, and whatever the
+job runs can read them. So any role that decides what a job runs, or which
+hosts it connects to, is as good as the credentials the job runs with.
+Grant these roles only to people you would also give the credentials to.
+
+| Role or permission | Can reach | Because |
+|---|---|---|
+| `admin` on a job template | Its credentials, once they hold `use` on them | It decides the command, playbook, arguments, extra vars, project, inventory and image. Changing any of these, or allowing `command`, `extraVars` or `inventory` to be overridden, needs `use` on all the template's credentials. Other changes (name, limit, tags, schedule) don't. |
+| `execute` on a template that allows overriding `command` | Its credentials | The command is the launcher's. |
+| `execute` on a template that allows overriding `extraVars` | Possibly its credentials | Extra vars named `ansible_*` and any with Jinja (`{{`, `{%`, `{#`) are refused at launch, so they can't change how Ansible connects or read files. Ordinary variables still steer the playbook, which may be enough to send a secret somewhere, depending on the playbook. |
+| `execute` on a template that allows overriding `inventory`, plus `use` on an inventory they control | Its credentials | Host and group variables in their inventory (`ansible_ssh_common_args`, `ansible_host`, Jinja) decide where and how Ansible connects. |
+| `admin` on an inventory | The credentials of every template that uses it, including other teams' templates that hold only `use` on it | The same host and group variables. |
+| Push access to a project's repository, or to the repository of an inventory source | The credentials of every template and inventory source that uses the project | The repository is the playbook, script or inventory plugin that runs. |
+| `admin` on a project | The credentials of every template and inventory source that uses the project | It can change `scmUrl` and `scmRef`, so it picks the code that runs. Moving the project to another server (a different scheme, host or port) while keeping its `scm` credential needs `use` on that credential. |
+| `admin` on a credential | Its secrets, only by entering new ones | Changing where the secrets are sent (a registry's `server`, an API token's `url`) needs every secret entered again in the same change. |
+| `system_admin` | Everything | It manages execution environments, the images every job runs in. |
+
+Other safeguards: a `limit`, and a host name (which *Relaunch on failed
+hosts* puts in one), can't name a file (`@path`), which Ansible would
+otherwise read and print into the job log; and the project's `scm` username and
+password are given only to the project's own server, not to submodules or
+`requirements.yml` sources elsewhere.
 
 ### Audit log
 
@@ -549,8 +652,10 @@ commit it ran. URLs may be `https://`, `http://`, `ssh://`, `git://`,
 A project may have an `scm` credential: a username and password or token for
 HTTP(S), or an SSH private key (decrypted in the pod if it has a passphrase).
 SSH host keys are accepted on first use, since job pods start without known
-hosts. The credential's files are deleted before the playbook or script
-starts.
+hosts. A username and password are given only to the project URL's own
+server (scheme, host and port): a submodule or a `requirements.yml` source
+on another server gets none. The credential's files are deleted before the
+playbook or script starts.
 
 ### Ansible jobs
 
@@ -593,7 +698,8 @@ Each may also end in `.yaml`. They install into the job's workspace, which
 default directories (this replaces `collections_path` and `roles_path` in the
 project's `ansible.cfg`; playbook-adjacent `collections/` and `roles/`
 directories still work). The installs use the project's `scm` credential, so
-git sources on the same server as the project need no extra setup. The
+git sources on the same server as the project need no extra setup (sources
+on other servers must be public, or reached over SSH with the key). The
 output goes to the job log, the job fails if an install fails, and the
 timeout covers the installs. Collections baked into the EE image are still
 found, so an image can make a requirements file unnecessary.
@@ -791,6 +897,10 @@ without the operator.
 | `DISPATCH_TLS_CERT_FILE`, `DISPATCH_TLS_KEY_FILE` | | A PEM certificate (chain) and key, reloaded when the files change. Without them, the server makes a self-signed ECDSA P-384 certificate at startup, held only in memory |
 | `DISPATCH_SECURE_COOKIES` | `true` | Set `false` only for plain-HTTP development |
 | `DISPATCH_SESSION_TTL` | `12h` | Browser session lifetime |
+| `DISPATCH_LOGIN_THROTTLE_WINDOW` | `15m` | Period over which failed password sign-ins are counted |
+| `DISPATCH_LOGIN_MAX_FAILURES_PER_USER` | `10` | Failed sign-ins a username may have in the window before further attempts get `429`; a success resets it. `0` turns this limit off |
+| `DISPATCH_LOGIN_MAX_FAILURES_PER_IP` | `100` | Failed sign-ins one client address may have in the window. `0` turns this limit off |
+| `DISPATCH_TRUSTED_PROXIES` | | Comma- or space-separated addresses or CIDRs of reverse proxies (ingress controller, load balancer) whose `X-Forwarded-For` is believed. Set it behind a proxy, or every client shares the proxy's address for sign-in throttling |
 | `DISPATCH_AUTO_MIGRATE` | `false` | Apply migrations when `serve` starts |
 | `DISPATCH_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `DISPATCH_LOG_FORMAT` | `json` | `json` or `text` |
@@ -815,6 +925,9 @@ Task manager only:
 | `DISPATCH_MAX_CONCURRENT_JOBS` | `10` | Jobs waiting or running at once |
 | `DISPATCH_JOB_START_TIMEOUT` | `10m` | How long a pod may take to start its runner |
 | `DISPATCH_JOB_TTL` | `1h` | How long finished Kubernetes Jobs are kept |
+| `DISPATCH_JOB_CPU_REQUEST`, `DISPATCH_JOB_MEMORY_REQUEST` | `100m`, `256Mi` | Job pods' requests; `0` for none |
+| `DISPATCH_JOB_CPU_LIMIT`, `DISPATCH_JOB_MEMORY_LIMIT` | `2`, `2Gi` | Job pods' limits; `0` for none |
+| `DISPATCH_JOB_WORK_SIZE_LIMIT` | `4Gi` | Cap on a job pod's working directory; `0` for none |
 | `DISPATCH_LEADER_ELECTION` | `true` | Elect one active task manager with a Lease |
 | `DISPATCH_JOB_RETENTION` | `90d` | Delete finished jobs this long after they finish; `0` keeps them |
 | `DISPATCH_AUDIT_RETENTION` | `0` | Delete audit log entries this old; `0` keeps them |

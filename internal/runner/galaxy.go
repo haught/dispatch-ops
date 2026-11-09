@@ -54,7 +54,8 @@ func requirementsFiles(projectDir string) []galaxyStep {
 // requirements files list, into directories in the workspace, and records
 // in ws.ansibleEnv the search paths that make ansible-playbook find them.
 // ansible-galaxy uses the project's SCM credential, so requirements can
-// come from the same private Git server as the project. Status messages go
+// come from the same private Git server as the project; git gets it only
+// for that server (see Askpass). Status messages go
 // to say and ansible-galaxy's output to out.
 func installRequirements(ctx context.Context, cfg Config, ws *workspace, p *runnerapi.RunnerProject, verbosity int, say func(string), out io.Writer) error {
 	steps := requirementsFiles(ws.projectDir)
@@ -72,11 +73,7 @@ func installRequirements(ctx context.Context, cfg Config, ws *workspace, p *runn
 		"ANSIBLE_ROLES_PATH=" + roles + ":" + defaultRolesPath,
 	}
 
-	var cred *runnerapi.RunnerCredential
-	if p != nil {
-		cred = p.Credential
-	}
-	env, cleanup, err := gitEnv(cfg, ws, cred)
+	env, cleanup, err := gitEnv(cfg, ws, p)
 	defer cleanup()
 	if err != nil {
 		return err

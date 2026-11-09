@@ -163,6 +163,28 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          description: Too many failed sign-ins for this username or client address.
+          headers:
+            Retry-After:
+              description: Seconds until another attempt is allowed.
+              schema:
+                type: integer
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "503":
+          description: Too many sign-ins are being checked at once; try again shortly.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
 
   /api/v1/auth/logout:
     post:
@@ -1043,7 +1065,9 @@ paths:
         credentials like any job: generic credentials' inputs as
         environment variables, which inventory plugins commonly read. Needs
         the admin role on the inventory and the use role on the project and
-        each credential.
+        each credential it adds. Changing the project, source path or
+        execution environment of a source that keeps credentials needs the
+        use role on all of them, since the sync runs that code with them.
       requestBody:
         required: true
         content:
@@ -1428,6 +1452,10 @@ paths:
       operationId: updateCredential
       tags: [credentials]
       summary: Update a credential
+      description: |
+        Changing a field that decides where the secrets are sent
+        (`server` of a registry credential, `url` of an API token) needs
+        every secret input to be given again in the same request.
       requestBody:
         required: true
         content:
@@ -1650,7 +1678,11 @@ paths:
       operationId: updateProject
       tags: [projects]
       summary: Update a project
-      description: Jobs already launched keep the repository and ref they were launched with.
+      description: |
+        Jobs already launched keep the repository and ref they were launched
+        with. Moving a project that keeps its credential to another server
+        (a different scheme, host or port in `scmUrl`) needs the `use` role
+        on the credential, since git would send it there.
       requestBody:
         required: true
         content:
@@ -1762,6 +1794,14 @@ paths:
       operationId: updateJobTemplate
       tags: [job-templates]
       summary: Update a job template
+      description: |
+        Needs the admin role on the template, and the use role on any
+        project, inventory or credential it starts to reference. A change
+        to what its jobs run or where (`command`, `entrypoint`,
+        `arguments`, `extraVars`, `executionEnvironmentId`, `projectId`,
+        `inventoryId`, or allowing `command`, `extraVars` or `inventory` to
+        be overridden) also needs the use role on all the template's
+        credentials, since such a change could make a job hand them over.
       requestBody:
         required: true
         content:
@@ -2050,6 +2090,10 @@ paths:
           when the stream opens.
         - `end`: the job has finished and all of its output has been sent.
           The server then closes the stream.
+        - `revoked`: the caller may no longer see the job (they signed out,
+          their token was revoked, their account was deactivated or their
+          role was removed). The server then closes the stream; access is
+          re-checked about every 15 seconds.
       parameters:
         - name: afterSeq
           in: query
@@ -3674,8 +3718,21 @@ components:
       type: string
       minLength: 1
       maxLength: 255
-      pattern: '^\S+$'
-      description: Host name or address, as Ansible will see it. No whitespace.
+      pattern: '^(?:[^\s,@]*[A-Za-z0-9._-]@)*[^\s,@]*$'
+      description: |
+        Host name or address, as Ansible will see it. No whitespace or
+        commas, and an `@` only right after a letter, digit, `.`, `_` or
+        `-`: host names go into limit patterns, where `@path` names a file.
+
+    HostPattern:
+      type: string
+      maxLength: 4096
+      pattern: '^(?:[^@]*[A-Za-z0-9._-]@)*[^@]*$'
+      description: |
+        Host pattern to restrict the job to (Ansible `--limit`), such as
+        `web:&prod:!web3`. Ansible reads a pattern starting with `@` as a
+        file of patterns; that isn't allowed, so an `@` may only follow a
+        letter, digit, `.`, `_` or `-`.
 
     Host:
       type: object
@@ -3870,7 +3927,7 @@ components:
 
     CredentialField:
       type: object
-      required: [name, label, secret, required, multiline]
+      required: [name, label, secret, required, multiline, destination]
       properties:
         name:
           type: string
@@ -3883,6 +3940,11 @@ components:
           type: boolean
         multiline:
           type: boolean
+        destination:
+          type: boolean
+          description: |
+            The field decides where the secrets are sent (such as a
+            registry's server). Changing it needs the secrets given again.
 
     Credential:
       type: object
@@ -4329,8 +4391,7 @@ components:
         extraVars:
           $ref: "#/components/schemas/Variables"
         limit:
-          type: string
-          maxLength: 4096
+          $ref: "#/components/schemas/HostPattern"
         tags:
           $ref: "#/components/schemas/AnsibleTags"
         skipTags:
@@ -4387,8 +4448,7 @@ components:
         extraVars:
           $ref: "#/components/schemas/Variables"
         limit:
-          type: string
-          maxLength: 4096
+          $ref: "#/components/schemas/HostPattern"
         tags:
           $ref: "#/components/schemas/AnsibleTags"
         skipTags:
@@ -4426,10 +4486,13 @@ components:
         extraVars:
           allOf:
             - $ref: "#/components/schemas/Variables"
-          description: Merged over the template's extra vars (top-level keys replace)
+          description: |
+            Merged over the template's extra vars (top-level keys replace).
+            Names starting with `ansible_` and keys or string values with
+            Jinja (`{{`, `{%` or `{#`) are refused: Ansible would use them
+            to connect, or evaluate them, with the job's credentials at hand.
         limit:
-          type: string
-          maxLength: 4096
+          $ref: "#/components/schemas/HostPattern"
         command:
           $ref: "#/components/schemas/Command"
         tags:

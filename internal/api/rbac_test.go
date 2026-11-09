@@ -158,11 +158,11 @@ func TestTemplateRolesTeamsAndJobs(t *testing.T) {
 		t.Errorf("creator grants = %v", grants)
 	}
 
-	// Removing bob from the team takes the team's roles away; his own job
-	// stays visible to him.
+	// Removing bob from the team takes the team's roles away, and with them
+	// the jobs he launched: launching grants nothing by itself.
 	admin.mustDo("DELETE", "/api/v1/teams/"+teamID+"/members/"+bobID, nil, 204)
 	bob.mustDo("GET", jtPath, nil, 404)
-	bob.mustDo("GET", jobPath, nil, 200)
+	bob.mustDo("GET", jobPath, nil, 404)
 }
 
 func TestScopedTokensUsersAndAudit(t *testing.T) {

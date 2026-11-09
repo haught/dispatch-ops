@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,7 +39,17 @@ type Handlers struct {
 	Version       string
 	// Notifier sends test notifications; nil uses a default Sender.
 	Notifier *notify.Sender
+	// LoginLimits throttles failed password sign-ins; the zero value
+	// doesn't.
+	LoginLimits store.LoginLimits
+	// StreamRecheck is how often a live job stream re-checks that its caller
+	// may still see the job; zero means DefaultStreamRecheck.
+	StreamRecheck time.Duration
 }
+
+// loginHashWait is how long a sign-in waits for a password hashing slot
+// (see auth.HashPasswordContext) before it is turned away as overloaded.
+const loginHashWait = 10 * time.Second
 
 var _ apigen.StrictServerInterface = (*Handlers)(nil)
 
@@ -59,25 +71,70 @@ func (h *Handlers) Login(ctx context.Context, req apigen.LoginRequestObject) (ap
 			problem(http.StatusUnauthorized, "Invalid username or password")),
 	}
 
+	clientIP := auth.ClientIPFromContext(ctx)
+	limited := h.LoginLimits.Enabled()
+	if limited {
+		wait, err := h.Store.LoginRetryAfter(ctx, req.Body.Username, clientIP, h.LoginLimits)
+		if err != nil {
+			return nil, err
+		}
+		if wait > 0 {
+			// Not the username: it is unverified and may be a mistyped password.
+			h.Log.WarnContext(ctx, "sign-in throttled", "client_ip", clientIP)
+			return loginRefused{http.StatusTooManyRequests, "Too many failed sign-in attempts; try again later", wait}, nil
+		}
+	}
+	failed := func() (apigen.LoginResponseObject, error) {
+		if limited {
+			if err := h.Store.RecordLoginFailure(ctx, req.Body.Username, clientIP); err != nil {
+				return nil, err
+			}
+		}
+		return invalid, nil
+	}
+
+	// Hashing is bounded server-wide; wait a little for a slot, then turn
+	// the attempt away rather than queue without end.
+	hashCtx, cancel := context.WithTimeout(ctx, loginHashWait)
+	defer cancel()
+	busy := func(err error) (apigen.LoginResponseObject, error) {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return loginRefused{http.StatusServiceUnavailable, "Too many sign-ins in progress; try again shortly", 5 * time.Second}, nil
+		}
+		return nil, err
+	}
+
 	user, err := h.Store.GetUserByUsername(ctx, req.Body.Username)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		auth.BurnPasswordCheck(req.Body.Password)
-		return invalid, nil
+		if err := auth.BurnPasswordCheckContext(hashCtx, req.Body.Password); err != nil {
+			return busy(err)
+		}
+		return failed()
 	case err != nil:
 		return nil, err
 	}
 	if !user.IsActive || user.AuthSource != "local" || user.PasswordHash == nil {
-		auth.BurnPasswordCheck(req.Body.Password)
-		return invalid, nil
+		if err := auth.BurnPasswordCheckContext(hashCtx, req.Body.Password); err != nil {
+			return busy(err)
+		}
+		return failed()
 	}
-	ok, err := auth.VerifyPassword(req.Body.Password, *user.PasswordHash)
+	ok, err := auth.VerifyPasswordContext(hashCtx, req.Body.Password, *user.PasswordHash)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, auth.ErrInvalidHash) {
+			return nil, err
+		}
+		return busy(err)
 	}
 	if !ok {
-		h.Log.InfoContext(ctx, "sign-in failed", "username", user.Username)
-		return invalid, nil
+		h.Log.InfoContext(ctx, "sign-in failed", "username", user.Username, "client_ip", clientIP)
+		return failed()
+	}
+	if limited {
+		if err := h.Store.ClearLoginFailures(ctx, req.Body.Username); err != nil {
+			return nil, err
+		}
 	}
 
 	cookie, err := h.startSession(ctx, user)
@@ -99,6 +156,22 @@ func (h *Handlers) Login(ctx context.Context, req apigen.LoginRequestObject) (ap
 		Body:    toAPIUser(user),
 		Headers: apigen.Login200ResponseHeaders{SetCookie: &c},
 	}, nil
+}
+
+// loginRefused turns a sign-in away without checking the password: 429 when
+// the username or client address has failed too often, 503 when too many
+// sign-ins are being checked at once.
+type loginRefused struct {
+	status     int
+	title      string
+	retryAfter time.Duration
+}
+
+func (r loginRefused) VisitLoginResponse(w http.ResponseWriter) error {
+	secs := int(math.Ceil(r.retryAfter.Seconds()))
+	w.Header().Set("Retry-After", strconv.Itoa(max(secs, 1)))
+	writeProblem(w, problem(r.status, r.title))
+	return nil
 }
 
 // startSession creates a browser session for user and returns its cookie.

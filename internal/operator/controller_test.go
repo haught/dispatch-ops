@@ -18,6 +18,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -538,11 +539,419 @@ func TestAPIWithoutTLS(t *testing.T) {
 	}
 }
 
+func jobsNamespace(allowFrom string) *corev1.Namespace {
+	n := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "jobs"}}
+	if allowFrom != "" {
+		n.Labels = map[string]string{AllowJobsFromLabel: allowFrom}
+	}
+	return n
+}
+
+func (e *env) setNamespaceLabel(value string) {
+	e.t.Helper()
+	var n corev1.Namespace
+	if err := e.c.Get(e.ctx, types.NamespacedName{Name: "jobs"}, &n); err != nil {
+		e.t.Fatal(err)
+	}
+	n.Labels = map[string]string{AllowJobsFromLabel: value}
+	if err := e.c.Update(e.ctx, &n); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *env) exists(namespace, name string, obj client.Object) bool {
+	e.t.Helper()
+	err := e.c.Get(e.ctx, types.NamespacedName{Namespace: namespace, Name: name}, obj)
+	if client.IgnoreNotFound(err) != nil {
+		e.t.Fatal(err)
+	}
+	return err == nil
+}
+
+func TestJobNamespaceMustOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		label     string
+		allowed   []string
+		scoped    bool
+		wantAllow bool
+	}{
+		{name: "unlabeled", wantAllow: false},
+		{name: "labeled for another namespace", label: "team-b", wantAllow: false},
+		{name: "labeled", label: ns, wantAllow: true},
+		{name: "allowed by the operator", allowed: []string{"jobs"}, wantAllow: true},
+		{name: "allowed by the operator, scoped", allowed: []string{"jobs"}, scoped: true, wantAllow: true},
+		// A scoped operator has no access to other namespaces, so it can't
+		// honor the label.
+		{name: "labeled, scoped", label: ns, scoped: true, wantAllow: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
+				TaskManager: v1alpha1.TaskManagerSpec{JobNamespace: "jobs"},
+			}}, jobsNamespace(tc.label))
+			e.r.AllowedJobNamespaces = tc.allowed
+			if tc.scoped {
+				e.r.Namespaces = []string{ns, "jobs"}
+			}
+			e.deploy()
+			cr := e.cr()
+			var role rbacv1.Role
+			var binding rbacv1.RoleBinding
+			var tm appsv1.Deployment
+			gotRole := e.exists("jobs", "ops-dops-task-manager", &role)
+			gotBinding := e.exists("jobs", "ops-dops-task-manager", &binding)
+			gotTM := e.get("dops-task-manager", &tm)
+			if gotRole != tc.wantAllow || gotBinding != tc.wantAllow || gotTM != tc.wantAllow {
+				t.Errorf("role %t binding %t task manager %t, want %t", gotRole, gotBinding, gotTM, tc.wantAllow)
+			}
+			if !tc.wantAllow {
+				e.wantCondition(cr, CondTaskManagerReady, metav1.ConditionFalse, "JobNamespaceNotAllowed")
+				var api appsv1.Deployment
+				if !e.get("dops-api", &api) {
+					t.Error("the API server wasn't deployed")
+				}
+			}
+		})
+	}
+}
+
+func TestJobNamespaceOptOutRemovesRBAC(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
+		TaskManager: v1alpha1.TaskManagerSpec{JobNamespace: "jobs"},
+	}}, jobsNamespace(ns))
+	e.deploy()
+	var role rbacv1.Role
+	var np networkingv1.NetworkPolicy
+	if !e.exists("jobs", "ops-dops-task-manager", &role) || !e.exists("jobs", "ops-dops-jobs", &np) {
+		t.Fatal("no Role or NetworkPolicy in the opted-in job namespace")
+	}
+	e.setNamespaceLabel("someone-else")
+	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err != nil {
+		t.Fatal(err)
+	}
+	if e.exists("jobs", "ops-dops-task-manager", &role) || e.exists("jobs", "ops-dops-jobs", &np) {
+		t.Error("RBAC or NetworkPolicy survived the namespace opting out")
+	}
+	e.wantCondition(e.cr(), CondTaskManagerReady, metav1.ConditionFalse, "JobNamespaceNotAllowed")
+}
+
+func TestRefusesToAdoptObjects(t *testing.T) {
+	foreign := func(obj client.Object, labels map[string]string) client.Object {
+		obj.SetNamespace("jobs")
+		obj.SetName("ops-dops-task-manager")
+		obj.SetLabels(labels)
+		return obj
+	}
+	for name, labels := range map[string]map[string]string{
+		"unlabeled": nil,
+		// Labeled by someone who knows the UID, but not managed by the
+		// operator.
+		"owner label only": {ownerLabel: "uid-1"},
+		"another owner":    {ownerLabel: "uid-2", "app.kubernetes.io/managed-by": ManagedBy},
+	} {
+		t.Run(name, func(t *testing.T) {
+			existing := foreign(&rbacv1.Role{Rules: []rbacv1.PolicyRule{{Verbs: []string{"get"}, APIGroups: []string{""}, Resources: []string{"configmaps"}}}}, labels)
+			e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
+				TaskManager: v1alpha1.TaskManagerSpec{JobNamespace: "jobs"},
+			}}, jobsNamespace(ns), existing)
+			e.reconcile()
+			e.databaseReady()
+			e.reconcile()
+			e.finishMigration("dispatch-ops:1.0", true)
+			_, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key})
+			if err == nil || !strings.Contains(err.Error(), "doesn't belong to DispatchOps") {
+				t.Errorf("reconcile error = %v, want a refusal", err)
+			}
+			var role rbacv1.Role
+			if !e.exists("jobs", "ops-dops-task-manager", &role) || role.Rules[0].Resources[0] != "configmaps" {
+				t.Errorf("the existing Role was changed: %+v", role.Rules)
+			}
+			e.wantCondition(e.cr(), CondReady, metav1.ConditionFalse, "Error")
+
+			// Nor is it deleted when the DispatchOps is.
+			if err := e.c.Delete(e.ctx, e.cr()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err != nil {
+				t.Fatal(err)
+			}
+			if !e.exists("jobs", "ops-dops-task-manager", &role) {
+				t.Error("finalizing deleted a Role the operator didn't create")
+			}
+		})
+	}
+
+	// In its own namespace too.
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "dops-postgres", Namespace: ns}}
+	e := newEnv(t, &v1alpha1.DispatchOps{}, svc)
+	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err == nil || !strings.Contains(err.Error(), "doesn't belong") {
+		t.Errorf("reconcile error = %v, want a refusal", err)
+	}
+}
+
+func TestPruneOnlyDeletesItsOwnObjects(t *testing.T) {
+	ours := map[string]string{ownerLabel: "uid-1", "app.kubernetes.io/managed-by": ManagedBy}
+	// Labeled as ours but named differently: not something the operator
+	// made, so it stays.
+	other := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "kube-admin", Namespace: "kube-system", Labels: ours}}
+	// What an earlier job namespace left behind: deleted.
+	stale := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "ops-dops-task-manager", Namespace: "old-jobs", Labels: ours}}
+	e := newEnv(t, &v1alpha1.DispatchOps{}, other, stale)
+	e.deploy()
+	var role rbacv1.Role
+	if !e.exists("kube-system", "kube-admin", &role) {
+		t.Error("pruned a Role the operator didn't name")
+	}
+	if e.exists("old-jobs", "ops-dops-task-manager", &role) {
+		t.Error("the old job namespace's Role survived")
+	}
+}
+
+func TestNetworkPolicies(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
+		NetworkPolicy: v1alpha1.NetworkPolicySpec{JobEgressExcept: []string{"10.96.0.0/12", "fd00:10:96::/112"}},
+	}})
+	e.deploy()
+
+	var pg networkingv1.NetworkPolicy
+	if !e.get("dops-postgres", &pg) {
+		t.Fatal("no database NetworkPolicy")
+	}
+	var from []string
+	for _, p := range pg.Spec.Ingress[0].From {
+		from = append(from, p.PodSelector.MatchLabels["app.kubernetes.io/component"])
+	}
+	if got := strings.Join(from, ","); got != "api,task-manager,migrate" || pg.Spec.Ingress[0].Ports[0].Port.IntVal != 5432 ||
+		len(pg.Spec.Ingress) != 1 || pg.Spec.PodSelector.MatchLabels["app.kubernetes.io/component"] != "postgres" {
+		t.Errorf("database policy = %+v", pg.Spec)
+	}
+
+	var api, tm networkingv1.NetworkPolicy
+	e.get("dops-api", &api)
+	e.get("dops-task-manager", &tm)
+	if len(api.Spec.Ingress) != 2 || api.Spec.Ingress[0].From != nil || api.Spec.Ingress[0].Ports[0].Port.IntVal != 8443 {
+		t.Errorf("API policy = %+v", api.Spec.Ingress)
+	}
+	for _, p := range []networkingv1.NetworkPolicy{api, tm} {
+		m := p.Spec.Ingress[len(p.Spec.Ingress)-1]
+		if m.Ports[0].Port.IntVal != 9090 || m.From[0].PodSelector.MatchExpressions[0].Key != jobPodIDLabel ||
+			m.From[0].PodSelector.MatchExpressions[0].Operator != metav1.LabelSelectorOpDoesNotExist {
+			t.Errorf("%s metrics rule = %+v", p.Name, m)
+		}
+	}
+	if len(tm.Spec.Ingress) != 1 {
+		t.Errorf("task manager policy = %+v", tm.Spec.Ingress)
+	}
+
+	var jobs networkingv1.NetworkPolicy
+	if !e.get("dops-jobs", &jobs) {
+		t.Fatal("no job pod NetworkPolicy")
+	}
+	s := jobs.Spec
+	if s.PodSelector.MatchLabels["app.kubernetes.io/component"] != "job" || len(s.Ingress) != 0 || len(s.PolicyTypes) != 2 {
+		t.Errorf("job policy = %+v", s)
+	}
+	if to := s.Egress[0].To[0]; to.NamespaceSelector.MatchLabels[corev1.LabelMetadataName] != ns ||
+		to.PodSelector.MatchLabels["app.kubernetes.io/component"] != "api" || s.Egress[0].Ports[0].Port.IntVal != 8443 {
+		t.Errorf("job egress to the API = %+v", s.Egress[0])
+	}
+	if s.Egress[1].To != nil || s.Egress[1].Ports[0].Port.IntVal != 53 {
+		t.Errorf("job DNS egress = %+v", s.Egress[1])
+	}
+	v4, v6 := s.Egress[2].To[0].IPBlock, s.Egress[2].To[1].IPBlock
+	if v4.CIDR != "0.0.0.0/0" || strings.Join(v4.Except, ",") != "169.254.0.0/16,10.96.0.0/12" ||
+		v6.CIDR != "::/0" || strings.Join(v6.Except, ",") != "fe80::/10,fd00:ec2::254/128,fd00:10:96::/112" {
+		t.Errorf("job egress = %+v / %+v", v4, v6)
+	}
+
+	// A bad CIDR is an error, not a policy that lets everything through.
+	cr := e.cr()
+	cr.Spec.NetworkPolicy.JobEgressExcept = []string{"10.0.0.0/33"}
+	if err := e.c.Update(e.ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err == nil {
+		t.Error("an invalid CIDR reconciled")
+	}
+
+	// Turned off, they are deleted.
+	cr = e.cr()
+	cr.Spec.NetworkPolicy = v1alpha1.NetworkPolicySpec{Enabled: new(false)}
+	if err := e.c.Update(e.ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	for _, name := range []string{"dops-postgres", "dops-api", "dops-task-manager", "dops-jobs"} {
+		var np networkingv1.NetworkPolicy
+		if e.get(name, &np) {
+			t.Errorf("NetworkPolicy %s survived being turned off", name)
+		}
+	}
+}
+
+func TestManagedDatabaseIsHardened(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{})
+	e.deploy()
+
+	var pg corev1.Secret
+	e.get("dops-postgres", &pg)
+	if !strings.HasSuffix(pg.StringData["url"], "?sslmode=require") {
+		t.Errorf("database url = %q", pg.StringData["url"])
+	}
+	var tlsSecret corev1.Secret
+	if !e.get("dops-postgres-tls", &tlsSecret) || len(tlsSecret.OwnerReferences) != 0 {
+		t.Fatal("no generated database certificate, or it is owned")
+	}
+	block, _ := pem.Decode(tlsSecret.Data["tls.crt"])
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cert.VerifyHostname("dops-postgres.ops.svc"); err != nil {
+		t.Error(err)
+	}
+
+	var sts appsv1.StatefulSet
+	e.get("dops-postgres", &sts)
+	pod := sts.Spec.Template.Spec
+	psc := pod.SecurityContext
+	if !*psc.RunAsNonRoot || *psc.RunAsUser != 999 || *psc.RunAsGroup != 999 || *psc.FSGroup != 999 ||
+		psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod security = %+v", psc)
+	}
+	for _, c := range append(pod.InitContainers, pod.Containers...) {
+		sc := c.SecurityContext
+		if *sc.AllowPrivilegeEscalation || !*sc.ReadOnlyRootFilesystem || !*sc.RunAsNonRoot || *sc.RunAsUser != 999 ||
+			len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+			t.Errorf("%s security = %+v", c.Name, sc)
+		}
+		if c.Image != DefaultPostgresImage || !strings.Contains(c.Image, "@sha256:") {
+			t.Errorf("%s image = %s", c.Name, c.Image)
+		}
+	}
+	c := pod.Containers[0]
+	if args := strings.Join(c.Args, " "); !strings.Contains(args, "-c ssl=on") || !strings.Contains(args, "ssl_key_file=/var/run/postgresql-tls/tls.key") {
+		t.Errorf("postgres args = %s", args)
+	}
+	if c.Resources.Limits.Memory().String() != "1Gi" || c.Resources.Requests.Cpu().String() != "100m" {
+		t.Errorf("default resources = %+v", c.Resources)
+	}
+	if !strings.Contains(pod.InitContainers[0].Command[2], "install -m 0600") {
+		t.Errorf("init container = %v", pod.InitContainers[0].Command)
+	}
+
+	// Resources and image can be overridden.
+	cr := e.cr()
+	cr.Spec.Database.Managed = &v1alpha1.ManagedDatabase{
+		Image:     "postgres:17.11",
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")}},
+	}
+	if err := e.c.Update(e.ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	e.get("dops-postgres", &sts)
+	c = sts.Spec.Template.Spec.Containers[0]
+	if c.Image != "postgres:17.11" || c.Resources.Limits.Memory().String() != "4Gi" || len(c.Resources.Requests) != 0 {
+		t.Errorf("overridden: image %s resources %+v", c.Image, c.Resources)
+	}
+}
+
+func TestDatabaseURLMovesToTLS(t *testing.T) {
+	// What an older operator generated.
+	old := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "dops-postgres", Namespace: ns, Annotations: map[string]string{"dispatch-ops.io/generated": "true"}},
+		Data: map[string][]byte{
+			"password": []byte("pw"),
+			"url":      []byte("postgres://dispatch:pw@dops-postgres.ops.svc:5432/dispatch?sslmode=disable"),
+		},
+	}
+	e := newEnv(t, &v1alpha1.DispatchOps{}, old)
+	e.deploy()
+	var api appsv1.Deployment
+	e.get("dops-api", &api)
+	if got := api.Spec.Template.Annotations[dbSSLModeAnnotation]; got != "disable" {
+		t.Errorf("before the database rolled out: annotation %q", got)
+	}
+
+	// PostgreSQL serves TLS now: the URL requires it, and the servers
+	// restart to pick that up.
+	var sts appsv1.StatefulSet
+	e.get("dops-postgres", &sts)
+	sts.Status.ObservedGeneration, sts.Status.UpdatedReplicas = sts.Generation, 1
+	if err := e.c.Status().Update(e.ctx, &sts); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	var s corev1.Secret
+	e.get("dops-postgres", &s)
+	if got := string(s.Data["url"]); got != "postgres://dispatch:pw@dops-postgres.ops.svc:5432/dispatch?sslmode=require" {
+		t.Errorf("url = %q", got)
+	}
+	e.get("dops-api", &api)
+	if got := api.Spec.Template.Annotations[dbSSLModeAnnotation]; got != "require" {
+		t.Errorf("after: annotation %q", got)
+	}
+	if api.Spec.Template.Annotations["prometheus.io/scrape"] != "true" {
+		t.Errorf("annotations = %v", api.Spec.Template.Annotations)
+	}
+}
+
+func TestTrustedProxies(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
+		API: v1alpha1.APISpec{TrustedProxies: []string{"10.0.0.0/8", "192.0.2.7"}},
+	}})
+	e.deploy()
+	var api appsv1.Deployment
+	e.get("dops-api", &api)
+	if v, _ := envValue(api.Spec.Template.Spec.Containers[0], "DISPATCH_TRUSTED_PROXIES"); v.Value != "10.0.0.0/8,192.0.2.7" {
+		t.Errorf("DISPATCH_TRUSTED_PROXIES = %q", v.Value)
+	}
+
+	cr := e.cr()
+	cr.Spec.API.TrustedProxies = []string{"10.0.0.0/99"}
+	if err := e.c.Update(e.ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err == nil || !strings.Contains(err.Error(), "trustedProxies") {
+		t.Errorf("reconcile error = %v", err)
+	}
+
+	// Unset by default.
+	e = newEnv(t, &v1alpha1.DispatchOps{})
+	e.deploy()
+	e.get("dops-api", &api)
+	if _, ok := envValue(api.Spec.Template.Spec.Containers[0], "DISPATCH_TRUSTED_PROXIES"); ok {
+		t.Error("DISPATCH_TRUSTED_PROXIES set by default")
+	}
+}
+
+func TestJobResources(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{TaskManager: v1alpha1.TaskManagerSpec{
+		JobResources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+		},
+		JobWorkSizeLimit: new(resource.MustParse("10Gi")),
+	}}})
+	e.deploy()
+	var tm appsv1.Deployment
+	e.get("dops-task-manager", &tm)
+	for name, want := range map[string]string{
+		"DISPATCH_JOB_CPU_REQUEST": "0", "DISPATCH_JOB_MEMORY_REQUEST": "512Mi",
+		"DISPATCH_JOB_CPU_LIMIT": "0", "DISPATCH_JOB_MEMORY_LIMIT": "4Gi", "DISPATCH_JOB_WORK_SIZE_LIMIT": "10Gi",
+	} {
+		if v, _ := envValue(tm.Spec.Template.Spec.Containers[0], name); v.Value != want {
+			t.Errorf("%s = %q, want %q", name, v.Value, want)
+		}
+	}
+}
+
 func TestJobNamespaceRBACIsCleanedUp(t *testing.T) {
 	cr := &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
 		TaskManager: v1alpha1.TaskManagerSpec{JobNamespace: "jobs"},
 	}}
-	e := newEnv(t, cr)
+	e := newEnv(t, cr, jobsNamespace(ns))
 	e.reconcile()
 	e.databaseReady()
 	e.reconcile()
@@ -556,6 +965,10 @@ func TestJobNamespaceRBACIsCleanedUp(t *testing.T) {
 	}
 	if role.Labels[ownerLabel] != "uid-1" || len(role.OwnerReferences) != 0 {
 		t.Errorf("role labels %v owners %v", role.Labels, role.OwnerReferences)
+	}
+	var np networkingv1.NetworkPolicy
+	if !e.exists("jobs", "ops-dops-jobs", &np) || np.Labels[ownerLabel] != "uid-1" {
+		t.Errorf("job NetworkPolicy in the job namespace: %+v", np.ObjectMeta)
 	}
 	var tm appsv1.Deployment
 	e.get("dops-task-manager", &tm)
@@ -576,5 +989,8 @@ func TestJobNamespaceRBACIsCleanedUp(t *testing.T) {
 	var binding rbacv1.RoleBinding
 	if err := e.c.Get(e.ctx, key, &binding); err == nil {
 		t.Error("the job namespace RoleBinding survived")
+	}
+	if e.exists("jobs", "ops-dops-jobs", &np) {
+		t.Error("the job namespace NetworkPolicy survived")
 	}
 }

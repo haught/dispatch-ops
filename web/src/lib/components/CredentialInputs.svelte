@@ -40,6 +40,23 @@
 		return Boolean(credential?.secretFields.includes(name));
 	}
 
+	// Editing a field that decides where the secrets go (a registry's server,
+	// an API's URL): the API wants the secrets given again with it.
+	const movedFields = $derived(
+		editing && !kind.freeform
+			? kind.fields.filter(
+					(f) =>
+						f.destination && (values[f.name] ?? '') !== (credential?.publicInputs[f.name] ?? '')
+				)
+			: []
+	);
+	const reenter = $derived(movedFields.length > 0);
+
+	function secretPlaceholder(name: string): string {
+		if (!isSet(name)) return '';
+		return reenter ? 'Enter it again' : 'Leave blank to keep the current value';
+	}
+
 	function addRow() {
 		rows.push({ name: '', value: '', existing: false, remove: false });
 	}
@@ -136,18 +153,19 @@
 							class="code"
 							rows="6"
 							spellcheck="false"
-							required={f.required && !(editing && f.secret)}
+							required={(f.required && !(editing && f.secret)) ||
+								(f.secret && reenter && isSet(f.name))}
 							disabled={remove[f.name]}
-							placeholder={f.secret && isSet(f.name) ? 'Leave blank to keep the current value' : ''}
-						></textarea>
+							placeholder={f.secret ? secretPlaceholder(f.name) : ''}></textarea>
 					{:else}
 						<input
 							bind:value={values[f.name]}
 							type={f.secret ? 'password' : 'text'}
 							autocomplete={f.secret ? 'new-password' : 'off'}
-							required={f.required && !(editing && f.secret)}
+							required={(f.required && !(editing && f.secret)) ||
+								(f.secret && reenter && isSet(f.name))}
 							disabled={remove[f.name]}
-							placeholder={f.secret && isSet(f.name) ? 'Leave blank to keep the current value' : ''}
+							placeholder={f.secret ? secretPlaceholder(f.name) : ''}
 						/>
 					{/if}
 				</label>
@@ -159,6 +177,12 @@
 			</div>
 		{/each}
 	</div>
+	{#if reenter}
+		<p class="muted small">
+			The {movedFields.map((f) => f.label.replace(/\s*\(.*\)$/, '').toLowerCase()).join(' and ')} decides
+			where the secrets are sent, so changing it needs them entered again.
+		</p>
+	{/if}
 {/if}
 
 <style>

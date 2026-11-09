@@ -10,6 +10,32 @@ import (
 	"dispatch-ops/internal/store"
 )
 
+func TestCheckDestinationChange(t *testing.T) {
+	reg, _ := Lookup("registry")
+	old := map[string]string{"server": "ghcr.io", "username": "bot"}
+	held := []string{"password"}
+	for _, tc := range []struct {
+		changes map[string]string
+		ok      bool
+	}{
+		{map[string]string{"username": "other"}, true},
+		{map[string]string{"server": "ghcr.io"}, true},
+		{map[string]string{"password": "new"}, true},
+		{map[string]string{"server": "evil.example"}, false},
+		{map[string]string{"server": "evil.example", "password": ""}, false},
+		{map[string]string{"server": "evil.example", "password": "new"}, true},
+	} {
+		err := reg.CheckDestinationChange(old, held, tc.changes)
+		if (err == nil) != tc.ok {
+			t.Errorf("%v: err = %v", tc.changes, err)
+		}
+	}
+	tok, _ := Lookup("api_token")
+	if err := tok.CheckDestinationChange(map[string]string{}, []string{"token"}, map[string]string{"url": "https://evil.example"}); err == nil {
+		t.Error("an api_token's URL changed without the token")
+	}
+}
+
 func TestSplit(t *testing.T) {
 	ssh, _ := Lookup("ssh")
 	public, secret, err := ssh.Split(map[string]string{"username": "deploy", "private_key": "KEY", "passphrase": ""})

@@ -17,10 +17,35 @@
 		});
 	});
 
-	// Only follow same-site paths, so the login page can't be used as an open redirect.
+	// Only follow paths on this origin, so the login page can't be used as an
+	// open redirect. Browsers drop tabs and newlines from URLs and treat "\"
+	// like "/", so "/\t/evil.com" would lead off-site: reject control
+	// characters and backslashes, before and after decoding. This matches
+	// safeNext in internal/api/oidc.go.
+	function isLocalPath(p: string): boolean {
+		let decoded: string;
+		try {
+			decoded = decodeURIComponent(p);
+		} catch {
+			return false;
+		}
+		for (const s of [p, decoded]) {
+			if (!s.startsWith('/') || s.startsWith('//') || s.includes('\\')) return false;
+			// eslint-disable-next-line no-control-regex
+			if (/[\x00-\x1f\x7f]/.test(s)) return false;
+		}
+		try {
+			const base = new URL('https://origin.invalid/');
+			const u = new URL(p, base);
+			return u.origin === base.origin && !u.username && !u.password;
+		} catch {
+			return false;
+		}
+	}
+
 	function nextPath(): string {
 		const next = page.url.searchParams.get('next') ?? '/';
-		return next.startsWith('/') && !next.startsWith('//') ? next : '/';
+		return isLocalPath(next) ? next : '/';
 	}
 
 	const ssoHref = $derived(`/api/v1/auth/oidc/login?next=${encodeURIComponent(nextPath())}`);

@@ -20,8 +20,15 @@ spec:
       secretName: dispatch-ops-api-tls
   taskManager:
     replicas: 2
+    # Opt it in first: the chart's allowedJobNamespaces, or (when the
+    # operator watches all namespaces) the label
+    # dispatch-ops.io/allow-jobs-from=dispatch-ops on the namespace.
     jobNamespace: dispatch-jobs
     maxConcurrentJobs: 20
+  # Keep job pods away from in-cluster services as well as cloud metadata:
+  # this cluster's pod and service CIDRs.
+  networkPolicy:
+    jobEgressExcept: [10.244.0.0/16, 10.96.0.0/12]
   database:
     external:
       urlSecret:

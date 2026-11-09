@@ -18,6 +18,11 @@ type Field struct {
 	Secret    bool
 	Required  bool
 	Multiline bool
+	// Destination fields decide where the secret values are sent (a
+	// registry's server, an API's URL). Changing one needs the secrets
+	// given again (see Kind.CheckDestinationChange), so whoever may edit a
+	// credential can't redirect secrets they don't know to their own host.
+	Destination bool
 	// Pattern, if set, restricts the value; PatternHelp describes it.
 	Pattern     *regexp.Regexp
 	PatternHelp string
@@ -49,11 +54,11 @@ var Kinds = []Kind{
 		{Name: "become_password", Label: "Become (sudo) password", Secret: true},
 	}},
 	{Name: "api_token", Label: "API token", Fields: []Field{
-		{Name: "url", Label: "API URL"},
+		{Name: "url", Label: "API URL", Destination: true},
 		{Name: "token", Label: "Token", Secret: true, Required: true},
 	}},
 	{Name: "registry", Label: "Container registry", Fields: []Field{
-		{Name: "server", Label: "Registry server (e.g. ghcr.io)", Required: true},
+		{Name: "server", Label: "Registry server (e.g. ghcr.io)", Required: true, Destination: true},
 		{Name: "username", Label: "Username", Required: true},
 		{Name: "password", Label: "Password or token", Secret: true, Required: true},
 	}},
@@ -91,6 +96,35 @@ type ValidationError struct {
 }
 
 func (e *ValidationError) Error() string { return e.msg }
+
+// CheckDestinationChange returns a ValidationError if an update of a
+// credential of kind k changes a Destination field without giving every
+// secret value the credential holds again. oldPublic are the credential's
+// public values before the update, secretNames the names of the secrets it
+// holds, and changes the update's inputs (an empty value removes one).
+func (k Kind) CheckDestinationChange(oldPublic map[string]string, secretNames []string, changes map[string]string) error {
+	var moved []string
+	for _, f := range k.Fields {
+		if v, ok := changes[f.Name]; f.Destination && ok && v != oldPublic[f.Name] {
+			moved = append(moved, f.Name)
+		}
+	}
+	if len(moved) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, name := range secretNames {
+		if changes[name] == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return &ValidationError{fmt.Sprintf("changing %s decides where this credential's secrets are sent, so %s must be given again in the same change",
+		strings.Join(moved, " and "), strings.Join(missing, ", "))}
+}
 
 // Split validates a complete set of inputs for the kind and separates the
 // public values from the secret ones. Empty values are treated as absent.

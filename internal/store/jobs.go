@@ -286,11 +286,13 @@ func (s *Store) ListJobs(ctx context.Context, f JobFilter, page Page) ([]Job, in
 }
 
 // jobReadableCond is the SQL condition that a user may see the job aliased
-// as alias: they launched it, hold a role on its template, or hold a role
-// on the inventory it syncs. userParam is the placeholder for the user's ID.
+// as alias: they hold a role on its template, or on the inventory it syncs.
+// Having launched a job grants nothing by itself, so a user who loses their
+// roles loses sight of the jobs they launched too. userParam is the
+// placeholder for the user's ID.
 func jobReadableCond(alias, userParam string) string {
 	j, u := alias, userParam
-	return `(` + j + `.launched_by = ` + u + ` OR EXISTS (SELECT 1 FROM user_roles r
+	return `(EXISTS (SELECT 1 FROM user_roles r
 			WHERE r.user_id = ` + u + ` AND r.resource_type = 'job_template'
 				AND (r.resource_id IS NULL OR r.resource_id = ` + j + `.job_template_id))
 			OR (` + j + `.sync_inventory_id IS NOT NULL AND EXISTS (SELECT 1 FROM user_roles r

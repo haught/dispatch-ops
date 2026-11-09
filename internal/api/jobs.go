@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 
 	"dispatch-ops/internal/api/apigen"
+	"dispatch-ops/internal/auth"
+	"dispatch-ops/internal/hostpattern"
 	"dispatch-ops/internal/metrics"
 	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
@@ -121,6 +123,12 @@ const streamKeepalive = 15 * time.Second
 // streamBatch is how many events are read from the database at a time.
 const streamBatch = 500
 
+// DefaultStreamRecheck is how often an open stream re-checks that its caller
+// may still see the job, so a logout, a revoked token, a deactivated user or
+// a removed role ends the stream instead of letting it run until the job
+// does. The keepalive tick guarantees a check at least this often.
+const DefaultStreamRecheck = streamKeepalive
+
 func (h *Handlers) StreamJob(ctx context.Context, req apigen.StreamJobRequestObject) (apigen.StreamJobResponseObject, error) {
 	after := deref(req.Params.AfterSeq)
 	if id := deref(req.Params.LastEventID); id != "" {
@@ -167,7 +175,21 @@ func (s jobStream) VisitStreamJobResponse(w http.ResponseWriter) error {
 	after := s.after
 	lastStatus := ""
 	lastCancel := false
+	recheck := s.h.StreamRecheck
+	if recheck <= 0 {
+		recheck = DefaultStreamRecheck
+	}
+	keepalive.Reset(min(streamKeepalive, recheck))
+	lastCheck := time.Now()
 	for {
+		if time.Since(lastCheck) >= recheck {
+			if err := s.stillAllowed(); err != nil {
+				_ = writeSSE(w, "revoked", "", map[string]string{"reason": "access to this job has ended"})
+				_ = rc.Flush()
+				return s.end(err)
+			}
+			lastCheck = time.Now()
+		}
 		// Read the job before its events: a runner sends all events before
 		// it reports the final status, so if the job had finished by now,
 		// the events read next are complete.
@@ -217,6 +239,27 @@ func (s jobStream) VisitStreamJobResponse(w http.ResponseWriter) error {
 			}
 		}
 	}
+}
+
+// stillAllowed re-authenticates the stream's caller from its token, with
+// their current global roles, and checks that they may still see the job.
+func (s jobStream) stillAllowed() error {
+	p := caller(s.ctx)
+	if p == nil {
+		return errors.New("stream has no caller")
+	}
+	u, err := s.h.Store.TokenUser(s.ctx, p.TokenID)
+	if err != nil {
+		return fmt.Errorf("caller's token is no longer valid: %w", err)
+	}
+	fresh := *p
+	fresh.Username, fresh.IsAdmin, fresh.IsAuditor = u.Username, u.IsAdmin, u.IsAuditor
+	ctx := auth.WithPrincipal(s.ctx, &fresh)
+	job, err := s.h.Store.GetJob(ctx, s.jobID)
+	if err != nil {
+		return err
+	}
+	return s.h.authorizeJob(ctx, job, rbac.Read)
 }
 
 // end finishes a stream after an error. Once the 200 header is sent no
@@ -269,6 +312,10 @@ func (h *Handlers) RelaunchJob(ctx context.Context, req apigen.RelaunchJobReques
 			return nil, err
 		}
 		cfg.Limit = limit
+	}
+	// Also a limit stored before limits were checked.
+	if err := hostpattern.CheckLimit(cfg.Limit); err != nil {
+		return nil, badRequest("the job can't be relaunched: %s", err)
 	}
 
 	job, err := h.Store.CreateJob(ctx, store.NewJob{
@@ -361,6 +408,12 @@ func (h *Handlers) failedHostsLimit(ctx context.Context, j store.Job) (string, e
 	var failed []string
 	for _, s := range summaries {
 		if s.Failed > 0 || s.Unreachable > 0 {
+			// Host names come from the job's events, which the job itself
+			// could have written; one such as @/path would make the limit
+			// read that file.
+			if err := hostpattern.CheckHostName(s.HostName); err != nil {
+				return "", badRequest("the job can't be relaunched on its failed hosts: %s", err)
+			}
 			failed = append(failed, s.HostName)
 		}
 	}

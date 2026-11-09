@@ -72,3 +72,40 @@ func TestTLS(t *testing.T) {
 		t.Errorf("cert and key: %+v, %v", c, err)
 	}
 }
+
+func TestJobResources(t *testing.T) {
+	t.Setenv("DISPATCH_DATABASE_URL", "postgres://x")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.TaskManager.JobResources
+	if r.Requests.Cpu().String() != "100m" || r.Requests.Memory().String() != "256Mi" ||
+		r.Limits.Cpu().String() != "2" || r.Limits.Memory().String() != "2Gi" {
+		t.Errorf("defaults = %+v", r)
+	}
+	if c.TaskManager.JobWorkSizeLimit.String() != "4Gi" {
+		t.Errorf("work size limit = %s", c.TaskManager.JobWorkSizeLimit.String())
+	}
+
+	t.Setenv("DISPATCH_JOB_CPU_LIMIT", "0")
+	t.Setenv("DISPATCH_JOB_MEMORY_LIMIT", "4Gi")
+	t.Setenv("DISPATCH_JOB_WORK_SIZE_LIMIT", "0")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = c.TaskManager.JobResources
+	if _, ok := r.Limits["cpu"]; ok || r.Limits.Memory().String() != "4Gi" || !c.TaskManager.JobWorkSizeLimit.IsZero() {
+		t.Errorf("overrides = %+v, work %s", r, c.TaskManager.JobWorkSizeLimit.String())
+	}
+
+	for k, v := range map[string]string{"DISPATCH_JOB_MEMORY_REQUEST": "8Gi", "DISPATCH_JOB_CPU_REQUEST": "lots"} {
+		t.Run(k, func(t *testing.T) {
+			t.Setenv(k, v)
+			if _, err := Load(); err == nil {
+				t.Errorf("%s=%s: want an error", k, v)
+			}
+		})
+	}
+}

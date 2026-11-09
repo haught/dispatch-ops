@@ -56,10 +56,35 @@ func (r redirect) VisitOidcCallbackResponse(w http.ResponseWriter) error { retur
 // safeNext returns next if it is a path in this app, so sign-in can't be
 // used as an open redirect, and "/" otherwise.
 func safeNext(next string) string {
-	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") && !strings.HasPrefix(next, "/\\") {
+	if isLocalPath(next) {
 		return next
 	}
 	return "/"
+}
+
+// isLocalPath reports whether p is an absolute path (with optional query and
+// fragment) on this origin. Browsers drop tabs and newlines from URLs and
+// treat "\" like "/", so "/\t/evil.com" and "/\evil.com" would lead to
+// evil.com: p must contain neither, nor any other control byte, before or
+// after percent-decoding, and must not start with "//".
+func isLocalPath(p string) bool {
+	decoded, err := url.PathUnescape(p)
+	if err != nil {
+		return false
+	}
+	for _, s := range []string{p, decoded} {
+		if !strings.HasPrefix(s, "/") || strings.HasPrefix(s, "//") || strings.ContainsRune(s, '\\') {
+			return false
+		}
+		for i := 0; i < len(s); i++ {
+			if s[i] < 0x20 || s[i] == 0x7f {
+				return false
+			}
+		}
+	}
+	u, err := url.Parse(p)
+	return err == nil && u.Scheme == "" && u.Host == "" && u.User == nil && u.Opaque == "" &&
+		strings.HasPrefix(u.Path, "/") && !strings.HasPrefix(u.Path, "//")
 }
 
 func (h *Handlers) oidcCookie(value string, maxAge int) *http.Cookie {

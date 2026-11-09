@@ -41,6 +41,8 @@ spec:
           env:
             - name: WATCH_NAMESPACES
               value: {{ join "," .Values.watchNamespaces | quote }}
+            - name: ALLOWED_JOB_NAMESPACES
+              value: {{ join "," .Values.allowedJobNamespaces | quote }}
           ports:
             - name: metrics
               containerPort: 8080

@@ -129,6 +129,12 @@
 						if (selectedHost) loadHostEvents(id, selectedHost);
 					}
 				});
+				source.addEventListener('revoked', () => {
+					// Don't let the browser reconnect: access has ended.
+					source?.close();
+					live = false;
+					error = 'You no longer have access to this job. Sign in again or ask an admin.';
+				});
 				source.onerror = () => {
 					// The browser reconnects by itself (resuming with Last-Event-ID)
 					// unless the server refused the stream.

@@ -1,9 +1,37 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestPasswordHashingIsBounded(t *testing.T) {
+	hash, err := HashPassword("pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Take every slot: the next check must wait, and give up with its context.
+	for range cap(hashSlots) {
+		hashSlots <- struct{}{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := VerifyPasswordContext(ctx, "pw", hash); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("VerifyPasswordContext with no free slot = %v, want deadline exceeded", err)
+	}
+	if err := BurnPasswordCheckContext(ctx, "pw"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("BurnPasswordCheckContext with no free slot = %v", err)
+	}
+	for range cap(hashSlots) {
+		<-hashSlots
+	}
+	if ok, err := VerifyPasswordContext(context.Background(), "pw", hash); !ok || err != nil {
+		t.Errorf("after slots freed: %v, %v", ok, err)
+	}
+}
 
 func TestPasswordRoundTrip(t *testing.T) {
 	hash, err := HashPassword("correct horse battery staple")

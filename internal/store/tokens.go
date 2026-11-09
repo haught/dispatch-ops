@@ -98,6 +98,22 @@ func (s *Store) LookupToken(ctx context.Context, hash []byte) (Token, User, erro
 	return t, u, nil
 }
 
+// TokenUser returns the user a session or API token belongs to, as long as
+// the token still exists, hasn't expired and the user is active. Long-lived
+// requests, such as job streams, use it to notice a logout, a revoked token
+// or a deactivated user. It returns ErrNotFound otherwise.
+func (s *Store) TokenUser(ctx context.Context, tokenID uuid.UUID) (User, error) {
+	var u User
+	err := s.pool.QueryRow(ctx, `
+		SELECT `+userColumns+`
+		FROM auth_tokens t JOIN users u ON u.id = t.user_id
+		WHERE t.id = $1
+		  AND u.is_active
+		  AND (t.expires_at IS NULL OR t.expires_at > now())`, tokenID,
+	).Scan(u.scanTargets()...)
+	return u, mapErr(err)
+}
+
 // ListTokens returns a user's tokens of one kind, newest first.
 func (s *Store) ListTokens(ctx context.Context, userID uuid.UUID, kind TokenKind) ([]Token, error) {
 	rows, err := s.pool.Query(ctx, `

@@ -353,3 +353,48 @@ func TestEmailSubjectCannotInjectHeaders(t *testing.T) {
 		t.Errorf("header injection:\n%s", headers)
 	}
 }
+
+// A failed delivery's error is stored and shown to every reader of the job,
+// so it must not quote the webhook URL, whose path and query are the secret.
+func TestSendErrorsDoNotLeakWebhookURL(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	const pathSecret = "T000/B000/PATHSECRET"
+	const querySecret = "QUERYSECRET"
+	s := &Sender{Timeout: 50 * time.Millisecond}
+	cases := map[string]struct {
+		target  store.NotificationTarget
+		secrets map[string]string
+	}{
+		"slack": {store.NotificationTarget{Kind: KindSlack},
+			map[string]string{"webhookUrl": srv.URL + "/services/" + pathSecret}},
+		"google chat": {store.NotificationTarget{Kind: KindGoogleChat},
+			map[string]string{"webhookUrl": srv.URL + "/v1/spaces/X/messages?key=" + querySecret + "&token=" + querySecret}},
+		"webhook": {store.NotificationTarget{Kind: KindWebhook,
+			Config: map[string]any{"url": srv.URL + "/hook/" + pathSecret + "?token=" + querySecret}}, nil},
+		"unreachable": {store.NotificationTarget{Kind: KindSlack},
+			map[string]string{"webhookUrl": "http://127.0.0.1:1/services/" + pathSecret}},
+	}
+	for name, c := range cases {
+		err := s.Send(context.Background(), c.target, c.secrets, Event{Name: EventTest})
+		if err == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "PATHSECRET") || strings.Contains(msg, querySecret) || strings.Contains(msg, "/services/") {
+			t.Errorf("%s: error leaks the URL: %s", name, msg)
+		}
+		if name != "unreachable" && !strings.HasPrefix(msg, host+": ") {
+			t.Errorf("%s: error = %q, want it to name the host %s", name, msg, host)
+		}
+		if IsPermanent(err) {
+			t.Errorf("%s: a transport failure should be retried: %v", name, err)
+		}
+	}
+}

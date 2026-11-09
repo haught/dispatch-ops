@@ -165,18 +165,60 @@ func TestAskpass(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "username"), []byte("bob"), 0o600)
 	_ = os.WriteFile(filepath.Join(dir, "password"), []byte("s3cret"), 0o600)
+	_ = os.WriteFile(filepath.Join(dir, "origin"), []byte("https://github.com:443"), 0o600)
 	for prompt, want := range map[string]string{
-		"Username for 'https://github.com': ":     "bob\n",
-		"Password for 'https://bob@github.com': ": "s3cret\n",
+		"Username for 'https://github.com': ":         "bob\n",
+		"Password for 'https://bob@github.com': ":     "s3cret\n",
+		"Password for 'https://bob@GitHub.com:443': ": "s3cret\n",
 	} {
 		var out bytes.Buffer
 		if code := Askpass(dir, []string{prompt}, &out); code != 0 || out.String() != want {
 			t.Errorf("%q: code %d, output %q", prompt, code, out.String())
 		}
 	}
+	// Only the project's own server gets the credential: not a submodule or
+	// galaxy requirement on another host, port or scheme.
+	for _, prompt := range []string{
+		"Are you sure (yes/no)?",
+		"Username for 'https://attacker.example': ",
+		"Password for 'https://bob@attacker.example': ",
+		"Password for 'https://bob@github.com.attacker.example': ",
+		"Password for 'https://bob@github.com:8443': ",
+		"Password for 'http://bob@github.com': ",
+		"Password for https://github.com: ",
+		"Password for '': ",
+	} {
+		var out bytes.Buffer
+		if code := Askpass(dir, []string{prompt}, &out); code == 0 || out.Len() > 0 {
+			t.Errorf("%q: answered %q", prompt, out.String())
+		}
+	}
+	// Without a known origin, nothing is answered.
+	_ = os.Remove(filepath.Join(dir, "origin"))
 	var out bytes.Buffer
-	if code := Askpass(dir, []string{"Are you sure (yes/no)?"}, &out); code == 0 {
-		t.Error("answered an unknown prompt")
+	if code := Askpass(dir, []string{"Password for 'https://bob@github.com': "}, &out); code == 0 {
+		t.Error("answered without an origin")
+	}
+}
+
+func TestGitEnvOrigin(t *testing.T) {
+	ws := testWorkspace(t)
+	cred := &runnerapi.RunnerCredential{Name: "scm", Inputs: map[string]string{"username": "u", "password": "p"}}
+	for url, want := range map[string]string{
+		"https://Git.Example.com/org/repo.git":   "https://git.example.com:443",
+		"http://git.example.com:8080/repo.git":   "http://git.example.com:8080",
+		"https://user:tok@git.example.com/r.git": "https://git.example.com:443",
+		"git@git.example.com:org/repo.git":       "",
+	} {
+		_, cleanup, err := gitEnv(Config{Askpass: "/bin/dispatch-runner"}, ws, &runnerapi.RunnerProject{Url: url, Credential: cred})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(filepath.Join(ws.secret("scm"), "origin"))
+		if string(got) != want {
+			t.Errorf("%s: origin %q, want %q", url, got, want)
+		}
+		cleanup()
 	}
 }
 
@@ -216,5 +258,32 @@ func TestInventorySyncCommand(t *testing.T) {
 	spec.Entrypoint = "../etc"
 	if _, err := buildCommand(spec, ws); err == nil {
 		t.Error("a source outside the project was accepted")
+	}
+}
+
+func TestAnsibleCommandLimit(t *testing.T) {
+	ws := testWorkspace(t)
+	ws.projectDir = filepath.Join(ws.dir, "project")
+	ws.vars = ws.path("vars.json")
+	writeProjectFile(t, ws.projectDir, "site.yml", "- hosts: all\n")
+	spec := &runnerapi.RunnerJobSpec{JobType: runnerapi.Ansible, Entrypoint: "site.yml", Limit: "web,db"}
+	c, err := buildCommand(spec, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(c.argv, "--limit"); i < 0 || c.argv[i+1] != "web,db" {
+		t.Errorf("argv = %q", c.argv)
+	}
+	if !slices.Contains(c.env, "ANSIBLE_HOST_PATTERN_MISMATCH=ignore") {
+		t.Errorf("env lacks ANSIBLE_HOST_PATTERN_MISMATCH=ignore")
+	}
+
+	// A limit naming a file would print it into the output: refused even
+	// if the API let it through.
+	for _, limit := range []string{"@/runner/secrets/credentials.json", "web,@/etc/passwd", "web:@/etc/passwd"} {
+		spec.Limit = limit
+		if _, err := buildCommand(spec, ws); err == nil {
+			t.Errorf("limit %q was accepted", limit)
+		}
 	}
 }

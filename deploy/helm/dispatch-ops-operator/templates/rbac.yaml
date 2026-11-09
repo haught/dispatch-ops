@@ -1,40 +1,131 @@
-# What the operator does in the namespaces it manages. It holds every
-# permission it grants the task manager in the job namespace, since
-# Kubernetes only lets it grant those.
+{{- /*
+What the operator does in the namespaces it manages. It holds every
+permission it grants the task manager in a job namespace (jobs, pods,
+secrets, leases), since Kubernetes only lets it grant those.
+
+With watchNamespaces empty, that is a ClusterRole for every namespace:
+effectively cluster-admin over Secrets and workloads (see README.md,
+"Operator permissions"). With watchNamespaces set, it is a Role in each
+watched namespace and each of allowedJobNamespaces, and nothing
+cluster-wide.
+*/ -}}
+{{- define "dispatch-ops-operator.rules" -}}
+- apiGroups: [dispatch-ops.io]
+  resources: [dispatchops]
+  verbs: [get, list, watch, update, patch]
+- apiGroups: [dispatch-ops.io]
+  resources: [dispatchops/status]
+  verbs: [get, update, patch]
+- apiGroups: [dispatch-ops.io]
+  resources: [dispatchops/finalizers]
+  verbs: [update]
+- apiGroups: [apps]
+  resources: [deployments, statefulsets]
+  verbs: [get, list, watch, create, update, patch]
+# Migrations; the task manager also deletes job pods' Jobs.
+- apiGroups: [batch]
+  resources: [jobs]
+  verbs: [get, list, watch, create, delete]
+- apiGroups: [""]
+  resources: [services, serviceaccounts]
+  verbs: [get, list, watch, create, update, patch]
+# The operator reads, generates and (once, for TLS to the managed database)
+# updates Secrets; the task manager also lists, patches and deletes its job
+# Secrets.
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [get, list, create, update, patch, delete]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list, watch]
+- apiGroups: [networking.k8s.io]
+  resources: [ingresses, networkpolicies]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [rbac.authorization.k8s.io]
+  resources: [roles, rolebindings]
+  verbs: [get, list, watch, create, update, patch, delete]
+# The task manager's leader election.
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, create, update]
+- apiGroups: ["", events.k8s.io]
+  resources: [events]
+  verbs: [create, patch]
+{{- end }}
+{{- $fullname := include "dispatch-ops-operator.fullname" . }}
+{{- $labels := include "dispatch-ops-operator.labels" . }}
+{{- $sa := include "dispatch-ops-operator.serviceAccountName" . }}
+{{- if not .Values.watchNamespaces }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "dispatch-ops-operator.fullname" . }}
+  name: {{ $fullname }}
   labels:
-    {{- include "dispatch-ops-operator.labels" . | nindent 4 }}
+    {{- $labels | nindent 4 }}
 rules:
-  - apiGroups: [dispatch-ops.io]
-    resources: [dispatchops]
-    verbs: [get, list, watch, update, patch]
-  - apiGroups: [dispatch-ops.io]
-    resources: [dispatchops/status]
-    verbs: [get, update, patch]
-  - apiGroups: [dispatch-ops.io]
-    resources: [dispatchops/finalizers]
-    verbs: [update]
-  - apiGroups: [apps]
-    resources: [deployments, statefulsets]
-    verbs: [get, list, watch, create, update, patch, delete]
-  - apiGroups: [batch]
-    resources: [jobs]
-    verbs: [get, list, watch, create, update, patch, delete]
+  {{- include "dispatch-ops-operator.rules" . | nindent 2 }}
+  # The dispatch-ops.io/allow-jobs-from label on job namespaces.
   - apiGroups: [""]
-    resources: [services, serviceaccounts, secrets]
+    resources: [namespaces]
+    verbs: [get]
+  # The operator's own leader election.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get, list, watch]
-  - apiGroups: [networking.k8s.io]
-    resources: [ingresses]
-    verbs: [get, list, watch, create, update, patch, delete]
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [roles, rolebindings]
-    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- else }}
+{{- range $ns := uniq (concat .Values.watchNamespaces .Values.allowedJobNamespaces) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  {{- include "dispatch-ops-operator.rules" $ | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+---
+# The operator's own leader election, in its namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -43,16 +134,18 @@ rules:
     verbs: [create, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: {{ include "dispatch-ops-operator.fullname" . }}
+  name: {{ $fullname }}-leader-election
+  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "dispatch-ops-operator.labels" . | nindent 4 }}
+    {{- $labels | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "dispatch-ops-operator.fullname" . }}
+  kind: Role
+  name: {{ $fullname }}-leader-election
 subjects:
   - kind: ServiceAccount
-    name: {{ include "dispatch-ops-operator.serviceAccountName" . }}
+    name: {{ $sa }}
     namespace: {{ .Release.Namespace }}
+{{- end }}

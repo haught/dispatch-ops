@@ -250,21 +250,31 @@ func TestInventorySyncSchedules(t *testing.T) {
 
 	// Two due schedules: the first launches a sync, the second finds it
 	// still pending.
+	// The database is shared with earlier runs, whose refused schedules stay
+	// due: run them all, count only this test's, and delete this test's
+	// afterwards so they don't pile up.
 	invID := uuid.MustParse(e.inv)
 	past := time.Now().Add(-time.Minute)
+	mine := map[uuid.UUID]bool{}
 	for _, name := range []string{"a", "b"} {
-		if _, err := e.st.CreateSchedule(ctx, store.ScheduleTarget{InventoryID: &invID}, nil, store.ScheduleFields{
+		sc, err := e.st.CreateSchedule(ctx, store.ScheduleTarget{InventoryID: &invID}, nil, store.ScheduleFields{
 			Name: name, Cron: "@daily", Timezone: "UTC", Enabled: true, NextRunAt: &past,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
+		mine[sc.ID] = true
+		t.Cleanup(func() { _ = e.st.DeleteSchedule(context.Background(), sc.ID) })
 	}
-	runs, err := e.st.RunDueSchedules(ctx, 10)
+	runs, err := e.st.RunDueSchedules(ctx, 10000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var launched, refused int
 	for _, r := range runs {
+		if !mine[r.Schedule.ID] {
+			continue
+		}
 		switch {
 		case r.JobID != nil:
 			launched++

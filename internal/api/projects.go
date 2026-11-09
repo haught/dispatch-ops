@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -39,6 +40,29 @@ func checkScmURL(u string) error {
 	}
 	return badRequest("scmUrl: %q is not a git URL; use %s://…, or scp-like git@host:path",
 		u, strings.Join(scmSchemes, "://…, "))
+}
+
+// scmOrigin is where git sends a credential for the repository URL u: its
+// scheme, host and port, like a web origin. scp-like URLs are ssh. A URL
+// that doesn't parse is its own origin, so any change to it counts.
+func scmOrigin(u string) string {
+	if !strings.Contains(u, "://") {
+		if m := scpLike.FindStringSubmatch(u); m != nil {
+			host, _, _ := strings.Cut(strings.TrimPrefix(u, m[1]), ":")
+			return "ssh://" + strings.ToLower(host) + ":22"
+		}
+		return u
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return u
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	port := parsed.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80", "ssh": "22", "git": "9418"}[scheme]
+	}
+	return scheme + "://" + strings.ToLower(parsed.Hostname()) + ":" + port
 }
 
 // checkScmCredential verifies that id names an scm credential the caller
@@ -144,12 +168,25 @@ func (h *Handlers) UpdateProject(ctx context.Context, req apigen.UpdateProjectRe
 		}
 	}
 	p, err := h.Store.UpdateProject(ctx, req.ProjectId, func(f *store.ProjectFields) error {
+		oldURL, oldCred := f.ScmURL, f.CredentialID
 		setIf(&f.Name, b.Name)
 		setIf(&f.Description, b.Description)
 		setIf(&f.ScmURL, b.ScmUrl)
 		setIf(&f.ScmRef, b.ScmRef)
 		if b.CredentialId.IsSpecified() {
 			f.CredentialID = cred
+		}
+		// A kept credential needs the use role all the same when the
+		// project moves to another server, which git would send it to.
+		kept := f.CredentialID != nil && oldCred != nil && *f.CredentialID == *oldCred
+		if kept && scmOrigin(oldURL) != scmOrigin(f.ScmURL) {
+			if err := h.authorize(ctx, rbac.Credential, *f.CredentialID, rbac.Use); err != nil {
+				if ae := (*apiError)(nil); !errors.As(err, &ae) {
+					return err
+				}
+				return forbidden("Moving the project to another server (scheme, host or port) needs the use role on its credential, " +
+					"which git would send there; ask the credential's admin, or remove or replace the credential")
+			}
 		}
 		return nil
 	})

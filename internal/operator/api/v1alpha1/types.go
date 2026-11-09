@@ -118,6 +118,33 @@ type DispatchOpsSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	Metrics MetricsSpec `json:"metrics,omitempty"`
+	// NetworkPolicy isolates the database, the servers' metrics ports and
+	// job pods with NetworkPolicies. They only take effect where the
+	// cluster's network plugin enforces NetworkPolicy.
+	// +kubebuilder:default={}
+	// +optional
+	NetworkPolicy NetworkPolicySpec `json:"networkPolicy,omitempty"`
+}
+
+// NetworkPolicySpec configures the NetworkPolicies the operator creates:
+//   - the managed database accepts connections only from the API server,
+//     task manager and migration pods;
+//   - the API server and task manager accept metrics scrapes from any pod
+//     but job pods;
+//   - job pods accept no connections, and may connect to the API server,
+//     DNS (port 53), and any address outside 169.254.0.0/16 (link-local,
+//     where cloud metadata services are), fe80::/10, fd00:ec2::254/128 and
+//     JobEgressExcept.
+type NetworkPolicySpec struct {
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// JobEgressExcept are more CIDRs job pods may not connect to, such as
+	// the cluster's pod and service CIDRs (so jobs can't reach other
+	// services in the cluster), or internal networks jobs have no business
+	// reaching.
+	// +optional
+	JobEgressExcept []string `json:"jobEgressExcept,omitempty"`
 }
 
 // RetentionSpec is how long old data is kept. The task manager deletes
@@ -166,6 +193,15 @@ type APISpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	TLS APITLSSpec `json:"tls,omitempty"`
+	// TrustedProxies are the addresses or CIDRs of the ingress controller
+	// or load balancer in front of the API server, e.g. 10.0.0.0/8. Only
+	// from these is X-Forwarded-For believed, so sign-in throttling can
+	// tell clients apart; without them, every client behind a proxy shares
+	// the proxy's address and limit. List only proxies that overwrite
+	// X-Forwarded-For, or clients can pick their own address.
+	// +kubebuilder:validation:items:Pattern=`^[0-9a-fA-F:.]+(/[0-9]{1,3})?$`
+	// +optional
+	TrustedProxies []string `json:"trustedProxies,omitempty"`
 }
 
 // APITLSSpec configures the API server's certificate.
@@ -210,9 +246,26 @@ type TaskManagerSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 	// JobNamespace is where job pods run. It must exist. Defaults to the
-	// DispatchOps namespace.
+	// DispatchOps namespace. Any other namespace must be opted in, since
+	// the task manager can read its Secrets and create Jobs there: listed
+	// in the operator's --allowed-job-namespaces (the chart's
+	// allowedJobNamespaces) or, when the operator watches all namespaces,
+	// labeled dispatch-ops.io/allow-jobs-from=<this DispatchOps's namespace>.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +optional
 	JobNamespace string `json:"jobNamespace,omitempty"`
+	// JobResources are the CPU and memory requests and limits of job pods.
+	// Unset, job pods request 100m CPU and 256Mi of memory and are limited
+	// to 2 CPUs and 2Gi. Set, it replaces all four: one it leaves out means
+	// no such request or limit.
+	// +optional
+	JobResources *corev1.ResourceRequirements `json:"jobResources,omitempty"`
+	// JobWorkSizeLimit caps the job pod's working directory (the project
+	// checkout and whatever the job writes there); the pod is evicted past
+	// it. Defaults to 4Gi.
+	// +optional
+	JobWorkSizeLimit *resource.Quantity `json:"jobWorkSizeLimit,omitempty"`
 	// MaxConcurrentJobs limits jobs waiting or running at once.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=10
@@ -248,8 +301,14 @@ type ExternalDatabase struct {
 // StatefulSet. Its volume and generated password are kept when the
 // DispatchOps is deleted. It has no backups or replication; use an external
 // database where that matters.
+//
+// PostgreSQL serves TLS with a certificate the operator generates in
+// <name>-postgres-tls, and runs as UID 999 (the Debian-based postgres
+// images' postgres user) with a read-only root filesystem.
 type ManagedDatabase struct {
-	// +kubebuilder:default="postgres:17"
+	// Image defaults to a digest-pinned PostgreSQL 17 image, which the
+	// operator's releases update. Another image must be Debian-based
+	// (postgres is UID 999), not the Alpine variant.
 	// +optional
 	Image string `json:"image,omitempty"`
 	// +kubebuilder:default="10Gi"
@@ -257,6 +316,8 @@ type ManagedDatabase struct {
 	StorageSize *resource.Quantity `json:"storageSize,omitempty"`
 	// +optional
 	StorageClassName *string `json:"storageClassName,omitempty"`
+	// Resources defaults to requests of 100m CPU and 256Mi of memory and a
+	// 1Gi memory limit.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }

@@ -1,0 +1,30 @@
+{{- if .Values.networkPolicy.enabled }}
+# Nothing needs to connect to the operator but Prometheus (metrics) and the
+# kubelet (probes). Job pods, which run whatever their templates say, may
+# not reach its unauthenticated metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dispatch-ops-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dispatch-ops-operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dispatch-ops-operator.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: probes
+          protocol: TCP
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchExpressions:
+              - key: dispatch-ops/job-id
+                operator: DoesNotExist
+      ports:
+        - port: metrics
+          protocol: TCP
+{{- end }}

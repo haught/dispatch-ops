@@ -25,6 +25,7 @@ func (h *Handlers) ListCredentialKinds(_ context.Context, _ apigen.ListCredentia
 		for _, f := range k.Fields {
 			info.Fields = append(info.Fields, apigen.CredentialField{
 				Name: f.Name, Label: f.Label, Secret: f.Secret, Required: f.Required, Multiline: f.Multiline,
+				Destination: f.Destination,
 			})
 		}
 		out.Items = append(out.Items, info)
@@ -98,6 +99,11 @@ func (h *Handlers) UpdateCredential(ctx context.Context, req apigen.UpdateCreden
 		setIf(&c.Description, b.Description)
 		if b.Inputs == nil {
 			return nil
+		}
+		if kind, ok := credentials.Lookup(c.Kind); ok {
+			if err := kind.CheckDestinationChange(c.PublicInputs, c.SecretFields, *b.Inputs); err != nil {
+				return err
+			}
 		}
 		inputs, err := h.Vault.Inputs(*c)
 		if err != nil {

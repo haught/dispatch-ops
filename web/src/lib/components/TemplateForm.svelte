@@ -117,6 +117,17 @@
 	const usesProject = $derived(jobType !== 'container');
 	const what = $derived(jobType === 'ansible' ? 'Playbook' : 'Script');
 	const overrideOptions = $derived(overridable.filter((o) => o.types.includes(jobType)));
+	// Allowed overrides that let a launcher change what runs, or where, and so
+	// reach the credentials (the API also asks for use on them to allow these).
+	const credentialOverrides = $derived(
+		overrideOptions
+			.filter(
+				(o) =>
+					['inventory', 'extraVars', 'command'].includes(o.field) &&
+					allowOverrides.includes(o.field)
+			)
+			.map((o) => o.label.toLowerCase())
+	);
 	const commandProblem = $derived(jobType === 'container' ? argvError(command) : '');
 	const argsProblem = $derived(jobType === 'script' ? argvError(args) : '');
 
@@ -351,6 +362,19 @@
 				>
 			{/each}
 		</div>
+		{#if credentialOverrides.length > 0}
+			<p class="small warning">
+				Allowing {credentialOverrides.join(' and ')} to be overridden lets anyone who can launch this
+				template make its jobs hand over the template's credentials{credentialOverrides.includes(
+					'inventory'
+				)
+					? ' (an inventory of theirs brings its own host variables)'
+					: ''}. Give the execute role only to those who may use the credentials themselves.
+				{#if allowOverrides.includes('extraVars')}
+					Launch-time extra variables named <code>ansible_*</code> or containing Jinja are refused.
+				{/if}
+			</p>
+		{/if}
 	</div>
 
 	<div class="form-actions">
@@ -379,6 +403,12 @@
 
 	.hint {
 		margin-top: -0.25rem;
+	}
+
+	.warning {
+		font-weight: normal;
+		color: var(--warn);
+		margin: 0.5rem 0 0;
 	}
 
 	.types {

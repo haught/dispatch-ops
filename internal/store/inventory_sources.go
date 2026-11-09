@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"dispatch-ops/internal/hostpattern"
 )
 
 // JobTypeInventorySync is the job type of inventory syncs. Job templates
@@ -254,10 +256,11 @@ func ParseAnsibleInventory(data map[string]any) (SyncedInventory, error) {
 	out := SyncedInventory{Hosts: map[string]map[string]any{}, Groups: map[string]*SyncedGroup{}}
 	skipped := map[string]bool{}
 	addHost := func(name string) bool {
-		if name == "" || strings.ContainsFunc(name, unicode.IsSpace) || len(name) > 255 {
+		if name == "" || strings.ContainsFunc(name, unicode.IsSpace) || len(name) > 255 || hostpattern.CheckHostName(name) != nil {
 			if !skipped[name] {
 				skipped[name] = true
-				out.Warnings = append(out.Warnings, fmt.Sprintf("Skipped host %q: host names can't be empty, contain spaces or be longer than 255 characters", name))
+				out.Warnings = append(out.Warnings, fmt.Sprintf("Skipped host %q: host names can't be empty, contain spaces or commas, "+
+					"start with @ (or have @ after a separator), or be longer than 255 characters", name))
 			}
 			return false
 		}

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -73,6 +74,29 @@ func TestBuildJob(t *testing.T) {
 	}
 	if len(pod.ImagePullSecrets) != 1 || pod.ImagePullSecrets[0].Name != pullSecretName(j.ID.String()) {
 		t.Errorf("imagePullSecrets = %v", pod.ImagePullSecrets)
+	}
+	if len(c.Resources.Limits) != 0 {
+		t.Errorf("resources without config = %+v", c.Resources)
+	}
+	for _, v := range pod.Volumes {
+		if v.Name == "work" && v.EmptyDir.SizeLimit != nil {
+			t.Errorf("work volume limited without config: %v", v.EmptyDir.SizeLimit)
+		}
+	}
+	limited := buildJob(j, Config{
+		JobResources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+		},
+		JobWorkSizeLimit: resource.MustParse("4Gi"),
+	}, false, false).Spec.Template.Spec
+	if r := limited.Containers[0].Resources; r.Limits.Memory().String() != "2Gi" || r.Requests.Memory().String() != "256Mi" {
+		t.Errorf("job resources = %+v", r)
+	}
+	for _, v := range limited.Volumes {
+		if v.Name == "work" && (v.EmptyDir.SizeLimit == nil || v.EmptyDir.SizeLimit.String() != "4Gi") {
+			t.Errorf("work volume size limit = %v", v.EmptyDir.SizeLimit)
+		}
 	}
 	for _, v := range pod.Volumes {
 		if v.Name == "secrets" && v.EmptyDir.Medium != corev1.StorageMediumMemory {

@@ -166,17 +166,24 @@ func serve() error {
 		SecureCookies: cfg.SecureCookies,
 		Version:       version,
 		Notifier:      &notify.Sender{ExternalURL: cfg.ExternalURL, Version: version},
+		LoginLimits: store.LoginLimits{
+			Window: cfg.Login.Window, MaxPerUsername: cfg.Login.MaxPerUsername, MaxPerIP: cfg.Login.MaxPerIP,
+		},
 	})
 	if err != nil {
 		return err
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           server.New(apiHandler, st, web.Dist(), log),
+		Addr: cfg.ListenAddr,
+		Handler: server.New(apiHandler, st, web.Dist(), log,
+			server.WithTrustedProxies(cfg.TrustedProxies),
+			server.WithBodyReadTimeout(server.DefaultBodyReadTimeout)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
-		// No WriteTimeout: job log streams (SSE) are long-lived.
+		// No ReadTimeout or WriteTimeout: job log streams (SSE) are
+		// long-lived, and ReadTimeout would cancel their context. Request
+		// bodies get their own deadline instead (server.WithBodyReadTimeout).
 	}
 	if cfg.TLS {
 		if srv.TLSConfig, err = serverTLS(cfg, log); err != nil {
@@ -184,7 +191,7 @@ func serve() error {
 		}
 	}
 
-	go cleanupExpiredTokens(ctx, st, log)
+	go cleanupExpiredTokens(ctx, st, cfg.Login.Window, log)
 	if addr := cfg.MetricsAddrOr(":9090"); addr != "" {
 		go metrics.Serve(ctx, addr, log)
 	}
@@ -307,6 +314,8 @@ func runTaskManager() error {
 			StartTimeout:      tm.StartTimeout,
 			JobRetention:      tm.JobRetention,
 			AuditRetention:    tm.AuditRetention,
+			JobResources:      tm.JobResources,
+			JobWorkSizeLimit:  tm.JobWorkSizeLimit,
 		},
 	}
 	metrics.Registry.MustRegister(taskmanager.NewCollector(m))
@@ -324,7 +333,9 @@ func runTaskManager() error {
 	return taskmanager.RunWithLeaderElection(ctx, kube, m, log)
 }
 
-func cleanupExpiredTokens(ctx context.Context, st *store.Store, log *slog.Logger) {
+// cleanupExpiredTokens deletes expired sessions and API tokens, and failed
+// sign-ins older than the throttle window, every hour.
+func cleanupExpiredTokens(ctx context.Context, st *store.Store, loginWindow time.Duration, log *slog.Logger) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
@@ -333,6 +344,9 @@ func cleanupExpiredTokens(ctx context.Context, st *store.Store, log *slog.Logger
 			log.Warn("deleting expired tokens", "err", err)
 		} else if n > 0 {
 			log.Info("deleted expired tokens", "count", n)
+		}
+		if _, err := st.DeleteOldLoginFailures(ctx, loginWindow); err != nil && ctx.Err() == nil {
+			log.Warn("deleting old failed sign-ins", "err", err)
 		}
 		select {
 		case <-ctx.Done():

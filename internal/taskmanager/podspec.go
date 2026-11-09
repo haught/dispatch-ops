@@ -98,6 +98,10 @@ func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.J
 	ttl := int32(cfg.JobTTL.Seconds())
 	tokenMode := int32(0o444) // the image's (non-root) user must be able to read it
 	secretsSize := resource.MustParse("16Mi")
+	var workSize *resource.Quantity
+	if !cfg.JobWorkSizeLimit.IsZero() {
+		workSize = new(cfg.JobWorkSizeLimit.DeepCopy())
+	}
 
 	pod := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
@@ -127,12 +131,15 @@ func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.J
 				AllowPrivilegeEscalation: new(false),
 				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 			},
+			// So one job can't starve the node of CPU or memory.
+			Resources: *cfg.JobResources.DeepCopy(),
 		}},
 		Volumes: []corev1.Volume{
 			{Name: "token", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 				SecretName: tokenSecretName(id), DefaultMode: &tokenMode,
 			}}},
-			{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			// Capped, so one job can't fill the node's disk.
+			{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: workSize}}},
 			// Credentials are written here, in memory, never to the node's disk.
 			{Name: "secrets", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
 				Medium: corev1.StorageMediumMemory, SizeLimit: &secretsSize,

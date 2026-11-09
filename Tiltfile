@@ -117,6 +117,8 @@ k8s_yaml(helm(CHART, name='dispatch-ops-operator', namespace=OPERATOR_NAMESPACE,
     # images it builds by these local names.
     'image.repository=dispatch-ops-operator',
     'serverImage.repository=dispatch-ops',
+    # deploy/dev/dispatchops.yaml runs its jobs there.
+    'allowedJobNamespaces={%s}' % JOB_NAMESPACE,
 ]))
 k8s_resource(
     'dispatch-ops-operator',

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"dispatch-ops/internal/hostpattern"
 	"dispatch-ops/internal/runner/runnerapi"
 )
 
@@ -132,6 +133,10 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 	}
 	argv = append(argv, "-e", "@"+ws.vars)
 	if spec.Limit != "" {
+		// The API refuses such limits; this is in case one gets through.
+		if err := hostpattern.CheckLimit(spec.Limit); err != nil {
+			return command{}, fmt.Errorf("The job's %w", err)
+		}
 		argv = append(argv, "--limit", spec.Limit)
 	}
 	if spec.Tags != "" {
@@ -167,6 +172,9 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 		// Ours first, then Ansible's defaults.
 		"ANSIBLE_CALLBACK_PLUGINS="+pluginDir+":~/.ansible/plugins/callback:/usr/share/ansible/plugins/callback",
 		"ANSIBLE_RETRY_FILES_ENABLED=False",
+		// Don't echo limit patterns that match no host into the output:
+		// they could be the lines of a file.
+		"ANSIBLE_HOST_PATTERN_MISMATCH=ignore",
 	)
 	return command{argv: argv, dir: ws.projectDir, env: env, eventMarker: marker}, nil
 }

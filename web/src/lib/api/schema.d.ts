@@ -559,7 +559,9 @@ export interface paths {
          *     credentials like any job: generic credentials' inputs as
          *     environment variables, which inventory plugins commonly read. Needs
          *     the admin role on the inventory and the use role on the project and
-         *     each credential.
+         *     each credential it adds. Changing the project, source path or
+         *     execution environment of a source that keeps credentials needs the
+         *     use role on all of them, since the sync runs that code with them.
          */
         put: operations["setInventorySource"];
         post?: never;
@@ -732,7 +734,12 @@ export interface paths {
         delete: operations["deleteCredential"];
         options?: never;
         head?: never;
-        /** Update a credential */
+        /**
+         * Update a credential
+         * @description Changing a field that decides where the secrets are sent
+         *     (`server` of a registry credential, `url` of an API token) needs
+         *     every secret input to be given again in the same request.
+         */
         patch: operations["updateCredential"];
         trace?: never;
     };
@@ -812,7 +819,10 @@ export interface paths {
         head?: never;
         /**
          * Update a project
-         * @description Jobs already launched keep the repository and ref they were launched with.
+         * @description Jobs already launched keep the repository and ref they were launched
+         *     with. Moving a project that keeps its credential to another server
+         *     (a different scheme, host or port in `scmUrl`) needs the `use` role
+         *     on the credential, since git would send it there.
          */
         patch: operations["updateProject"];
         trace?: never;
@@ -855,7 +865,16 @@ export interface paths {
         delete: operations["deleteJobTemplate"];
         options?: never;
         head?: never;
-        /** Update a job template */
+        /**
+         * Update a job template
+         * @description Needs the admin role on the template, and the use role on any
+         *     project, inventory or credential it starts to reference. A change
+         *     to what its jobs run or where (`command`, `entrypoint`,
+         *     `arguments`, `extraVars`, `executionEnvironmentId`, `projectId`,
+         *     `inventoryId`, or allowing `command`, `extraVars` or `inventory` to
+         *     be overridden) also needs the use role on all the template's
+         *     credentials, since such a change could make a job hand them over.
+         */
         patch: operations["updateJobTemplate"];
         trace?: never;
     };
@@ -1030,6 +1049,10 @@ export interface paths {
          *       when the stream opens.
          *     - `end`: the job has finished and all of its output has been sent.
          *       The server then closes the stream.
+         *     - `revoked`: the caller may no longer see the job (they signed out,
+         *       their token was revoked, their account was deactivated or their
+         *       role was removed). The server then closes the stream; access is
+         *       re-checked about every 15 seconds.
          */
         get: operations["streamJob"];
         put?: never;
@@ -1365,7 +1388,7 @@ export interface components {
             previousTotals: components["schemas"]["JobTotals"];
             /** @description Jobs created in each bucket of the window, oldest first. Empty buckets are included. */
             series: components["schemas"]["JobSeriesBucket"][];
-            /** @description The most-run job templates in the window (up to 10) */
+            /** @description The most-run job templates in the window (up to 20), most first */
             templates: components["schemas"]["TemplateStats"][];
             /** @description The hosts that failed or were unreachable in the most jobs in the window (up to 10) */
             problemHosts: components["schemas"]["ProblemHost"][];
@@ -1796,8 +1819,19 @@ export interface components {
         InventoryExport: {
             [key: string]: unknown;
         };
-        /** @description Host name or address, as Ansible will see it. No whitespace. */
+        /**
+         * @description Host name or address, as Ansible will see it. No whitespace or
+         *     commas, and an `@` only right after a letter, digit, `.`, `_` or
+         *     `-`: host names go into limit patterns, where `@path` names a file.
+         */
         HostName: string;
+        /**
+         * @description Host pattern to restrict the job to (Ansible `--limit`), such as
+         *     `web:&prod:!web3`. Ansible reads a pattern starting with `@` as a
+         *     file of patterns; that isn't allowed, so an `@` may only follow a
+         *     letter, digit, `.`, `_` or `-`.
+         */
+        HostPattern: string;
         Host: {
             /** Format: uuid */
             id: string;
@@ -1888,6 +1922,11 @@ export interface components {
             secret: boolean;
             required: boolean;
             multiline: boolean;
+            /**
+             * @description The field decides where the secrets are sent (such as a
+             *     registry's server). Changing it needs the secrets given again.
+             */
+            destination: boolean;
         };
         Credential: {
             /** Format: uuid */
@@ -2101,7 +2140,7 @@ export interface components {
             command?: components["schemas"]["Command"];
             arguments?: components["schemas"]["Arguments"];
             extraVars?: components["schemas"]["Variables"];
-            limit?: string;
+            limit?: components["schemas"]["HostPattern"];
             tags?: components["schemas"]["AnsibleTags"];
             skipTags?: components["schemas"]["AnsibleTags"];
             verbosity?: components["schemas"]["Verbosity"];
@@ -2127,7 +2166,7 @@ export interface components {
             command?: components["schemas"]["Command"];
             arguments?: components["schemas"]["Arguments"];
             extraVars?: components["schemas"]["Variables"];
-            limit?: string;
+            limit?: components["schemas"]["HostPattern"];
             tags?: components["schemas"]["AnsibleTags"];
             skipTags?: components["schemas"]["AnsibleTags"];
             verbosity?: components["schemas"]["Verbosity"];
@@ -2141,9 +2180,14 @@ export interface components {
         LaunchRequest: {
             /** Format: uuid */
             inventoryId?: string;
-            /** @description Merged over the template's extra vars (top-level keys replace) */
+            /**
+             * @description Merged over the template's extra vars (top-level keys replace).
+             *     Names starting with `ansible_` and keys or string values with
+             *     Jinja (`{{`, `{%` or `{#`) are refused: Ansible would use them
+             *     to connect, or evaluate them, with the job's credentials at hand.
+             */
             extraVars?: components["schemas"]["Variables"];
-            limit?: string;
+            limit?: components["schemas"]["HostPattern"];
             command?: components["schemas"]["Command"];
             tags?: components["schemas"]["AnsibleTags"];
             skipTags?: components["schemas"]["AnsibleTags"];
@@ -2686,6 +2730,8 @@ export interface operations {
         parameters: {
             query?: {
                 window?: components["schemas"]["StatsWindow"];
+                /** @description IANA time zone whose hours and days `series` buckets follow (default UTC) */
+                tz?: string;
             };
             header?: never;
             path?: never;
@@ -2702,6 +2748,7 @@ export interface operations {
                     "application/json": components["schemas"]["DashboardStats"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
         };
     };
@@ -2731,6 +2778,28 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            /** @description Too many failed sign-ins for this username or client address. */
+            429: {
+                headers: {
+                    /** @description Seconds until another attempt is allowed. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many sign-ins are being checked at once; try again shortly. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
     logout: {

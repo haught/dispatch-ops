@@ -4,11 +4,15 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"dispatch-ops/internal/secrets"
 )
@@ -58,9 +62,34 @@ type Config struct {
 	// sign-on needs it for its callback URL.
 	ExternalURL string
 
+	// TrustedProxies are the reverse proxies (CIDRs or addresses) whose
+	// X-Forwarded-For header gives the client's address
+	// (DISPATCH_TRUSTED_PROXIES, comma- or space-separated). Behind an
+	// ingress or load balancer, list its addresses so sign-in throttling
+	// tells clients apart; otherwise they all share the proxy's address.
+	TrustedProxies []netip.Prefix
+
+	// Login throttles failed password sign-ins.
+	Login LoginThrottle
+
 	OIDC OIDC
 
 	TaskManager TaskManager
+}
+
+// LoginThrottle limits failed password sign-ins within a sliding window,
+// shared by all API replicas through the database. A limit of 0 is off.
+type LoginThrottle struct {
+	// Window is the period failures are counted over
+	// (DISPATCH_LOGIN_THROTTLE_WINDOW, default 15m).
+	Window time.Duration
+	// MaxPerUsername is how many failures one username may have in Window
+	// before its sign-ins are refused (DISPATCH_LOGIN_MAX_FAILURES_PER_USER,
+	// default 10). A success clears it.
+	MaxPerUsername int
+	// MaxPerIP is how many failures one client address may have in Window
+	// (DISPATCH_LOGIN_MAX_FAILURES_PER_IP, default 100).
+	MaxPerIP int
 }
 
 // OIDC configures single sign-on. It is off unless Issuer is set.
@@ -124,6 +153,14 @@ type TaskManager struct {
 	// AuditRetention is how long audit log entries are kept
 	// (DISPATCH_AUDIT_RETENTION); 0, the default, keeps them forever.
 	AuditRetention time.Duration
+	// JobResources are job pods' requests and limits:
+	// DISPATCH_JOB_CPU_REQUEST (default 100m), DISPATCH_JOB_MEMORY_REQUEST
+	// (256Mi), DISPATCH_JOB_CPU_LIMIT (2) and DISPATCH_JOB_MEMORY_LIMIT
+	// (2Gi). 0 leaves one out.
+	JobResources corev1.ResourceRequirements
+	// JobWorkSizeLimit caps job pods' working directory
+	// (DISPATCH_JOB_WORK_SIZE_LIMIT, default 4Gi); 0 means no limit.
+	JobWorkSizeLimit resource.Quantity
 }
 
 // MetricsAddrOr returns the metrics address, or def if it isn't set. An
@@ -188,6 +225,23 @@ func Load() (Config, error) {
 	collect(err)
 	c.SessionTTL, err = getduration("DISPATCH_SESSION_TTL", 12*time.Hour)
 	collect(err)
+	c.Login.Window, err = getduration("DISPATCH_LOGIN_THROTTLE_WINDOW", 15*time.Minute)
+	collect(err)
+	c.Login.MaxPerUsername, err = getint("DISPATCH_LOGIN_MAX_FAILURES_PER_USER", 10)
+	collect(err)
+	c.Login.MaxPerIP, err = getint("DISPATCH_LOGIN_MAX_FAILURES_PER_IP", 100)
+	collect(err)
+	if c.Login.MaxPerUsername < 0 || c.Login.MaxPerIP < 0 {
+		errs = append(errs, errors.New("DISPATCH_LOGIN_MAX_FAILURES_PER_USER and DISPATCH_LOGIN_MAX_FAILURES_PER_IP must not be negative"))
+	}
+	for _, v := range strings.FieldsFunc(os.Getenv("DISPATCH_TRUSTED_PROXIES"), isListSep) {
+		p, err := parsePrefix(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("DISPATCH_TRUSTED_PROXIES: %q is not an address or CIDR", v))
+			continue
+		}
+		c.TrustedProxies = append(c.TrustedProxies, p)
+	}
 	tm := &c.TaskManager
 	tm.MaxConcurrentJobs, err = getint("DISPATCH_MAX_CONCURRENT_JOBS", 10)
 	collect(err)
@@ -200,6 +254,32 @@ func Load() (Config, error) {
 	tm.JobRetention, err = getretention("DISPATCH_JOB_RETENTION", 90*24*time.Hour)
 	collect(err)
 	tm.AuditRetention, err = getretention("DISPATCH_AUDIT_RETENTION", 0)
+	collect(err)
+	tm.JobResources = corev1.ResourceRequirements{Requests: corev1.ResourceList{}, Limits: corev1.ResourceList{}}
+	for _, r := range []struct {
+		list     corev1.ResourceList
+		name     corev1.ResourceName
+		key, def string
+	}{
+		{tm.JobResources.Requests, corev1.ResourceCPU, "DISPATCH_JOB_CPU_REQUEST", "100m"},
+		{tm.JobResources.Requests, corev1.ResourceMemory, "DISPATCH_JOB_MEMORY_REQUEST", "256Mi"},
+		{tm.JobResources.Limits, corev1.ResourceCPU, "DISPATCH_JOB_CPU_LIMIT", "2"},
+		{tm.JobResources.Limits, corev1.ResourceMemory, "DISPATCH_JOB_MEMORY_LIMIT", "2Gi"},
+	} {
+		q, err := getquantity(r.key, r.def)
+		collect(err)
+		if err == nil && !q.IsZero() {
+			r.list[r.name] = q
+		}
+	}
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		req, hasReq := tm.JobResources.Requests[name]
+		lim, hasLim := tm.JobResources.Limits[name]
+		if hasReq && hasLim && req.Cmp(lim) > 0 {
+			errs = append(errs, fmt.Errorf("the job %s request (%s) is above its limit (%s)", name, req.String(), lim.String()))
+		}
+	}
+	tm.JobWorkSizeLimit, err = getquantity("DISPATCH_JOB_WORK_SIZE_LIMIT", "4Gi")
 	collect(err)
 
 	if c.DatabaseURL == "" {
@@ -256,6 +336,20 @@ func (c Config) ValidateTaskManager() error {
 }
 
 func isListSep(r rune) bool { return r == ',' || r == ' ' }
+
+// parsePrefix parses a CIDR, or a single address as a one-address prefix.
+func parsePrefix(v string) (netip.Prefix, error) {
+	if strings.Contains(v, "/") {
+		p, err := netip.ParsePrefix(v)
+		return p.Masked(), err
+	}
+	a, err := netip.ParseAddr(v)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	a = a.Unmap()
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
 
 func getenv(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
@@ -322,6 +416,23 @@ func ParseRetention(v string) (time.Duration, error) {
 		return 0, fmt.Errorf("retention %q is under an hour; that is almost certainly a mistake", v)
 	}
 	return d, nil
+}
+
+// getquantity reads a Kubernetes quantity such as 500m or 2Gi. Unset or
+// empty means def; 0 means none (a zero Quantity).
+func getquantity(key, def string) (resource.Quantity, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		v = def
+	}
+	q, err := resource.ParseQuantity(v)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("%s: %w", key, err)
+	}
+	if q.Sign() < 0 {
+		return resource.Quantity{}, fmt.Errorf("%s must not be negative", key)
+	}
+	return q, nil
 }
 
 func getduration(key string, def time.Duration) (time.Duration, error) {

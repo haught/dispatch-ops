@@ -122,8 +122,10 @@ type UserFields struct {
 }
 
 // UpdateUser loads a user's fields, lets update change them, and saves the
-// result.
-func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update func(*UserFields) error) (User, error) {
+// result. Changing the password ends all of the user's sessions and revokes
+// their API tokens, except keepToken (the caller's own session when users
+// change their own password, or uuid.Nil).
+func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, keepToken uuid.UUID, update func(*UserFields) error) (User, error) {
 	var out User
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var f UserFields
@@ -134,6 +136,7 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update func(*UserF
 		if err != nil {
 			return mapErr(err)
 		}
+		oldHash := f.PasswordHash
 		if err := update(&f); err != nil {
 			return err
 		}
@@ -141,6 +144,13 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update func(*UserF
 			UPDATE users SET username = $2, display_name = $3, email = $4, is_active = $5, password_hash = $6
 			WHERE id = $1`, id, f.Username, f.DisplayName, f.Email, f.IsActive, f.PasswordHash); err != nil {
 			return mapErr(err)
+		}
+		// A new password ends every session and revokes every API token,
+		// so whoever knew the old one loses access too.
+		if passwordChanged(oldHash, f.PasswordHash) {
+			if _, err := tx.Exec(ctx, `DELETE FROM auth_tokens WHERE user_id = $1 AND id <> $2`, id, keepToken); err != nil {
+				return err
+			}
 		}
 		// Deactivating a user ends their sessions; their API tokens stop
 		// working while the user is inactive.
@@ -153,6 +163,13 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update func(*UserF
 		return err
 	})
 	return out, err
+}
+
+func passwordChanged(before, after *string) bool {
+	if before == nil || after == nil {
+		return before != after
+	}
+	return *before != *after
 }
 
 // DeleteUser deletes a user with their tokens, team memberships and roles.

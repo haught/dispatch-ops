@@ -12,7 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
+	"net/url"
 	"reflect"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -65,7 +68,19 @@ type Reconciler struct {
 	// DefaultImage is the server image used when a DispatchOps names none:
 	// the one this operator was released with.
 	DefaultImage string
+	// AllowedJobNamespaces are namespaces any DispatchOps may run jobs in,
+	// besides its own.
+	AllowedJobNamespaces []string
+	// Namespaces are the only namespaces the operator may read and write
+	// (the ones it watches, and AllowedJobNamespaces). Empty means it has
+	// access to every namespace; only then does it look for
+	// AllowJobsFromLabel on a job namespace.
+	Namespaces []string
 }
+
+// jobNamespaceRecheck is how often a ready installation whose jobs run in
+// another namespace re-checks that the namespace still allows it.
+const jobNamespaceRecheck = 5 * time.Minute
 
 // SetupWithManager registers the reconciler and what it watches.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -77,6 +92,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&networkingv1.Ingress{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Named("dispatchops").
 		Complete(r)
 }
@@ -167,6 +183,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !meta.IsStatusConditionTrue(status.Conditions, CondReady) {
 		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
+	if in.jobNamespace() != cr.Namespace {
+		// The operator doesn't watch namespaces, so it would otherwise not
+		// notice a namespace's opt-in label being removed.
+		return ctrl.Result{RequeueAfter: jobNamespaceRecheck}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -178,7 +199,7 @@ func (r *Reconciler) reconcile(ctx context.Context, cr *v1alpha1.DispatchOps, in
 		return err
 	}
 
-	dbReady, err := r.reconcileDatabase(ctx, cr, in, set)
+	dbReady, err := r.reconcileDatabase(ctx, cr, &in, set)
 	if err != nil {
 		return err
 	}
@@ -248,6 +269,11 @@ func (r *Reconciler) ensureSecrets(ctx context.Context, in install) error {
 			return err
 		}
 	}
+	if in.Spec.Database.Managed != nil {
+		if err := r.ensureSecret(ctx, in.postgresTLSSecretName(), in.Namespace, in.generatedPostgresTLSSecret); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -271,7 +297,7 @@ func (r *Reconciler) ensureSecret(ctx context.Context, name, namespace string, g
 
 // --- Database --------------------------------------------------------------------
 
-func (r *Reconciler) reconcileDatabase(ctx context.Context, cr *v1alpha1.DispatchOps, in install, set setCondition) (bool, error) {
+func (r *Reconciler) reconcileDatabase(ctx context.Context, cr *v1alpha1.DispatchOps, in *install, set setCondition) (bool, error) {
 	if ext := in.Spec.Database.External; ext != nil {
 		sel := ext.URLSecret
 		var s corev1.Secret
@@ -290,6 +316,9 @@ func (r *Reconciler) reconcileDatabase(ctx context.Context, cr *v1alpha1.Dispatc
 		return true, nil
 	}
 
+	if err := r.applyNetworkPolicy(ctx, cr, *in, in.postgresNetworkPolicy()); err != nil {
+		return false, err
+	}
 	if err := r.apply(ctx, cr, in.postgresService()); err != nil {
 		return false, err
 	}
@@ -297,12 +326,57 @@ func (r *Reconciler) reconcileDatabase(ctx context.Context, cr *v1alpha1.Dispatc
 	if err := r.apply(ctx, cr, sts); err != nil {
 		return false, err
 	}
+	mode, err := r.requireDatabaseTLS(ctx, *in, sts)
+	if err != nil {
+		return false, err
+	}
+	in.dbSSLMode = mode
 	if sts.Status.ReadyReplicas < 1 {
 		set(CondDatabaseReady, false, "Starting", "Waiting for PostgreSQL ("+sts.Name+") to be ready")
 		return false, nil
 	}
 	set(CondDatabaseReady, true, "Managed", "PostgreSQL is running in "+sts.Name)
 	return true, nil
+}
+
+// requireDatabaseTLS switches the managed database's URL, which older
+// operators generated with sslmode=disable, to sslmode=require once
+// PostgreSQL has rolled out serving TLS. It returns the URL's sslmode.
+func (r *Reconciler) requireDatabaseTLS(ctx context.Context, in install, sts *appsv1.StatefulSet) (string, error) {
+	var s corev1.Secret
+	name := in.name(componentDatabase)
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: in.Namespace, Name: name}, &s); err != nil {
+		return "", fmt.Errorf("secret %s: %w", name, err)
+	}
+	u, err := url.Parse(string(s.Data["url"]))
+	if err != nil {
+		return "", fmt.Errorf("secret %s: the url doesn't parse", name)
+	}
+	q := u.Query()
+	mode := q.Get("sslmode")
+	st := sts.Status
+	rolledOut := st.ObservedGeneration >= sts.Generation && st.UpdatedReplicas >= 1 && st.ReadyReplicas >= 1 &&
+		(st.UpdateRevision == "" || st.UpdateRevision == st.CurrentRevision)
+	if mode != "disable" || s.Annotations["dispatch-ops.io/generated"] != "true" || !rolledOut {
+		return mode, nil
+	}
+	q.Set("sslmode", "require")
+	u.RawQuery = q.Encode()
+	s.Data["url"] = []byte(u.String())
+	log.FromContext(ctx).Info("requiring TLS to the managed database", "secret", name)
+	if err := r.Update(ctx, &s); err != nil {
+		return "", fmt.Errorf("secret %s: %w", name, err)
+	}
+	return "require", nil
+}
+
+// applyNetworkPolicy applies np in the DispatchOps namespace, or deletes it
+// when NetworkPolicies are off.
+func (r *Reconciler) applyNetworkPolicy(ctx context.Context, cr *v1alpha1.DispatchOps, in install, np *networkingv1.NetworkPolicy) error {
+	if in.networkPoliciesEnabled() {
+		return r.apply(ctx, cr, np)
+	}
+	return r.deleteIfOwned(ctx, cr, &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: np.Name, Namespace: np.Namespace}})
 }
 
 // --- Migrations ------------------------------------------------------------------
@@ -356,15 +430,51 @@ func (r *Reconciler) migrate(ctx context.Context, cr *v1alpha1.DispatchOps, in i
 // --- API server and task manager ---------------------------------------------------
 
 func (r *Reconciler) reconcileServers(ctx context.Context, cr *v1alpha1.DispatchOps, in install, set setCondition) error {
-	objs := []client.Object{
-		in.apiService(), in.taskManagerServiceAccount(), in.taskManagerRole(), in.taskManagerRoleBinding(),
+	// Caught here rather than by an API server that won't start.
+	for _, p := range in.Spec.API.TrustedProxies {
+		if _, err := netip.ParsePrefix(p); err != nil {
+			if _, err := netip.ParseAddr(p); err != nil {
+				return fmt.Errorf("api.trustedProxies: %q is not an address or CIDR", p)
+			}
+		}
 	}
-	for _, o := range objs {
+	for _, c := range []string{componentAPI, componentTaskManager} {
+		if err := r.applyNetworkPolicy(ctx, cr, in, in.serverNetworkPolicy(c)); err != nil {
+			return err
+		}
+	}
+	for _, o := range []client.Object{in.apiService(), in.taskManagerServiceAccount()} {
 		if err := r.apply(ctx, cr, o); err != nil {
 			return err
 		}
 	}
-	if err := r.pruneJobRBAC(ctx, cr, in.jobNamespace()); err != nil {
+
+	allowed, why, err := r.jobNamespaceAllowed(ctx, in)
+	if err != nil {
+		return err
+	}
+	var keep []client.Object
+	if allowed {
+		keep = []client.Object{in.taskManagerRole(), in.taskManagerRoleBinding()}
+		if in.networkPoliciesEnabled() {
+			np, err := in.jobNetworkPolicy()
+			if err != nil {
+				return err
+			}
+			keep = append(keep, np)
+		} else if in.jobNamespace() == in.Namespace {
+			np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: in.jobObjectName(componentJobs), Namespace: in.Namespace}}
+			if err := r.deleteIfOwned(ctx, cr, np); err != nil {
+				return err
+			}
+		}
+		for _, o := range keep {
+			if err := r.apply(ctx, cr, o); err != nil {
+				return err
+			}
+		}
+	}
+	if err := r.pruneJobNamespace(ctx, cr, in, keep); err != nil {
 		return err
 	}
 
@@ -376,10 +486,21 @@ func (r *Reconciler) reconcileServers(ctx context.Context, cr *v1alpha1.Dispatch
 		return err
 	}
 
-	for _, d := range []struct {
+	deps := []struct {
 		dep  *appsv1.Deployment
 		cond string
-	}{{in.apiDeployment(), CondAPIReady}, {in.taskManagerDeployment(), CondTaskManagerReady}} {
+	}{{in.apiDeployment(), CondAPIReady}}
+	if allowed {
+		deps = append(deps, struct {
+			dep  *appsv1.Deployment
+			cond string
+		}{in.taskManagerDeployment(), CondTaskManagerReady})
+	} else {
+		// Without its Role there, the task manager couldn't run jobs; an
+		// existing one is left as it is, and can't either.
+		set(CondTaskManagerReady, false, "JobNamespaceNotAllowed", why)
+	}
+	for _, d := range deps {
 		if err := r.apply(ctx, cr, d.dep); err != nil {
 			return err
 		}
@@ -444,12 +565,23 @@ func (r *Reconciler) apply(ctx context.Context, cr *v1alpha1.DispatchOps, obj cl
 	if apierrors.IsNotFound(err) {
 		err = r.Create(ctx, obj)
 		if apierrors.IsAlreadyExists(err) {
-			return nil // the cache was behind; the next reconcile updates it
+			// The cache was behind, or only holds objects the operator
+			// labeled: the object is someone else's.
+			if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+				return client.IgnoreNotFound(err)
+			}
+			if !belongsTo(existing, cr) {
+				return notOurs(obj, cr)
+			}
+			return nil // the next reconcile updates it
 		}
 		return err
 	}
 	if err != nil {
 		return err
+	}
+	if !belongsTo(existing, cr) {
+		return notOurs(obj, cr)
 	}
 	if existing.GetAnnotations()[specHashAnnotation] == hash {
 		reflect.ValueOf(obj).Elem().Set(reflect.ValueOf(existing).Elem())
@@ -468,6 +600,52 @@ func (r *Reconciler) apply(ctx context.Context, cr *v1alpha1.DispatchOps, obj cl
 	return r.Update(ctx, obj)
 }
 
+// belongsTo reports whether the operator created obj for cr: in cr's
+// namespace, cr controls it; elsewhere, it has cr's ownerLabel.
+func belongsTo(obj client.Object, cr *v1alpha1.DispatchOps) bool {
+	if obj.GetNamespace() == cr.Namespace {
+		return metav1.IsControlledBy(obj, cr)
+	}
+	return obj.GetLabels()[ownerLabel] == string(cr.UID) && obj.GetLabels()["app.kubernetes.io/managed-by"] == ManagedBy
+}
+
+// notOurs is the error for an object the operator would replace but didn't
+// create. It never takes such an object over: in another namespace it
+// could be anyone's.
+func notOurs(obj client.Object, cr *v1alpha1.DispatchOps) error {
+	return fmt.Errorf("%s %s/%s already exists and doesn't belong to DispatchOps %s/%s; delete or rename it",
+		reflect.TypeOf(obj).Elem().Name(), obj.GetNamespace(), obj.GetName(), cr.Namespace, cr.Name)
+}
+
+// jobNamespaceAllowed reports whether in may run jobs in its job
+// namespace, and if not, why. Its own namespace always may; another only
+// if the operator was started allowing it, or (when the operator has
+// access to every namespace) the namespace's AllowJobsFromLabel names
+// in's namespace. Without this, anyone who may create a DispatchOps could
+// have the task manager granted Secrets and Jobs in any namespace.
+func (r *Reconciler) jobNamespaceAllowed(ctx context.Context, in install) (bool, string, error) {
+	ns := in.jobNamespace()
+	if ns == in.Namespace || slices.Contains(r.AllowedJobNamespaces, ns) {
+		return true, "", nil
+	}
+	if len(r.Namespaces) > 0 {
+		return false, fmt.Sprintf("Job namespace %s is not in the operator's allowed job namespaces", ns), nil
+	}
+	var n corev1.Namespace
+	err := r.APIReader.Get(ctx, types.NamespacedName{Name: ns}, &n)
+	if apierrors.IsNotFound(err) {
+		return false, fmt.Sprintf("Job namespace %s does not exist", ns), nil
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("namespace %s: %w", ns, err)
+	}
+	if n.Labels[AllowJobsFromLabel] != in.Namespace {
+		return false, fmt.Sprintf("Job namespace %s is not in the operator's allowed job namespaces, and is not labeled %s=%s",
+			ns, AllowJobsFromLabel, in.Namespace), nil
+	}
+	return true, "", nil
+}
+
 // deleteIfOwned deletes obj if it exists and belongs to cr.
 func (r *Reconciler) deleteIfOwned(ctx context.Context, cr *v1alpha1.DispatchOps, obj client.Object) error {
 	if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
@@ -479,45 +657,71 @@ func (r *Reconciler) deleteIfOwned(ctx context.Context, cr *v1alpha1.DispatchOps
 	return client.IgnoreNotFound(r.Delete(ctx, obj))
 }
 
-// pruneJobRBAC deletes the task manager's Roles and RoleBindings in
-// namespaces other than keep (all of them if keep is empty), which are
-// left behind when the job namespace changes, or the DispatchOps is
-// deleted.
-func (r *Reconciler) pruneJobRBAC(ctx context.Context, cr *v1alpha1.DispatchOps, keep string) error {
-	sel := client.MatchingLabels{ownerLabel: string(cr.UID)}
-	var roles rbacv1.RoleList
-	if err := r.APIReader.List(ctx, &roles, sel); err != nil {
-		return err
+// pruneJobNamespace deletes what the operator made for cr in namespaces
+// other than cr's (the task manager's Role and RoleBinding, and the job
+// pods' NetworkPolicy) except keep: what is left behind when the job
+// namespace changes or stops allowing cr, or cr is deleted. It deletes
+// only objects with the names the operator gives them, its managed-by
+// label and cr's ownerLabel.
+func (r *Reconciler) pruneJobNamespace(ctx context.Context, cr *v1alpha1.DispatchOps, in install, keep []client.Object) error {
+	sel := client.MatchingLabels{ownerLabel: string(cr.UID), "app.kubernetes.io/managed-by": ManagedBy}
+	namespaces := r.Namespaces
+	if len(namespaces) == 0 {
+		namespaces = []string{""} // all
 	}
-	var bindings rbacv1.RoleBindingList
-	if err := r.APIReader.List(ctx, &bindings, sel); err != nil {
-		return err
+	type kind struct {
+		list func() client.ObjectList
+		name string
 	}
-	var objs []client.Object
-	for i := range roles.Items {
-		objs = append(objs, &roles.Items[i])
+	kinds := []kind{
+		{func() client.ObjectList { return &rbacv1.RoleList{} }, in.foreignJobObjectName(componentTaskManager)},
+		{func() client.ObjectList { return &rbacv1.RoleBindingList{} }, in.foreignJobObjectName(componentTaskManager)},
+		{func() client.ObjectList { return &networkingv1.NetworkPolicyList{} }, in.foreignJobObjectName(componentJobs)},
 	}
-	for i := range bindings.Items {
-		objs = append(objs, &bindings.Items[i])
+	kept := func(o client.Object) bool {
+		for _, k := range keep {
+			if reflect.TypeOf(k) == reflect.TypeOf(o) && k.GetNamespace() == o.GetNamespace() && k.GetName() == o.GetName() {
+				return true
+			}
+		}
+		return false
 	}
-	for _, o := range objs {
-		if o.GetNamespace() != keep {
-			if err := r.Delete(ctx, o); client.IgnoreNotFound(err) != nil {
+	for _, k := range kinds {
+		for _, ns := range namespaces {
+			if ns == cr.Namespace {
+				continue // owned by cr, so garbage collected
+			}
+			list := k.list()
+			if err := r.APIReader.List(ctx, list, sel, client.InNamespace(ns)); err != nil {
 				return err
+			}
+			objs, err := meta.ExtractList(list)
+			if err != nil {
+				return err
+			}
+			for _, ro := range objs {
+				o := ro.(client.Object)
+				if o.GetNamespace() == cr.Namespace || o.GetName() != k.name || kept(o) {
+					continue
+				}
+				log.FromContext(ctx).Info("deleting", "kind", reflect.TypeOf(o).Elem().Name(), "namespace", o.GetNamespace(), "name", o.GetName())
+				if err := r.Delete(ctx, o); client.IgnoreNotFound(err) != nil {
+					return err
+				}
 			}
 		}
 	}
 	return nil
 }
 
-// finalize cleans up what owner references can't: RBAC in another job
-// namespace. Owned objects are garbage collected; generated Secrets and the
-// database volume are kept.
+// finalize cleans up what owner references can't: RBAC and the job
+// NetworkPolicy in another job namespace. Owned objects are garbage
+// collected; generated Secrets and the database volume are kept.
 func (r *Reconciler) finalize(ctx context.Context, cr *v1alpha1.DispatchOps) error {
 	if !controllerutil.ContainsFinalizer(cr, finalizer) {
 		return nil
 	}
-	if err := r.pruneJobRBAC(ctx, cr, ""); err != nil {
+	if err := r.pruneJobNamespace(ctx, cr, install{DispatchOps: withDefaults(cr)}, nil); err != nil {
 		return err
 	}
 	controllerutil.RemoveFinalizer(cr, finalizer)

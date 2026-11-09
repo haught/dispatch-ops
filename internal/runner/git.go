@@ -34,18 +34,40 @@ const AskpassDirEnv = "DISPATCH_ASKPASS_DIR"
 // Askpass answers a git credential prompt (git passes it as the only
 // argument) from the username and password files in dir. It returns the
 // process exit code.
+//
+// It answers only for the project's own server, whose origin is in the
+// file "origin" in dir: git's prompt names the URL it wants a credential
+// for (Username for 'https://host': , Password for 'https://user@host': ).
+// Git also runs it for submodules, and ansible-galaxy's git for roles and
+// collections from git, whose URLs come from the repository; without the
+// check, a repository writer could point one at their own server and
+// collect the credential.
 func Askpass(dir string, args []string, out io.Writer) int {
 	if len(args) == 0 {
 		return 1
 	}
-	prompt := strings.ToLower(args[0])
+	prompt := args[0]
 	var file string
-	switch {
-	case strings.HasPrefix(prompt, "username"):
+	switch lower := strings.ToLower(prompt); {
+	case strings.HasPrefix(lower, "username"):
 		file = "username"
-	case strings.HasPrefix(prompt, "password"):
+	case strings.HasPrefix(lower, "password"):
 		file = "password"
 	default:
+		return 1
+	}
+	want, err := os.ReadFile(filepath.Join(dir, "origin"))
+	if err != nil || string(want) == "" {
+		return 1
+	}
+	start, end := strings.Index(prompt, "'"), strings.LastIndex(prompt, "'")
+	if start < 0 || end <= start {
+		return 1
+	}
+	asked, err := url.Parse(prompt[start+1 : end])
+	if err != nil || urlOrigin(asked) != string(want) {
+		fmt.Fprintf(os.Stderr, "dispatch-runner: not sending the project's credential to %s, which is not the project's server\n",
+			redactURL(prompt[start+1:end]))
 		return 1
 	}
 	b, err := os.ReadFile(filepath.Join(dir, file))
@@ -60,7 +82,7 @@ func Askpass(dir string, args []string, out io.Writer) int {
 // commit it checked out. Git's output goes to the log as runner messages.
 func checkout(ctx context.Context, cfg Config, ws *workspace, p *runnerapi.RunnerProject, ev *emitter) (string, error) {
 	ev.runner(fmt.Sprintf("Checking out %s at %s", redactURL(p.Url), p.Ref))
-	env, cleanup, err := gitEnv(cfg, ws, p.Credential)
+	env, cleanup, err := gitEnv(cfg, ws, p)
 	defer cleanup()
 	if err != nil {
 		return "", err
@@ -111,10 +133,25 @@ var commitID = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 
 func isCommitID(ref string) bool { return commitID.MatchString(ref) }
 
-// gitEnv returns git's environment, with the project credential set up. The
-// returned cleanup removes the credential's files, so the job's command
-// can't read them.
-func gitEnv(cfg Config, ws *workspace, cred *runnerapi.RunnerCredential) (env []string, cleanup func(), err error) {
+// urlOrigin is where git sends a credential for u: its scheme, host and
+// port, with the scheme's default port filled in.
+func urlOrigin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80"}[scheme]
+	}
+	return scheme + "://" + strings.ToLower(u.Hostname()) + ":" + port
+}
+
+// gitEnv returns git's environment, with the credential of the project p
+// (if any) set up for p's server only. The returned cleanup removes the
+// credential's files, so the job's command can't read them.
+func gitEnv(cfg Config, ws *workspace, p *runnerapi.RunnerProject) (env []string, cleanup func(), err error) {
+	var cred *runnerapi.RunnerCredential
+	if p != nil {
+		cred = p.Credential
+	}
 	dir := ws.secret("scm")
 	cleanup = func() { _ = os.RemoveAll(dir) }
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -131,8 +168,14 @@ func gitEnv(cfg Config, ws *workspace, cred *runnerapi.RunnerCredential) (env []
 	if cred != nil {
 		in := cred.Inputs
 		if in["username"] != "" || in["password"] != "" {
-			for _, f := range []string{"username", "password"} {
-				if err := os.WriteFile(filepath.Join(dir, f), []byte(in[f]), 0o600); err != nil {
+			// Askpass answers only for this origin; an unparsable URL gets none.
+			origin := ""
+			if u, err := url.Parse(p.Url); err == nil && strings.Contains(p.Url, "://") {
+				origin = urlOrigin(u)
+			}
+			files := map[string]string{"username": in["username"], "password": in["password"], "origin": origin}
+			for f, v := range files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte(v), 0o600); err != nil {
 					return nil, cleanup, err
 				}
 			}

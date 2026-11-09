@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
+
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/auth"
 	"dispatch-ops/internal/store"
@@ -77,7 +79,13 @@ func (h *Handlers) UpdateUser(ctx context.Context, req apigen.UpdateUserRequestO
 	if err != nil {
 		return nil, orNotFound(err, "User")
 	}
-	u, err := h.Store.UpdateUser(ctx, req.UserId, func(f *store.UserFields) error {
+	// A password change signs the user out everywhere; an admin changing
+	// their own password keeps the session they are using.
+	keep := uuid.Nil
+	if p := caller(ctx); req.UserId == p.UserID && p.Method == auth.MethodSession {
+		keep = p.TokenID
+	}
+	u, err := h.Store.UpdateUser(ctx, req.UserId, keep, func(f *store.UserFields) error {
 		if f.AuthSource != "local" && (b.Username != nil || b.Password != nil) {
 			return badRequest("single sign-on users get their username from the provider and have no password")
 		}

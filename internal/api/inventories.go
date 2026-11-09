@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"dispatch-ops/internal/api/apigen"
+	"dispatch-ops/internal/hostpattern"
 	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
 )
@@ -178,6 +179,9 @@ func (h *Handlers) CreateHost(ctx context.Context, req apigen.CreateHostRequestO
 		return nil, err
 	}
 	b := req.Body
+	if err := hostpattern.CheckHostName(b.Name); err != nil {
+		return nil, badRequest("%s", err)
+	}
 	enabled := true
 	setIf(&enabled, b.Enabled)
 	host, err := h.Store.CreateHost(ctx, req.InventoryId, store.HostFields{
@@ -228,6 +232,11 @@ func (h *Handlers) UpdateHost(ctx context.Context, req apigen.UpdateHostRequestO
 		return nil, err
 	}
 	b := req.Body
+	if b.Name != nil {
+		if err := hostpattern.CheckHostName(*b.Name); err != nil {
+			return nil, badRequest("%s", err)
+		}
+	}
 	host, err := h.Store.UpdateHost(ctx, req.HostId, func(f *store.HostFields) error {
 		setIf(&f.Name, b.Name)
 		setIf(&f.Description, b.Description)

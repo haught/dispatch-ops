@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/auth"
+	"dispatch-ops/internal/hostpattern"
 	"dispatch-ops/internal/rbac"
 	"dispatch-ops/internal/store"
 )
@@ -53,6 +55,9 @@ func checkTemplate(f store.JobTemplateFields) error {
 		return badRequest("inventory_sync jobs are launched by syncing an inventory, not from a job template")
 	default:
 		return badRequest("unknown job type %q", t)
+	}
+	if err := hostpattern.CheckLimit(f.Limit); err != nil {
+		return badRequest("%s", err)
 	}
 	if t != string(apigen.Ansible) {
 		if f.Tags != "" || f.SkipTags != "" || f.Verbosity != 0 ||
@@ -105,8 +110,23 @@ func (h *Handlers) checkTemplateCredentials(ctx context.Context, jobType string,
 // checkTemplateRefs checks that the caller may use the project, inventory
 // and credentials a template references. With old set, only references
 // that change are checked, so a template's admin can edit it without being
-// able to use everything it already references.
+// able to use everything it already references, except that a change to
+// what the job runs, or where, needs use on all its credentials (see
+// changesWhatRuns).
 func (h *Handlers) checkTemplateRefs(ctx context.Context, old *store.JobTemplate, f store.JobTemplateFields) error {
+	if old != nil {
+		if what := changesWhatRuns(*old, f); what != "" {
+			for _, id := range f.CredentialIDs {
+				if err := h.authorize(ctx, rbac.Credential, id, rbac.Use); err != nil {
+					if ae := (*apiError)(nil); !errors.As(err, &ae) {
+						return err
+					}
+					return forbidden(fmt.Sprintf("Changing the template's %s needs the use role on all its credentials, "+
+						"since the job runs with them; ask a credential's admin, or remove the credentials you can't use", what))
+				}
+			}
+		}
+	}
 	if f.ProjectID != nil && (old == nil || old.ProjectID == nil || *old.ProjectID != *f.ProjectID) {
 		if err := h.authorizeUse(ctx, rbac.Project, *f.ProjectID); err != nil {
 			return err
@@ -125,6 +145,43 @@ func (h *Handlers) checkTemplateRefs(ctx context.Context, old *store.JobTemplate
 		}
 	}
 	return nil
+}
+
+// credentialOverrides are the launch overrides that let a launcher change
+// what a job runs or where, and so reach its credentials (a launch-time
+// inventory brings its own host vars, for one).
+var credentialOverrides = []string{
+	string(apigen.OverridableFieldCommand), string(apigen.OverridableFieldExtraVars), string(apigen.OverridableFieldInventory),
+}
+
+// changesWhatRuns names a field whose change from old to f changes the
+// code a template's jobs run, or the hosts they send credentials to, or
+// returns "". Whoever makes such a change could make the job hand over its
+// credentials, so it needs the use role on them.
+func changesWhatRuns(old store.JobTemplate, f store.JobTemplateFields) string {
+	ptrEq := func(a, b *uuid.UUID) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+	switch {
+	case !slices.Equal(old.Command, f.Command):
+		return "command"
+	case old.Entrypoint != f.Entrypoint:
+		return "entrypoint"
+	case !slices.Equal(old.Arguments, f.Arguments):
+		return "arguments"
+	case !reflect.DeepEqual(nonNilVars(old.ExtraVars), nonNilVars(f.ExtraVars)):
+		return "extra vars"
+	case old.ExecutionEnvironmentID != f.ExecutionEnvironmentID:
+		return "execution environment"
+	case !ptrEq(old.ProjectID, f.ProjectID):
+		return "project"
+	case !ptrEq(old.InventoryID, f.InventoryID):
+		return "inventory"
+	}
+	for _, o := range credentialOverrides {
+		if slices.Contains(f.AllowOverrides, o) && !slices.Contains(old.AllowOverrides, o) {
+			return "launch overrides (" + o + ")"
+		}
+	}
+	return ""
 }
 
 func overridesToStrings(o *[]apigen.OverridableField) []string {

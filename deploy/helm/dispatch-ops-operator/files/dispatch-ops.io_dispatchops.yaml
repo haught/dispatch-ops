@@ -219,6 +219,18 @@ spec:
                           <name>-api-tls; delete that Secret to have it generated again.
                         type: string
                     type: object
+                  trustedProxies:
+                    description: |-
+                      TrustedProxies are the addresses or CIDRs of the ingress controller
+                      or load balancer in front of the API server, e.g. 10.0.0.0/8. Only
+                      from these is X-Forwarded-For believed, so sign-in throttling can
+                      tell clients apart; without them, every client behind a proxy shares
+                      the proxy's address and limit. List only proxies that overwrite
+                      X-Forwarded-For, or clients can pick their own address.
+                    items:
+                      pattern: ^[0-9a-fA-F:.]+(/[0-9]{1,3})?$
+                      type: string
+                    type: array
                 type: object
               database:
                 default:
@@ -264,13 +276,21 @@ spec:
                       StatefulSet. Its volume and generated password are kept when the
                       DispatchOps is deleted. It has no backups or replication; use an external
                       database where that matters.
+
+                      PostgreSQL serves TLS with a certificate the operator generates in
+                      <name>-postgres-tls, and runs as UID 999 (the Debian-based postgres
+                      images' postgres user) with a read-only root filesystem.
                     properties:
                       image:
-                        default: postgres:17
+                        description: |-
+                          Image defaults to a digest-pinned PostgreSQL 17 image, which the
+                          operator's releases update. Another image must be Debian-based
+                          (postgres is UID 999), not the Alpine variant.
                         type: string
                       resources:
-                        description: ResourceRequirements describes the compute resource
-                          requirements.
+                        description: |-
+                          Resources defaults to requests of 100m CPU and 256Mi of memory and a
+                          1Gi memory limit.
                         properties:
                           claims:
                             description: |-
@@ -424,6 +444,26 @@ spec:
                       the pods.
                     type: boolean
                 type: object
+              networkPolicy:
+                default: {}
+                description: |-
+                  NetworkPolicy isolates the database, the servers' metrics ports and
+                  job pods with NetworkPolicies. They only take effect where the
+                  cluster's network plugin enforces NetworkPolicy.
+                properties:
+                  enabled:
+                    default: true
+                    type: boolean
+                  jobEgressExcept:
+                    description: |-
+                      JobEgressExcept are more CIDRs job pods may not connect to, such as
+                      the cluster's pod and service CIDRs (so jobs can't reach other
+                      services in the cluster), or internal networks jobs have no business
+                      reaching.
+                    items:
+                      type: string
+                    type: array
+                type: object
               oidc:
                 description: OIDCSpec configures single sign-on.
                 properties:
@@ -510,8 +550,77 @@ spec:
                   jobNamespace:
                     description: |-
                       JobNamespace is where job pods run. It must exist. Defaults to the
-                      DispatchOps namespace.
+                      DispatchOps namespace. Any other namespace must be opted in, since
+                      the task manager can read its Secrets and create Jobs there: listed
+                      in the operator's --allowed-job-namespaces (the chart's
+                      allowedJobNamespaces) or, when the operator watches all namespaces,
+                      labeled dispatch-ops.io/allow-jobs-from=<this DispatchOps's namespace>.
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
+                  jobResources:
+                    description: |-
+                      JobResources are the CPU and memory requests and limits of job pods.
+                      Unset, job pods request 100m CPU and 256Mi of memory and are limited
+                      to 2 CPUs and 2Gi. Set, it replaces all four: one it leaves out means
+                      no such request or limit.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
                   jobStartTimeout:
                     description: JobStartTimeout is how long a job's pod may take
                       to start, e.g. 10m.
@@ -520,6 +629,16 @@ spec:
                     description: JobTTL is how long finished Kubernetes Jobs are kept,
                       e.g. 1h.
                     type: string
+                  jobWorkSizeLimit:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      JobWorkSizeLimit caps the job pod's working directory (the project
+                      checkout and whatever the job writes there); the pod is evicted past
+                      it. Defaults to 4Gi.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
                   maxConcurrentJobs:
                     default: 10
                     description: MaxConcurrentJobs limits jobs waiting or running

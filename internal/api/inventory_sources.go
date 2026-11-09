@@ -108,6 +108,20 @@ func (h *Handlers) SetInventorySource(ctx context.Context, req apigen.SetInvento
 	if err := h.checkSyncCredentials(ctx, before.CredentialIDs, f.CredentialIDs); err != nil {
 		return nil, err
 	}
+	// The sync runs the source's code with the credentials, so changing
+	// that code needs use on the credentials it keeps too.
+	if hadSource && (before.ProjectID != f.ProjectID || before.SourcePath != f.SourcePath ||
+		before.ExecutionEnvironmentID != f.ExecutionEnvironmentID) {
+		for _, id := range f.CredentialIDs {
+			if err := h.authorize(ctx, rbac.Credential, id, rbac.Use); err != nil {
+				if ae := (*apiError)(nil); !errors.As(err, &ae) {
+					return nil, err
+				}
+				return nil, forbidden("Changing the source's project, path or execution environment needs the use role on all its credentials, " +
+					"since the sync runs with them; ask a credential's admin, or remove the credentials you can't use")
+			}
+		}
+	}
 
 	src, err := h.Store.SetInventorySource(ctx, req.InventoryId, f)
 	if errors.Is(err, store.ErrInvalidReference) {
