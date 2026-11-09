@@ -90,6 +90,11 @@
 						<tr>
 							<td>
 								<a href="/inventories/{inv.id}">{inv.name}</a>
+								{#if inv.source}<span
+										class="badge accent"
+										title="Synced from {inv.source.sourcePath} in {inv.source.projectName}"
+										>synced</span
+									>{/if}
 								{#if inv.description}<div class="muted small">{inv.description}</div>{/if}
 							</td>
 							<td>{inv.hostCount}</td>
@@ -118,7 +123,7 @@
 			<VarsField bind:value={vars} label="Inventory variables" />
 			<div class="form-actions">
 				<button type="submit" disabled={saving}>{saving ? 'Creating…' : 'Create inventory'}</button>
-				<span class="muted small">Add hosts and groups next.</span>
+				<span class="muted small">Add hosts and groups next, or sync them from a project.</span>
 			</div>
 		</form>
 	</section>

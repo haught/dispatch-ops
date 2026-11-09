@@ -113,7 +113,11 @@
 	</div>
 	<p>
 		<button type="button" class="secondary" onclick={addRow}>Add a value</button>
-		<span class="muted small">All values are secret. Jobs get each one by name.</span>
+		<span class="muted small"
+			>All values are secret. Jobs get each one as an environment variable of that name (e.g.
+			AKIPS_PASSWORD) and as a file in DISPATCH_CREDENTIALS_DIR. Names such as PATH, HOME and those
+			starting with ANSIBLE_, DISPATCH_, LD_ or PYTHON are reserved.</span
+		>
 	</p>
 {:else}
 	<div class="form-grid fields">

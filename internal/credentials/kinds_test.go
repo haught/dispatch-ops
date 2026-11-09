@@ -33,7 +33,7 @@ func TestSplit(t *testing.T) {
 	if err != nil || secret["API_KEY"] != "abc" {
 		t.Errorf("generic Split = %v, %v", secret, err)
 	}
-	for _, bad := range []map[string]string{{}, {"bad name": "x"}, {"1x": "y"}} {
+	for _, bad := range []map[string]string{{}, {"bad name": "x"}, {"1x": "y"}, {"PATH": "/x"}, {"ANSIBLE_CONFIG": "/x"}, {"LD_PRELOAD": "x"}, {"DISPATCH_JOB_ID": "x"}} {
 		if _, _, err := generic.Split(bad); err == nil {
 			t.Errorf("generic Split(%v) succeeded", bad)
 		}

@@ -21,6 +21,18 @@ import (
 // maxBodyBytes caps API request bodies.
 const maxBodyBytes = 1 << 20
 
+// maxInventoryBodyBytes caps the inventory a sync job reports, which can
+// list many thousands of hosts with their variables.
+const maxInventoryBodyBytes = 32 << 20
+
+// bodyLimit returns the request body cap for a request.
+func bodyLimit(r *http.Request) int64 {
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/runner/v1/jobs/") && strings.HasSuffix(r.URL.Path, "/inventory") {
+		return maxInventoryBodyBytes
+	}
+	return maxBodyBytes
+}
+
 // NewHandler returns the http.Handler serving everything under /api/ and
 // /runner/.
 //
@@ -89,7 +101,7 @@ func recordOperation(f apigen.StrictHandlerFunc, operationID string) apigen.Stri
 // anonymous.
 func identify(st *store.Store, log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r))
 
 		if secret := jobTokenFrom(r); secret != "" && auth.LooksLikeToken(secret) {
 			jobID, err := st.LookupJobToken(r.Context(), auth.HashToken(secret))

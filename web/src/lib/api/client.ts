@@ -30,6 +30,7 @@ export type NotificationEvent = components['schemas']['NotificationEvent'];
 export type TemplateNotification = components['schemas']['TemplateNotification'];
 export type NotificationDelivery = components['schemas']['NotificationDelivery'];
 export type Inventory = components['schemas']['Inventory'];
+export type InventorySource = components['schemas']['InventorySource'];
 export type Host = components['schemas']['Host'];
 export type Group = components['schemas']['Group'];
 export type Variables = components['schemas']['Variables'];

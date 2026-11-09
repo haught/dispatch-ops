@@ -22,17 +22,60 @@ type Inventory struct {
 	Variables   map[string]any
 	HostCount   int
 	GroupCount  int
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// Source is set if the inventory is synced from a project.
+	Source    *InventorySourceSummary
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// InventorySourceSummary is what inventory lists show about a source.
+type InventorySourceSummary struct {
+	ProjectID    uuid.UUID
+	ProjectName  string
+	SourcePath   string
+	LastSyncedAt *time.Time
+	LastJobID    *uuid.UUID
 }
 
 const inventoryColumns = `i.id, i.name, i.description, i.variables,
 	(SELECT count(*) FROM hosts WHERE inventory_id = i.id),
 	(SELECT count(*) FROM inventory_groups WHERE inventory_id = i.id),
+	src.project_id, sp.name, src.source_path, src.last_synced_at, src.last_job_id,
 	i.created_at, i.updated_at`
 
-func (i *Inventory) scanTargets() []any {
-	return []any{&i.ID, &i.Name, &i.Description, &i.Variables, &i.HostCount, &i.GroupCount, &i.CreatedAt, &i.UpdatedAt}
+const inventoryFrom = `inventories i
+	LEFT JOIN inventory_sources src ON src.inventory_id = i.id
+	LEFT JOIN projects sp ON sp.id = src.project_id`
+
+type inventoryRow struct {
+	Inventory
+	srcProjectID    *uuid.UUID
+	srcProjectName  *string
+	srcPath         *string
+	srcLastSyncedAt *time.Time
+	srcLastJobID    *uuid.UUID
+}
+
+func scanInventory(row pgx.Row) (Inventory, error) {
+	var r inventoryRow
+	err := row.Scan(&r.ID, &r.Name, &r.Description, &r.Variables, &r.HostCount, &r.GroupCount,
+		&r.srcProjectID, &r.srcProjectName, &r.srcPath, &r.srcLastSyncedAt, &r.srcLastJobID,
+		&r.CreatedAt, &r.UpdatedAt)
+	if r.srcProjectID != nil {
+		r.Source = &InventorySourceSummary{
+			ProjectID: *r.srcProjectID, ProjectName: deref(r.srcProjectName), SourcePath: deref(r.srcPath),
+			LastSyncedAt: r.srcLastSyncedAt, LastJobID: r.srcLastJobID,
+		}
+	}
+	return r.Inventory, err
+}
+
+func deref[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
+	}
+	return *p
 }
 
 // InventoryFields are an inventory's editable fields.
@@ -46,11 +89,11 @@ type InventoryFields struct {
 // If readableBy is set, only those that user may read.
 func (s *Store) ListInventories(ctx context.Context, search string, readableBy *uuid.UUID, page Page) ([]Inventory, int, error) {
 	q := listQuery{
-		columns: inventoryColumns, from: `inventories i`,
+		columns: inventoryColumns, from: inventoryFrom,
 		where: `i.name ILIKE $1`, args: []any{likePattern(search)}, orderBy: `i.name`,
 	}
 	q.readableBy(readableBy, rbac.Inventory, "i.id")
-	return list(ctx, s.pool, q, page, scanner[Inventory]())
+	return list(ctx, s.pool, q, page, func(row pgx.CollectableRow) (Inventory, error) { return scanInventory(row) })
 }
 
 // GetInventory returns one inventory.
@@ -59,8 +102,7 @@ func (s *Store) GetInventory(ctx context.Context, id uuid.UUID) (Inventory, erro
 }
 
 func getInventory(ctx context.Context, db querier, id uuid.UUID) (Inventory, error) {
-	var i Inventory
-	err := db.QueryRow(ctx, `SELECT `+inventoryColumns+` FROM inventories i WHERE i.id = $1`, id).Scan(i.scanTargets()...)
+	i, err := scanInventory(db.QueryRow(ctx, `SELECT `+inventoryColumns+` FROM `+inventoryFrom+` WHERE i.id = $1`, id))
 	return i, mapErr(err)
 }
 

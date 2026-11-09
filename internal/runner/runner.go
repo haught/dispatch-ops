@@ -13,12 +13,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 
+	"dispatch-ops/internal/envname"
 	"dispatch-ops/internal/runner/runnerapi"
 )
 
@@ -111,7 +113,10 @@ func Run(ctx context.Context, cfg Config) error {
 	hbCtx, stopHeartbeat := context.WithCancel(ctx)
 	go heartbeat(hbCtx, client, cfg, stop)
 
-	result := execute(ctx, cfg, spec, ev, stop)
+	report := func(ctx context.Context, path string) (*runnerapi.RunnerInventoryResult, error) {
+		return reportInventory(ctx, client, cfg.JobID, path)
+	}
+	result := execute(ctx, cfg, spec, ev, stop, report)
 	stopHeartbeat()
 
 	sendErr := ev.close()
@@ -232,9 +237,14 @@ func (s *stopper) reason() stopReason {
 
 // --- Execution ---------------------------------------------------------------
 
+// inventoryReporter sends the inventory file an inventory sync produced to
+// the API.
+type inventoryReporter func(ctx context.Context, path string) (*runnerapi.RunnerInventoryResult, error)
+
 // execute prepares the workspace, checks out the project, runs the command
-// and returns the result to report.
-func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev *emitter, stop *stopper) runnerapi.RunnerFinish {
+// and returns the result to report. An inventory sync's result is sent
+// with report before execute returns.
+func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev *emitter, stop *stopper, report inventoryReporter) runnerapi.RunnerFinish {
 	timeout := time.Duration(spec.TimeoutSeconds) * time.Second
 	result := runnerapi.RunnerFinish{}
 	fail := func(reason string) runnerapi.RunnerFinish {
@@ -266,6 +276,9 @@ func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev 
 	if err != nil {
 		return fail("Could not prepare the workspace: " + err.Error())
 	}
+	for _, n := range ws.notices {
+		ev.runner(n)
+	}
 	if spec.Project != nil {
 		rev, err := checkout(stopCtx, cfg, ws, spec.Project, ev)
 		if rev != "" {
@@ -277,7 +290,7 @@ func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev 
 		if err != nil {
 			return fail("Could not check out the project: " + err.Error())
 		}
-		if spec.JobType == runnerapi.Ansible {
+		if spec.JobType == runnerapi.Ansible || spec.JobType == runnerapi.InventorySync {
 			out, flush := ev.lineWriter()
 			err := installRequirements(stopCtx, cfg, ws, spec.Project, spec.Verbosity, ev.runner, out)
 			flush()
@@ -361,6 +374,11 @@ func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev 
 	switch {
 	case waitErr == nil:
 		ev.runner("The command finished successfully")
+		if spec.JobType == runnerapi.InventorySync {
+			if reason := syncInventory(ctx, ws, ev, report); reason != "" {
+				return withReason(result, runnerapi.Failed, reason, ev)
+			}
+		}
 		result.Status = runnerapi.Successful
 		return result
 	case errors.As(waitErr, &exitErr) && exitCode >= 0:
@@ -370,6 +388,30 @@ func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev 
 	default:
 		return withReason(result, runnerapi.Error, "Waiting for the command failed: "+waitErr.Error(), ev)
 	}
+}
+
+// syncInventory sends the inventory a sync found to the API and logs what
+// changed. It returns why the sync failed, or "" if it succeeded.
+func syncInventory(ctx context.Context, ws *workspace, ev *emitter, report inventoryReporter) string {
+	path := inventoryResultFile(ws)
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "ansible-inventory wrote no inventory: " + err.Error()
+	}
+	if fi.Size() > maxInventoryBytes {
+		return fmt.Sprintf("The inventory is %d MiB; at most %d MiB can be synced", fi.Size()>>20, maxInventoryBytes>>20)
+	}
+	ev.runner(fmt.Sprintf("Sending the inventory (%d KiB) to replace the stored one", (fi.Size()+1023)>>10))
+	res, err := report(context.WithoutCancel(ctx), path)
+	if err != nil {
+		return "The inventory could not be stored: " + problemText(err)
+	}
+	for _, w := range res.Warnings {
+		ev.runner("Warning: " + w)
+	}
+	ev.runner(fmt.Sprintf("Synced the inventory: hosts %d added, %d updated, %d removed; groups %d added, %d updated, %d removed",
+		res.HostsAdded, res.HostsUpdated, res.HostsRemoved, res.GroupsAdded, res.GroupsUpdated, res.GroupsRemoved))
+	return ""
 }
 
 // stopped is the result of a job stopped for reason.
@@ -440,6 +482,8 @@ type workspace struct {
 	// paths of the roles and collections installed from the project's
 	// requirements files.
 	ansibleEnv []string
+	// notices are messages for the job's output from preparing it.
+	notices []string
 }
 
 // path returns a path inside the workspace's private directory, which the
@@ -464,6 +508,10 @@ func (w *workspace) secret(elem ...string) string {
 //	DISPATCH_LIMIT           host pattern limit (may be empty)
 //	DISPATCH_CREDENTIALS     all credentials as JSON: [{name, kind, inputs}]
 //	DISPATCH_CREDENTIALS_DIR one directory per credential, one file per input
+//
+// Each input of a generic credential is also set as a variable of the same
+// name (e.g. AKIPS_PASSWORD), except names envname.Reserved reports. When
+// two generic credentials set the same name, the later one wins.
 func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) (*workspace, error) {
 	ws := &workspace{dir: cfg.WorkDir, secrets: filepath.Join(cfg.WorkDir, "secrets")}
 	for _, d := range []string{ws.dir, ws.secrets, ws.path(), ws.secret()} {
@@ -524,8 +572,46 @@ func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) (*workspace, error) {
 	}
 	set("DISPATCH_CREDENTIALS", credsJSON)
 	set("DISPATCH_CREDENTIALS_DIR", credDir)
+	env = append(env, ws.genericEnv(spec.Credentials)...)
 	ws.env = env
 	return ws, nil
+}
+
+// genericEnv returns the inputs of the generic credentials as environment
+// variables, in credential order, and records notices for the names it
+// skips or overrides.
+func (ws *workspace) genericEnv(creds []runnerapi.RunnerCredential) []string {
+	setBy := map[string]string{}
+	values := map[string]string{}
+	var order []string
+	for _, c := range creds {
+		if c.Kind != runnerapi.Generic {
+			continue
+		}
+		names := make([]string, 0, len(c.Inputs))
+		for name := range c.Inputs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if envname.Reserved(name) {
+				ws.notices = append(ws.notices, fmt.Sprintf("Credential %q: %s is a reserved name, so it is not set as an environment variable", c.Name, name))
+				continue
+			}
+			if prev, ok := setBy[name]; ok {
+				ws.notices = append(ws.notices, fmt.Sprintf("Credential %q sets %s, overriding credential %q", c.Name, name, prev))
+			} else {
+				order = append(order, name)
+			}
+			setBy[name] = c.Name
+			values[name] = c.Inputs[name]
+		}
+	}
+	env := make([]string, 0, len(order))
+	for _, name := range order {
+		env = append(env, name+"="+values[name])
+	}
+	return env
 }
 
 // baseEnv is the runner's environment without its own settings, which the

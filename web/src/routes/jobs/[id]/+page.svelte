@@ -272,7 +272,13 @@
 						(<code>{job.config.project.scmUrl}</code> at <code>{job.config.project.scmRef}</code>)
 					</span>
 				</dd>
-				<dt>{job.config.jobType === 'ansible' ? 'Playbook' : 'Script'}</dt>
+				<dt>
+					{job.config.jobType === 'ansible'
+						? 'Playbook'
+						: job.config.jobType === 'inventory_sync'
+							? 'Inventory source'
+							: 'Script'}
+				</dt>
 				<dd><code>{[job.config.entrypoint, ...job.config.arguments].join(' ')}</code></dd>
 				<dt>Revision</dt>
 				<dd>
@@ -311,6 +317,10 @@
 			{#if job.jobTemplateId}
 				<dt>Template</dt>
 				<dd><a href="/templates/{job.jobTemplateId}">{job.name}</a></dd>
+			{/if}
+			{#if job.syncInventoryId}
+				<dt>Syncs</dt>
+				<dd><a href="/inventories/{job.syncInventoryId}">the inventory</a></dd>
 			{/if}
 			<dt>Created</dt>
 			<dd>{fmtTime(job.createdAt)}</dd>

@@ -109,6 +109,8 @@ type Job struct {
 	Schedule *ScheduleRef
 	// The job this one is a relaunch of, if it still exists.
 	RelaunchOf *uuid.UUID
+	// The inventory an inventory_sync job syncs, if it still exists.
+	SyncInventoryID *uuid.UUID
 }
 
 // ScheduleRef identifies a schedule.
@@ -121,7 +123,7 @@ const jobColumns = `j.id, j.job_template_id, j.name, j.status, j.launch_type, j.
 	j.config, j.cancel_requested, j.cancel_requested_at, j.exit_code, j.failure_reason,
 	j.k8s_namespace, j.k8s_job_name, j.runner_version, j.scm_revision,
 	j.created_at, j.dispatched_at, j.started_at, j.finished_at, j.last_heartbeat_at,
-	j.schedule_id, sc.name, j.relaunch_of`
+	j.schedule_id, sc.name, j.relaunch_of, j.sync_inventory_id`
 
 const jobFrom = `jobs j LEFT JOIN users u ON u.id = j.launched_by LEFT JOIN schedules sc ON sc.id = j.schedule_id`
 
@@ -139,7 +141,7 @@ func (j *jobRow) scanTargets() []any {
 		&j.Config, &j.CancelRequested, &j.CancelRequestedAt, &j.ExitCode, &j.FailureReason,
 		&j.K8sNamespace, &j.K8sJobName, &j.RunnerVersion, &j.ScmRevision,
 		&j.CreatedAt, &j.DispatchedAt, &j.StartedAt, &j.FinishedAt, &j.LastHeartbeatAt,
-		&j.scheduleID, &j.scheduleName, &j.RelaunchOf}
+		&j.scheduleID, &j.scheduleName, &j.RelaunchOf, &j.SyncInventoryID}
 }
 
 func (j *jobRow) job() Job {
@@ -167,6 +169,8 @@ type NewJob struct {
 	Config     JobConfig
 	ScheduleID *uuid.UUID
 	RelaunchOf *uuid.UUID
+	// SyncInventoryID is the inventory an inventory_sync job syncs.
+	SyncInventoryID *uuid.UUID
 }
 
 // CreateJob queues a job as pending.
@@ -181,9 +185,9 @@ func (s *Store) CreateJob(ctx context.Context, in NewJob) (Job, error) {
 func createJob(ctx context.Context, db querier, in NewJob) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := db.QueryRow(ctx, `
-		INSERT INTO jobs (job_template_id, name, launch_type, launched_by, config, schedule_id, relaunch_of)
-		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-		in.TemplateID, in.Name, in.LaunchType, in.LaunchedBy, in.Config, in.ScheduleID, in.RelaunchOf).Scan(&id)
+		INSERT INTO jobs (job_template_id, name, launch_type, launched_by, config, schedule_id, relaunch_of, sync_inventory_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+		in.TemplateID, in.Name, in.LaunchType, in.LaunchedBy, in.Config, in.ScheduleID, in.RelaunchOf, in.SyncInventoryID).Scan(&id)
 	if err != nil {
 		return uuid.Nil, mapErr(err)
 	}
@@ -244,8 +248,11 @@ type JobFilter struct {
 	Status     string
 	TemplateID *uuid.UUID
 	ScheduleID *uuid.UUID
-	// ReadableBy, if set, limits the list to jobs that user launched or
-	// whose template they hold a role on.
+	// SyncInventoryID limits the list to the inventory's sync jobs.
+	SyncInventoryID *uuid.UUID
+	// ReadableBy, if set, limits the list to jobs that user launched, whose
+	// template they hold a role on, or that sync an inventory they hold a
+	// role on.
 	ReadableBy *uuid.UUID
 }
 
@@ -265,12 +272,19 @@ func (s *Store) ListJobs(ctx context.Context, f JobFilter, page Page) ([]Job, in
 		q.args = append(q.args, *f.ScheduleID)
 		conds = append(conds, `j.schedule_id = $`+strconv.Itoa(len(q.args)))
 	}
+	if f.SyncInventoryID != nil {
+		q.args = append(q.args, *f.SyncInventoryID)
+		conds = append(conds, `j.sync_inventory_id = $`+strconv.Itoa(len(q.args)))
+	}
 	if f.ReadableBy != nil {
 		q.args = append(q.args, *f.ReadableBy)
 		n := strconv.Itoa(len(q.args))
 		conds = append(conds, `(j.launched_by = $`+n+` OR EXISTS (SELECT 1 FROM user_roles r
 			WHERE r.user_id = $`+n+` AND r.resource_type = 'job_template'
-				AND (r.resource_id IS NULL OR r.resource_id = j.job_template_id)))`)
+				AND (r.resource_id IS NULL OR r.resource_id = j.job_template_id))
+			OR (j.sync_inventory_id IS NOT NULL AND EXISTS (SELECT 1 FROM user_roles r
+			WHERE r.user_id = $`+n+` AND r.resource_type = 'inventory'
+				AND (r.resource_id IS NULL OR r.resource_id = j.sync_inventory_id))))`)
 	}
 	q.where = strings.Join(conds, " AND ")
 	return list(ctx, s.pool, q, page, scanJob)

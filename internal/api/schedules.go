@@ -16,6 +16,7 @@ import (
 func toAPISchedule(s store.Schedule) apigen.Schedule {
 	out := apigen.Schedule{
 		Id: s.ID, Name: s.Name, Description: s.Description, JobTemplateId: s.TemplateID, JobTemplateName: s.TemplateName,
+		InventoryId: s.InventoryID, InventoryName: s.InventoryName,
 		Cron: s.Cron, Timezone: s.Timezone, Enabled: s.Enabled, Overrides: toAPILaunchRequest(s.Overrides),
 		NextRunAt: s.NextRunAt, LastRunAt: s.LastRunAt, LastJobId: s.LastJobID, LastError: s.LastError,
 		CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt,
@@ -44,29 +45,44 @@ func nextRun(spec cronspec.Spec, enabled bool) *time.Time {
 	return &n
 }
 
-// getSchedule loads a schedule whose template the caller may read.
+// scheduleTarget returns the resource a schedule launches: its job
+// template, or the inventory it syncs.
+func scheduleTarget(sc store.Schedule) (rbac.ResourceType, uuid.UUID) {
+	if sc.InventoryID != nil {
+		return rbac.Inventory, *sc.InventoryID
+	}
+	return rbac.JobTemplate, deref(sc.TemplateID)
+}
+
+// getSchedule loads a schedule whose template or inventory the caller may
+// read.
 func (h *Handlers) getSchedule(ctx context.Context, id uuid.UUID) (store.Schedule, error) {
 	sc, err := h.Store.GetSchedule(ctx, id)
 	if err != nil {
 		return sc, orNotFound(err, "Schedule")
 	}
-	if err := h.authorize(ctx, rbac.JobTemplate, sc.TemplateID, rbac.Read); err != nil {
+	rt, rid := scheduleTarget(sc)
+	if err := h.authorize(ctx, rt, rid, rbac.Read); err != nil {
 		return sc, orScheduleNotFound(err)
 	}
 	return sc, nil
 }
 
 // authorizeScheduleChange checks that the caller may change or delete a
-// schedule: admins of its template, and its creator while they may still
-// launch the template.
+// schedule: admins of its template or inventory, and the creator of a
+// template's schedule while they may still launch the template.
 func (h *Handlers) authorizeScheduleChange(ctx context.Context, sc store.Schedule) error {
-	err := h.authorize(ctx, rbac.JobTemplate, sc.TemplateID, rbac.Admin)
+	rt, rid := scheduleTarget(sc)
+	err := h.authorize(ctx, rt, rid, rbac.Admin)
 	var ae *apiError
 	if err == nil || !errors.As(err, &ae) || ae.status != 403 {
 		return orScheduleNotFound(err)
 	}
+	if rt == rbac.Inventory {
+		return forbidden("Changing an inventory's sync schedule needs the admin role on the inventory")
+	}
 	if p := caller(ctx); sc.CreatedBy != nil && sc.CreatedBy.ID == p.UserID {
-		if h.authorize(ctx, rbac.JobTemplate, sc.TemplateID, rbac.Execute) == nil {
+		if h.authorize(ctx, rbac.JobTemplate, rid, rbac.Execute) == nil {
 			return nil
 		}
 	}
@@ -84,7 +100,7 @@ func orScheduleNotFound(err error) error {
 func (h *Handlers) ListSchedules(ctx context.Context, req apigen.ListSchedulesRequestObject) (apigen.ListSchedulesResponseObject, error) {
 	p := req.Params
 	items, total, err := h.Store.ListSchedules(ctx, store.ScheduleFilter{
-		Search: deref(p.Search), TemplateID: p.JobTemplateId, ReadableBy: readableBy(ctx),
+		Search: deref(p.Search), TemplateID: p.JobTemplateId, InventoryID: p.InventoryId, ReadableBy: readableBy(ctx),
 	}, pageOf(p.Limit, p.Offset))
 	if err != nil {
 		return nil, err
@@ -98,19 +114,35 @@ func (h *Handlers) ListSchedules(ctx context.Context, req apigen.ListSchedulesRe
 
 func (h *Handlers) CreateSchedule(ctx context.Context, req apigen.CreateScheduleRequestObject) (apigen.CreateScheduleResponseObject, error) {
 	b := req.Body
-	if err := h.authorize(ctx, rbac.JobTemplate, b.JobTemplateId, rbac.Execute); err != nil {
-		var ae *apiError
-		if errors.As(err, &ae) && ae.status == 404 {
-			return nil, badRequest("job template %s does not exist", b.JobTemplateId)
+	if (b.JobTemplateId == nil) == (b.InventoryId == nil) {
+		return nil, badRequest("give either jobTemplateId or inventoryId")
+	}
+	var (
+		target store.ScheduleTarget
+		t      store.JobTemplate
+	)
+	if b.InventoryId != nil {
+		if err := h.checkSyncScheduleTarget(ctx, *b.InventoryId, b.Overrides != nil); err != nil {
+			return nil, err
 		}
-		return nil, err
-	}
-	t, err := h.Store.GetJobTemplate(ctx, b.JobTemplateId)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, badRequest("job template %s does not exist", b.JobTemplateId)
-	}
-	if err != nil {
-		return nil, err
+		target.InventoryID = b.InventoryId
+	} else {
+		if err := h.authorize(ctx, rbac.JobTemplate, *b.JobTemplateId, rbac.Execute); err != nil {
+			var ae *apiError
+			if errors.As(err, &ae) && ae.status == 404 {
+				return nil, badRequest("job template %s does not exist", *b.JobTemplateId)
+			}
+			return nil, err
+		}
+		var err error
+		t, err = h.Store.GetJobTemplate(ctx, *b.JobTemplateId)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, badRequest("job template %s does not exist", *b.JobTemplateId)
+		}
+		if err != nil {
+			return nil, err
+		}
+		target.TemplateID = &t.ID
 	}
 	f := store.ScheduleFields{
 		Name: b.Name, Description: deref(b.Description), Cron: b.Cron, Timezone: "UTC", Enabled: true,
@@ -124,15 +156,17 @@ func (h *Handlers) CreateSchedule(ctx context.Context, req apigen.CreateSchedule
 	if err != nil {
 		return nil, err
 	}
-	if err := h.checkOverrideRefs(ctx, t, f.Overrides); err != nil {
-		return nil, err
+	if target.TemplateID != nil {
+		if err := h.checkOverrideRefs(ctx, t, f.Overrides); err != nil {
+			return nil, err
+		}
 	}
 	f.NextRunAt = nextRun(spec, f.Enabled)
 
 	p := caller(ctx)
-	sc, err := h.Store.CreateSchedule(ctx, t.ID, &p.UserID, f)
+	sc, err := h.Store.CreateSchedule(ctx, target, &p.UserID, f)
 	if errors.Is(err, store.ErrConflict) {
-		return nil, conflict("the job template already has a schedule named %q", f.Name)
+		return nil, conflict("there is already a schedule named %q for it", f.Name)
 	}
 	if err != nil {
 		return nil, err
@@ -143,6 +177,29 @@ func (h *Handlers) CreateSchedule(ctx context.Context, req apigen.CreateSchedule
 		After: out,
 	})
 	return apigen.CreateSchedule201JSONResponse(out), nil
+}
+
+// checkSyncScheduleTarget checks that the caller may schedule syncs of an
+// inventory (admin on it) and that it has a source.
+func (h *Handlers) checkSyncScheduleTarget(ctx context.Context, inventoryID uuid.UUID, hasOverrides bool) error {
+	if err := h.authorize(ctx, rbac.Inventory, inventoryID, rbac.Admin); err != nil {
+		var ae *apiError
+		if errors.As(err, &ae) && ae.status == 404 {
+			return badRequest("inventory %s does not exist", inventoryID)
+		}
+		return err
+	}
+	if hasOverrides {
+		return badRequest("an inventory's sync schedule takes no overrides")
+	}
+	has, err := h.Store.InventoryHasSource(ctx, inventoryID)
+	if err != nil {
+		return err
+	}
+	if !has {
+		return badRequest("the inventory is not synced from a source; set its source first")
+	}
+	return nil
 }
 
 func (h *Handlers) GetSchedule(ctx context.Context, req apigen.GetScheduleRequestObject) (apigen.GetScheduleResponseObject, error) {
@@ -161,11 +218,15 @@ func (h *Handlers) UpdateSchedule(ctx context.Context, req apigen.UpdateSchedule
 	if err := h.authorizeScheduleChange(ctx, cur); err != nil {
 		return nil, err
 	}
-	t, err := h.Store.GetJobTemplate(ctx, cur.TemplateID)
-	if err != nil {
-		return nil, err
-	}
 	b := req.Body
+	var t store.JobTemplate
+	if cur.TemplateID != nil {
+		if t, err = h.Store.GetJobTemplate(ctx, *cur.TemplateID); err != nil {
+			return nil, err
+		}
+	} else if b.Overrides != nil {
+		return nil, badRequest("an inventory's sync schedule takes no overrides")
+	}
 	var before store.Schedule
 	sc, err := h.Store.UpdateSchedule(ctx, req.ScheduleId, func(cur store.Schedule, f *store.ScheduleFields) error {
 		before = cur
@@ -192,7 +253,7 @@ func (h *Handlers) UpdateSchedule(ctx context.Context, req apigen.UpdateSchedule
 		return nil
 	})
 	if errors.Is(err, store.ErrConflict) {
-		return nil, conflict("the job template already has a schedule with that name")
+		return nil, conflict("there is already a schedule with that name for it")
 	}
 	if err != nil {
 		return nil, orNotFound(err, "Schedule")

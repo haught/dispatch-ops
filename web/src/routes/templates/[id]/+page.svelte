@@ -8,17 +8,16 @@
 		type Job,
 		type JobTemplate,
 		type NotificationEvent,
-		type NotificationTarget,
-		type Schedule
+		type NotificationTarget
 	} from '#lib/api/client.js';
 	import ResourceAccess from '#lib/components/ResourceAccess.svelte';
+	import Schedules from '#lib/components/Schedules.svelte';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import TemplateForm from '#lib/components/TemplateForm.svelte';
 	import { fmtDuration, fmtSeconds, fmtTime, fmtVars } from '#lib/format.js';
 	import { can, loadMyGrants } from '#lib/permissions.svelte.js';
 
 	let template = $state<JobTemplate | null>(null);
-	let schedules = $state<Schedule[]>([]);
 	let jobs = $state<Job[]>([]);
 	let targets = $state<NotificationTarget[]>([]);
 	// Chosen events per target ID.
@@ -26,15 +25,6 @@
 	let error = $state('');
 	let launching = $state(false);
 	let editing = $state(false);
-
-	// New schedule form.
-	let scName = $state('');
-	let scCron = $state('0 3 * * *');
-	let scTimezone = $state(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
-	let scLimit = $state('');
-	let scError = $state('');
-	let preview = $state<string[]>([]);
-	let previewError = $state('');
 
 	// Names of what the template uses; null where the caller can't see it.
 	type Ref = { id: string; name: string | null };
@@ -55,13 +45,6 @@
 	$effect(() => {
 		loadMyGrants();
 	});
-
-	async function loadSchedules(tid: string) {
-		const { data } = await api.GET('/api/v1/schedules', {
-			params: { query: { jobTemplateId: tid, limit: 500 } }
-		});
-		if (data) schedules = data.items;
-	}
 
 	async function loadJobs(tid: string) {
 		const { data } = await api.GET('/api/v1/jobs', {
@@ -131,34 +114,9 @@
 				}
 				template = data;
 				loadUses(data);
-				loadSchedules(tid);
 				loadJobs(tid);
 				loadNotifications(tid);
 			});
-	});
-
-	// Check the cron expression as it is typed.
-	$effect(() => {
-		const cron = scCron.trim();
-		const timezone = scTimezone.trim();
-		if (!cron) {
-			preview = [];
-			previewError = '';
-			return;
-		}
-		const timer = setTimeout(async () => {
-			const { data, error: err } = await api.GET('/api/v1/schedule-preview', {
-				params: { query: { cron, timezone: timezone || undefined, count: 3 } }
-			});
-			if (data) {
-				preview = data.runs;
-				previewError = '';
-			} else {
-				preview = [];
-				previewError = errorMessage(err);
-			}
-		}, 300);
-		return () => clearTimeout(timer);
 	});
 
 	async function launch() {
@@ -192,45 +150,6 @@
 		});
 		if (err) error = errorMessage(err);
 		else goto('/templates');
-	}
-
-	async function createSchedule(event: SubmitEvent) {
-		event.preventDefault();
-		if (!template) return;
-		scError = '';
-		const { error: err } = await api.POST('/api/v1/schedules', {
-			body: {
-				name: scName,
-				jobTemplateId: template.id,
-				cron: scCron.trim(),
-				timezone: scTimezone.trim() || 'UTC',
-				enabled: true,
-				overrides: scLimit ? { limit: scLimit } : undefined
-			}
-		});
-		if (err) {
-			scError = errorMessage(err);
-			return;
-		}
-		scName = scLimit = '';
-		await loadSchedules(template.id);
-	}
-
-	async function setEnabled(s: Schedule, enabled: boolean) {
-		const { error: err } = await api.PATCH('/api/v1/schedules/{scheduleId}', {
-			params: { path: { scheduleId: s.id } },
-			body: { enabled }
-		});
-		if (err) scError = errorMessage(err);
-		await loadSchedules(s.jobTemplateId);
-	}
-
-	async function removeSchedule(s: Schedule) {
-		const { error: err } = await api.DELETE('/api/v1/schedules/{scheduleId}', {
-			params: { path: { scheduleId: s.id } }
-		});
-		if (err) scError = errorMessage(err);
-		await loadSchedules(s.jobTemplateId);
 	}
 
 	function toggleEvent(targetId: string, ev: NotificationEvent, on: boolean) {
@@ -340,78 +259,7 @@
 
 	<section class="card">
 		<h2>Schedules</h2>
-		{#if scError}<p class="error" role="alert">{scError}</p>{/if}
-		{#if schedules.length === 0}
-			<p class="muted">Not scheduled.</p>
-		{:else}
-			<div class="table-wrap">
-				<table>
-					<thead>
-						<tr>
-							<th>Name</th>
-							<th>When</th>
-							<th>Next run</th>
-							<th>Last run</th>
-							<th></th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each schedules as s (s.id)}
-							<tr>
-								<td>
-									{s.name}
-									{#if s.overrides.limit}<div class="muted small">
-											limit <code>{s.overrides.limit}</code>
-										</div>{/if}
-								</td>
-								<td><code>{s.cron}</code> <span class="muted small">{s.timezone}</span></td>
-								<td>{s.enabled ? fmtTime(s.nextRunAt) : 'disabled'}</td>
-								<td>
-									{#if s.lastError}
-										<span class="error small" title={s.lastError}>Failed to launch</span>
-									{:else if s.lastJobId}
-										<a href="/jobs/{s.lastJobId}">{fmtTime(s.lastRunAt)}</a>
-									{:else}
-										{fmtTime(s.lastRunAt)}
-									{/if}
-								</td>
-								<td>
-									<div class="row-actions">
-										<button class="secondary" onclick={() => setEnabled(s, !s.enabled)}>
-											{s.enabled ? 'Disable' : 'Enable'}
-										</button>
-										<button class="danger" onclick={() => removeSchedule(s)}>Delete</button>
-									</div>
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		{/if}
-
-		<h3>New schedule</h3>
-		<form onsubmit={createSchedule} class="form-grid">
-			<label>Name <input bind:value={scName} maxlength="255" required /></label>
-			<label>
-				Cron
-				<input bind:value={scCron} required placeholder="0 3 * * *" />
-			</label>
-			<label>Time zone <input bind:value={scTimezone} placeholder="UTC" /></label>
-			{#if template.allowOverrides.includes('limit')}
-				<label>Limit <input bind:value={scLimit} placeholder="Template's limit" /></label>
-			{/if}
-			<label><button type="submit" disabled={Boolean(previewError)}>Add schedule</button></label>
-		</form>
-		<p class="small muted">
-			Five fields (minute hour day-of-month month day-of-week), or <code>@daily</code>,
-			<code>@hourly</code>, <code>@every 6h</code>…
-			{#if previewError}
-				<span class="error">{previewError}</span>
-			{:else if preview.length}
-				Next runs: {preview.map((r) => fmtTime(r)).join(' · ')}
-			{/if}
-		</p>
+		<Schedules jobTemplateId={template.id} allowLimit={template.allowOverrides.includes('limit')} />
 	</section>
 
 	<section class="card">
@@ -501,11 +349,6 @@
 {/if}
 
 <style>
-	h3 {
-		font-size: 1rem;
-		margin: 1.25rem 0 0.5rem;
-	}
-
 	dl {
 		display: grid;
 		grid-template-columns: max-content 1fr;

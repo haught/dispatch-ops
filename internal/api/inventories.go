@@ -147,6 +147,7 @@ func inventoryAudit(i apigen.Inventory) map[string]any {
 	m := toMap(i)
 	delete(m, "hostCount")
 	delete(m, "groupCount")
+	delete(m, "source") // changes with every sync; source changes are audited on their own
 	return m
 }
 
@@ -171,6 +172,9 @@ func (h *Handlers) ListHosts(ctx context.Context, req apigen.ListHostsRequestObj
 
 func (h *Handlers) CreateHost(ctx context.Context, req apigen.CreateHostRequestObject) (apigen.CreateHostResponseObject, error) {
 	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Admin); err != nil {
+		return nil, err
+	}
+	if err := h.checkNotSynced(ctx, req.InventoryId); err != nil {
 		return nil, err
 	}
 	b := req.Body
@@ -220,6 +224,9 @@ func (h *Handlers) UpdateHost(ctx context.Context, req apigen.UpdateHostRequestO
 	if err != nil {
 		return nil, err
 	}
+	if err := h.checkNotSynced(ctx, before.InventoryID); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	host, err := h.Store.UpdateHost(ctx, req.HostId, func(f *store.HostFields) error {
 		setIf(&f.Name, b.Name)
@@ -245,6 +252,9 @@ func (h *Handlers) UpdateHost(ctx context.Context, req apigen.UpdateHostRequestO
 func (h *Handlers) DeleteHost(ctx context.Context, req apigen.DeleteHostRequestObject) (apigen.DeleteHostResponseObject, error) {
 	host, err := h.hostIn(ctx, req.HostId, rbac.Admin)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.checkNotSynced(ctx, host.InventoryID); err != nil {
 		return nil, err
 	}
 	if err := h.Store.DeleteHost(ctx, req.HostId); err != nil {
@@ -287,6 +297,9 @@ func (h *Handlers) ListGroups(ctx context.Context, req apigen.ListGroupsRequestO
 
 func (h *Handlers) CreateGroup(ctx context.Context, req apigen.CreateGroupRequestObject) (apigen.CreateGroupResponseObject, error) {
 	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Admin); err != nil {
+		return nil, err
+	}
+	if err := h.checkNotSynced(ctx, req.InventoryId); err != nil {
 		return nil, err
 	}
 	b := req.Body
@@ -336,6 +349,9 @@ func (h *Handlers) UpdateGroup(ctx context.Context, req apigen.UpdateGroupReques
 	if err != nil {
 		return nil, err
 	}
+	if err := h.checkNotSynced(ctx, before.InventoryID); err != nil {
+		return nil, err
+	}
 	b := req.Body
 	if b.Name != nil {
 		if err := checkGroupName(*b.Name); err != nil {
@@ -367,6 +383,9 @@ func (h *Handlers) DeleteGroup(ctx context.Context, req apigen.DeleteGroupReques
 	if err != nil {
 		return nil, err
 	}
+	if err := h.checkNotSynced(ctx, g.InventoryID); err != nil {
+		return nil, err
+	}
 	if err := h.Store.DeleteGroup(ctx, req.GroupId); err != nil {
 		return nil, orNotFound(err, "Group")
 	}
@@ -380,10 +399,17 @@ func (h *Handlers) DeleteGroup(ctx context.Context, req apigen.DeleteGroupReques
 // --- Conversions ---
 
 func toAPIInventory(i store.Inventory) apigen.Inventory {
-	return apigen.Inventory{
+	out := apigen.Inventory{
 		Id: i.ID, Name: i.Name, Description: i.Description, Variables: i.Variables,
 		HostCount: i.HostCount, GroupCount: i.GroupCount, CreatedAt: i.CreatedAt, UpdatedAt: i.UpdatedAt,
 	}
+	if s := i.Source; s != nil {
+		out.Source = &apigen.InventorySourceSummary{
+			ProjectId: s.ProjectID, ProjectName: s.ProjectName, SourcePath: s.SourcePath,
+			LastSyncedAt: s.LastSyncedAt, LastJobId: s.LastJobID,
+		}
+	}
+	return out
 }
 
 func toAPIHost(h store.Host) apigen.Host {

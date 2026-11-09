@@ -13,3 +13,6 @@ PLAN.md
 
 # Binaries Tilt builds images from (Tiltfile)
 /.tilt-build/
+
+# Dev SPECS
+/SPECS

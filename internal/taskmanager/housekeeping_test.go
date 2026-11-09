@@ -33,7 +33,7 @@ func TestSchedulesLaunchJobs(t *testing.T) {
 	tmpl := e.template("limit")
 	past := time.Now().Add(-time.Hour)
 	limit := "web*"
-	good, err := e.st.CreateSchedule(e.ctx, tmpl.ID, nil, store.ScheduleFields{
+	good, err := e.st.CreateSchedule(e.ctx, store.ScheduleTarget{TemplateID: &tmpl.ID}, nil, store.ScheduleFields{
 		Name: "nightly", Cron: "0 3 * * *", Timezone: "Europe/Berlin", Enabled: true, NextRunAt: &past,
 		Overrides: store.LaunchOverrides{Limit: &limit},
 	})
@@ -41,7 +41,7 @@ func TestSchedulesLaunchJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The template doesn't allow overriding extra vars.
-	bad, err := e.st.CreateSchedule(e.ctx, tmpl.ID, nil, store.ScheduleFields{
+	bad, err := e.st.CreateSchedule(e.ctx, store.ScheduleTarget{TemplateID: &tmpl.ID}, nil, store.ScheduleFields{
 		Name: "bad", Cron: "@hourly", Timezone: "UTC", Enabled: true, NextRunAt: &past,
 		Overrides: store.LaunchOverrides{ExtraVars: map[string]any{"x": 1}},
 	})
@@ -49,7 +49,7 @@ func TestSchedulesLaunchJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	future := time.Now().Add(time.Hour)
-	if _, err := e.st.CreateSchedule(e.ctx, tmpl.ID, nil, store.ScheduleFields{
+	if _, err := e.st.CreateSchedule(e.ctx, store.ScheduleTarget{TemplateID: &tmpl.ID}, nil, store.ScheduleFields{
 		Name: "later", Cron: "@hourly", Timezone: "UTC", Enabled: true, NextRunAt: &future,
 	}); err != nil {
 		t.Fatal(err)

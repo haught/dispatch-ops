@@ -63,7 +63,7 @@ func problemFor(err error) (p apigen.Problem, ok bool) {
 	case errors.Is(err, store.ErrConflict):
 		return problemDetail(http.StatusConflict, "Conflict", "The name is already in use"), true
 	case errors.Is(err, store.ErrInUse):
-		return problemDetail(http.StatusConflict, "In use", "Job templates still use it; change or delete them first"), true
+		return problemDetail(http.StatusConflict, "In use", "Job templates or inventory sources still use it; change or delete them first"), true
 	case errors.Is(err, store.ErrInvalidReference):
 		return problemDetail(http.StatusBadRequest, "Invalid request", "A referenced resource does not exist (or is in another inventory)"), true
 	case errors.Is(err, store.ErrCycle):

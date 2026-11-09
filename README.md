@@ -243,6 +243,10 @@ Roles are granted to users or teams (`/api/v1/role-grants`, or the
 - A job can be seen by whoever launched it and by anyone with a role on its
   template. It can be canceled by whoever launched it and by those with
   `execute` on its template.
+- An inventory's source is set, changed and synced by those with `admin` on
+  the inventory (and `use` on the project and credentials they add). Its
+  sync jobs can be seen by anyone with a role on the inventory, and
+  canceled by its admins.
 - Execution environments can be used by everyone; only system
   administrators manage them, and users and teams.
 - `make admin` (`dispatch-ops user create -admin`) creates a local system
@@ -319,6 +323,11 @@ needs a role on the template; creating one needs `execute` (and `use` on an
 inventory it overrides); changing or deleting one needs `admin` on the
 template, or having created it.
 
+A schedule can instead sync an inventory from its source (`inventoryId`
+instead of `jobTemplateId`, no overrides). Those are managed on the
+inventory's page by its admins. A run while the last sync is still going
+launches nothing and shows why in `lastError`.
+
 ## Notifications
 
 System administrators set up notification targets on the *Notifications*
@@ -390,6 +399,7 @@ manager), and a rising rate of `dispatch_notifications_total{result="failed"}`.
 | `ansible` | `ansible-playbook` on the template's playbook (`entrypoint`) | `projectId`, `entrypoint`; an EE with ansible-core and git |
 | `script` | The `entrypoint` script with the template's `arguments` | `projectId`, `entrypoint`; an EE with git |
 | `container` | The template's `command` | `command` |
+| `inventory_sync` | `ansible-inventory` on an inventory's source (see [Inventory sources](#inventory-sources)); not a template type | an inventory source; an EE with ansible-core and git |
 
 Ansible and script jobs run in the project checkout (so a project's
 `ansible.cfg` applies). Scripts with a `#!` line run with that interpreter;
@@ -420,6 +430,7 @@ template's credentials:
 | `ssh` | `-u`, `--private-key`, `--become-password-file` |
 | `username_password` | `-u`, `--connection-password-file` (needs `sshpass`), `--become-password-file` |
 | `vault` | `--vault-id <id>@file`, or `--vault-password-file` without a vault ID |
+| `generic` | Environment variables named after its inputs, as for every job |
 | others | `DISPATCH_CREDENTIALS` / `DISPATCH_CREDENTIALS_DIR`, as for every job |
 
 A template takes at most one machine credential (`ssh` or
@@ -467,6 +478,61 @@ still found, so an image can make a requirements file unnecessary.
 | `DISPATCH_LIMIT` | Host pattern limit (may be empty) |
 | `DISPATCH_CREDENTIALS` | All credentials as JSON: `[{name, kind, inputs}]` |
 | `DISPATCH_CREDENTIALS_DIR` | One directory per credential (named after it), one file per input |
+| *generic credential inputs* | Each input of a `generic` credential, under its own name (e.g. `AKIPS_PASSWORD`) |
+
+Generic credential names that the job's tools depend on are reserved and
+refused when the credential is saved: `PATH`, `HOME`, `USER`, `SHELL`, `PWD`,
+`LANG`, `TMPDIR`, `HOSTNAME`, and names starting with `DISPATCH_`, `ANSIBLE_`,
+`LD_`, `LC_`, `PYTHON`, `GIT_`, `SSH_` or `KUBERNETES_`. If two generic
+credentials on a job set the same name, the later one wins and the job log
+says so. This lets tools that read their settings from the environment,
+such as Ansible inventory plugins (`AKIPS_HOST`, …), use a generic
+credential directly.
+
+### Inventory sources
+
+An inventory can be synced from a project instead of edited by hand, like
+AWX's "sourced from a project": a static inventory file or directory, an
+inventory script, or the YAML configuration of an inventory plugin. Set it
+on the inventory's page, or with `PUT /api/v1/inventories/{id}/source`
+(`projectId`, `sourcePath`, `executionEnvironmentId`, optional
+`credentialIds`, `timeoutSeconds`, `verbosity`).
+
+A sync (`POST /api/v1/inventories/{id}/sync`, *Sync now*, a schedule, or
+relaunching an earlier sync) is an `inventory_sync` job. It checks the
+project out, installs its requirements files as for Ansible jobs, and runs
+
+```
+ansible-inventory -i <sourcePath> --list --export
+```
+
+in the checkout, with `ANSIBLE_INVENTORY_UNPARSED_FAILED` and
+`ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED` set, so a source Ansible can't
+parse fails the job instead of emptying the inventory. The runner sends the
+result to the API, which replaces the inventory's hosts and groups in one
+transaction: hosts and groups keep their IDs when their names stay, those
+no longer reported are deleted, and group variables stay on their groups.
+The `all` group's variables are ignored; the inventory's own variables are
+yours to edit. Host names with whitespace are skipped with a warning in the
+job log. At most one sync of an inventory runs at a time.
+
+While an inventory has a source, its hosts and groups can't be changed by
+hand (409). Removing the source keeps them, editable again.
+
+Credentials a sync can use: `generic` (each input becomes an environment
+variable, which is how inventory plugins usually take their settings),
+`vault` (for vaulted variable files) and `api_token` (in
+`DISPATCH_CREDENTIALS`, for scripts). For example, an inventory synced with
+the `haught.akips.akips_inventory` plugin:
+
+1. A generic credential with `AKIPS_HOST`, `AKIPS_USERNAME` and
+   `AKIPS_PASSWORD`.
+2. A project for the repository holding `inventory_akips.yml` and a
+   `collections/requirements.yml` listing `haught.akips`.
+3. The inventory's source: that project, `inventory_akips.yml`, the
+   `ee-ansible` execution environment, and the credential.
+
+Inventory syncs need runner protocol 3 or later.
 
 ## Execution environments
 
@@ -483,13 +549,15 @@ ENTRYPOINT ["/usr/local/bin/dispatch-runner"]
 
 The runner reports its protocol version; the API rejects runners it doesn't
 support with an explanation on the job. Ansible and script jobs need
-protocol 2 or later, so images built with an older runner keep running
-container jobs but must be rebuilt for the new job types.
+protocol 2 or later, and inventory syncs protocol 3, so images built with
+an older runner keep running the job types they know but must be rebuilt
+for the newer ones.
 
 The starter EEs are `ee-shell` (bash, curl, jq, git, ssh), `ee-python`
 (Python in a virtualenv on `PATH`, with requests and PyYAML) and `ee-ansible`
 (ansible-core with `ansible.posix`, `community.general` and `ansible.utils`,
-plus git, ssh and sshpass).
+the requests and netaddr libraries inventory plugins often need, plus git,
+ssh and sshpass).
 
 ## Configuration
 

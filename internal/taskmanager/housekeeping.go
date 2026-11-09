@@ -23,7 +23,7 @@ const scheduleBatch = 100
 func (m *Manager) runSchedules(ctx context.Context) error {
 	runs, err := m.Store.RunDueSchedules(ctx, scheduleBatch)
 	for _, r := range runs {
-		log := m.Log.With("schedule_id", r.Schedule.ID, "schedule", r.Schedule.Name, "job_template_id", r.Schedule.TemplateID)
+		log := m.Log.With("schedule_id", r.Schedule.ID, "schedule", r.Schedule.Name, "job_template_id", r.Schedule.TemplateID, "inventory_id", r.Schedule.InventoryID)
 		if r.Err != nil {
 			log.Warn("schedule could not launch its job", "err", r.Err)
 			continue

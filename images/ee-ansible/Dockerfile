@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 #
-# Starter execution environment for Ansible jobs: ansible-core and a few
-# common collections, plus git, an SSH client and sshpass (for
+# Starter execution environment for Ansible jobs and inventory syncs:
+# ansible-core, the requests and netaddr libraries inventory plugins often
+# need, and a few common collections, plus git, an SSH client and sshpass (for
 # username/password machine credentials), on top of the runner base image.
 #
 # Add your own collections and Python packages with
@@ -19,7 +20,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 ARG ANSIBLE_CORE_VERSION=2.22.0
 RUN python3 -m venv /opt/ansible \
-    && /opt/ansible/bin/pip install --no-cache-dir "ansible-core==${ANSIBLE_CORE_VERSION}" \
+    && /opt/ansible/bin/pip install --no-cache-dir "ansible-core==${ANSIBLE_CORE_VERSION}" requests netaddr \
     && /opt/ansible/bin/ansible-galaxy collection install -p /usr/share/ansible/collections \
         ansible.posix community.general ansible.utils
 ENV PATH=/opt/ansible/bin:$PATH

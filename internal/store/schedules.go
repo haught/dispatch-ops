@@ -15,31 +15,36 @@ import (
 	"dispatch-ops/internal/rbac"
 )
 
-// Schedule is a row in schedules.
+// Schedule is a row in schedules. It launches either a job template
+// (TemplateID) or a sync of an inventory (InventoryID).
 type Schedule struct {
-	ID           uuid.UUID
-	Name         string
-	Description  string
-	TemplateID   uuid.UUID
-	TemplateName string
-	Cron         string
-	Timezone     string
-	Enabled      bool
-	Overrides    LaunchOverrides
-	NextRunAt    *time.Time
-	LastRunAt    *time.Time
-	LastJobID    *uuid.UUID
-	LastError    string
-	CreatedBy    *UserRef
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID            uuid.UUID
+	Name          string
+	Description   string
+	TemplateID    *uuid.UUID
+	TemplateName  string
+	InventoryID   *uuid.UUID
+	InventoryName string
+	Cron          string
+	Timezone      string
+	Enabled       bool
+	Overrides     LaunchOverrides
+	NextRunAt     *time.Time
+	LastRunAt     *time.Time
+	LastJobID     *uuid.UUID
+	LastError     string
+	CreatedBy     *UserRef
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
-const scheduleColumns = `s.id, s.name, s.description, s.job_template_id, t.name, s.cron, s.timezone, s.enabled,
+const scheduleColumns = `s.id, s.name, s.description, s.job_template_id, coalesce(t.name, ''),
+	s.inventory_id, coalesce(inv.name, ''), s.cron, s.timezone, s.enabled,
 	s.overrides, s.next_run_at, s.last_run_at, s.last_job_id, s.last_error, s.created_by, u.username,
 	s.created_at, s.updated_at`
 
-const scheduleFrom = `schedules s JOIN job_templates t ON t.id = s.job_template_id LEFT JOIN users u ON u.id = s.created_by`
+const scheduleFrom = `schedules s LEFT JOIN job_templates t ON t.id = s.job_template_id
+	LEFT JOIN inventories inv ON inv.id = s.inventory_id LEFT JOIN users u ON u.id = s.created_by`
 
 type scheduleRow struct {
 	Schedule
@@ -49,7 +54,8 @@ type scheduleRow struct {
 
 func scanSchedule(row pgx.CollectableRow) (Schedule, error) {
 	var r scheduleRow
-	err := row.Scan(&r.ID, &r.Name, &r.Description, &r.TemplateID, &r.TemplateName, &r.Cron, &r.Timezone, &r.Enabled,
+	err := row.Scan(&r.ID, &r.Name, &r.Description, &r.TemplateID, &r.TemplateName,
+		&r.InventoryID, &r.InventoryName, &r.Cron, &r.Timezone, &r.Enabled,
 		&r.Overrides, &r.NextRunAt, &r.LastRunAt, &r.LastJobID, &r.LastError, &r.createdByID, &r.createdByName,
 		&r.CreatedAt, &r.UpdatedAt)
 	if r.createdByID != nil && r.createdByName != nil {
@@ -72,24 +78,35 @@ type ScheduleFields struct {
 
 // ScheduleFilter narrows ListSchedules.
 type ScheduleFilter struct {
-	Search     string
-	TemplateID *uuid.UUID
-	// ReadableBy, if set, limits the list to schedules of templates that
-	// user may read.
+	Search      string
+	TemplateID  *uuid.UUID
+	InventoryID *uuid.UUID
+	// ReadableBy, if set, limits the list to schedules of templates and
+	// inventories that user may read.
 	ReadableBy *uuid.UUID
 }
 
-// ListSchedules returns schedules, by template name and then name.
+// ListSchedules returns schedules, by template or inventory name and then name.
 func (s *Store) ListSchedules(ctx context.Context, f ScheduleFilter, page Page) ([]Schedule, int, error) {
 	q := listQuery{
 		columns: scheduleColumns, from: scheduleFrom,
-		where: `s.name ILIKE $1`, args: []any{likePattern(f.Search)}, orderBy: `t.name, s.name, s.id`,
+		where: `s.name ILIKE $1`, args: []any{likePattern(f.Search)}, orderBy: `coalesce(t.name, inv.name), s.name, s.id`,
 	}
 	if f.TemplateID != nil {
 		q.args = append(q.args, *f.TemplateID)
 		q.and(`s.job_template_id = $` + strconv.Itoa(len(q.args)))
 	}
-	q.readableBy(f.ReadableBy, rbac.JobTemplate, "s.job_template_id")
+	if f.InventoryID != nil {
+		q.args = append(q.args, *f.InventoryID)
+		q.and(`s.inventory_id = $` + strconv.Itoa(len(q.args)))
+	}
+	if f.ReadableBy != nil {
+		q.args = append(q.args, *f.ReadableBy)
+		n := strconv.Itoa(len(q.args))
+		q.and(`EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = $` + n + ` AND (
+			(r.resource_type = '` + string(rbac.JobTemplate) + `' AND (r.resource_id IS NULL OR r.resource_id = s.job_template_id))
+			OR (r.resource_type = '` + string(rbac.Inventory) + `' AND (r.resource_id IS NULL OR r.resource_id = s.inventory_id))))`)
+	}
 	return list(ctx, s.pool, q, page, scanSchedule)
 }
 
@@ -111,14 +128,21 @@ func getSchedule(ctx context.Context, db querier, id uuid.UUID, forUpdate bool) 
 	return sc, mapErr(err)
 }
 
-// CreateSchedule adds a schedule to a job template. It returns ErrConflict
-// if the template already has a schedule with the name.
-func (s *Store) CreateSchedule(ctx context.Context, templateID uuid.UUID, createdBy *uuid.UUID, f ScheduleFields) (Schedule, error) {
+// ScheduleTarget is what a schedule launches: a job template or an
+// inventory's sync. Exactly one is set.
+type ScheduleTarget struct {
+	TemplateID  *uuid.UUID
+	InventoryID *uuid.UUID
+}
+
+// CreateSchedule adds a schedule to a job template or inventory. It
+// returns ErrConflict if the target already has a schedule with the name.
+func (s *Store) CreateSchedule(ctx context.Context, target ScheduleTarget, createdBy *uuid.UUID, f ScheduleFields) (Schedule, error) {
 	var id uuid.UUID
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO schedules (name, description, job_template_id, cron, timezone, enabled, overrides, next_run_at, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-		f.Name, f.Description, templateID, f.Cron, f.Timezone, f.Enabled, f.Overrides, f.NextRunAt, createdBy).Scan(&id)
+		INSERT INTO schedules (name, description, job_template_id, inventory_id, cron, timezone, enabled, overrides, next_run_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+		f.Name, f.Description, target.TemplateID, target.InventoryID, f.Cron, f.Timezone, f.Enabled, f.Overrides, f.NextRunAt, createdBy).Scan(&id)
 	if err != nil {
 		return Schedule{}, mapErr(err)
 	}
@@ -261,11 +285,29 @@ func runSchedule(ctx context.Context, tx pgx.Tx, id uuid.UUID) (ScheduleRun, err
 
 func isLaunchProblem(err error) bool {
 	var le *LaunchError
-	return errors.As(err, &le) || errors.Is(err, ErrNotFound)
+	return errors.As(err, &le) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrSyncActive)
 }
 
 func launchScheduled(ctx context.Context, tx pgx.Tx, sc Schedule) (*uuid.UUID, error) {
-	t, err := getJobTemplate(ctx, tx, sc.TemplateID, false)
+	if sc.InventoryID != nil {
+		jobID, err := launchSync(ctx, tx, *sc.InventoryID, NewSync{LaunchType: "schedule", ScheduleID: &sc.ID})
+		if err != nil {
+			return nil, err
+		}
+		after := map[string]any{"syncInventoryId": *sc.InventoryID, "launchType": "schedule", "scheduleId": sc.ID}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO audit_log (actor_name, auth_method, action, resource_type, resource_id, resource_name, after)
+			VALUES ($1, 'schedule', 'launch', 'job', $2, $3, $4)`,
+			"schedule "+sc.Name, jobID, "Sync "+sc.InventoryName, after)
+		if err != nil {
+			return nil, err
+		}
+		return &jobID, nil
+	}
+	if sc.TemplateID == nil {
+		return nil, &LaunchError{"the schedule has nothing to launch"}
+	}
+	t, err := getJobTemplate(ctx, tx, *sc.TemplateID, false)
 	if err != nil {
 		return nil, err
 	}

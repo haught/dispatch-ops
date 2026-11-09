@@ -979,6 +979,104 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/inventories/{inventoryId}/source:
+    parameters:
+      - $ref: "#/components/parameters/InventoryId"
+    get:
+      operationId: getInventorySource
+      tags: [inventories]
+      summary: Get the source an inventory is synced from
+      responses:
+        "200":
+          description: The inventory's source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventorySource"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: setInventorySource
+      tags: [inventories]
+      summary: Sync an inventory from an inventory file in a project
+      description: |
+        Gives the inventory a source, or replaces its source. A sync runs
+        `ansible-inventory --list --export` on the file, in the execution
+        environment, and replaces the inventory's hosts and groups with the
+        result. While an inventory has a source, its hosts and groups can't
+        be edited by hand; its own variables can. The job gets the
+        credentials like any job: generic credentials' inputs as
+        environment variables, which inventory plugins commonly read. Needs
+        the admin role on the inventory and the use role on the project and
+        each credential.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventorySourceSet"
+      responses:
+        "200":
+          description: The inventory's source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventorySource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteInventorySource
+      tags: [inventories]
+      summary: Stop syncing an inventory
+      description: The hosts and groups the last sync brought in stay, and can be edited again.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/inventories/{inventoryId}/sync:
+    parameters:
+      - $ref: "#/components/parameters/InventoryId"
+    post:
+      operationId: syncInventory
+      tags: [inventories]
+      summary: Sync an inventory from its source now
+      description: Queues an `inventory_sync` job. Needs the admin role on the inventory.
+      responses:
+        "201":
+          description: The sync job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A sync of the inventory is already pending or running
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
   /api/v1/inventories/{inventoryId}/hosts:
     parameters:
       - $ref: "#/components/parameters/InventoryId"
@@ -1770,6 +1868,12 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: syncInventoryId
+          in: query
+          description: Only the sync jobs of this inventory
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
           description: A page of jobs
@@ -2003,12 +2107,17 @@ paths:
       operationId: listSchedules
       tags: [schedules]
       summary: List schedules
-      description: Sorted by template name, then schedule name.
+      description: Sorted by template or inventory name, then schedule name.
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Search"
         - name: jobTemplateId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: inventoryId
           in: query
           schema:
             type: string
@@ -2373,6 +2482,41 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RunnerJobState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /runner/v1/jobs/{jobId}/inventory:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      operationId: postRunnerInventory
+      tags: [runner]
+      summary: Report the inventory an inventory_sync job found
+      description: |
+        The body is the output of `ansible-inventory --list --export`. It
+        replaces the hosts and groups of the inventory the job syncs. Send
+        it before finishing the job. Bodies may be up to 32 MiB.
+      security:
+        - jobToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryExport"
+      responses:
+        "200":
+          description: The inventory was replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunnerInventoryResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -3068,7 +3212,7 @@ components:
 
     Inventory:
       type: object
-      required: [id, name, description, variables, hostCount, groupCount, createdAt, updatedAt]
+      required: [id, name, description, variables, hostCount, groupCount, source, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -3083,12 +3227,134 @@ components:
           type: integer
         groupCount:
           type: integer
+        source:
+          allOf:
+            - $ref: "#/components/schemas/InventorySourceSummary"
+          nullable: true
+          description: Where the inventory is synced from; `null` if its hosts and groups are edited by hand
         createdAt:
           type: string
           format: date-time
         updatedAt:
           type: string
           format: date-time
+
+    InventorySourceSummary:
+      type: object
+      required: [projectId, projectName, sourcePath, lastSyncedAt, lastJobId]
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        projectName:
+          type: string
+        sourcePath:
+          type: string
+        lastSyncedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastJobId:
+          type: string
+          format: uuid
+          nullable: true
+
+    InventorySource:
+      type: object
+      required:
+        - inventoryId
+        - projectId
+        - projectName
+        - sourcePath
+        - executionEnvironmentId
+        - executionEnvironmentName
+        - credentialIds
+        - timeoutSeconds
+        - verbosity
+        - lastJobId
+        - lastJobStatus
+        - lastSyncedAt
+        - createdAt
+        - updatedAt
+      properties:
+        inventoryId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        projectName:
+          type: string
+        sourcePath:
+          type: string
+          description: The inventory file or directory, relative to the project
+        executionEnvironmentId:
+          type: string
+          format: uuid
+        executionEnvironmentName:
+          type: string
+        credentialIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        timeoutSeconds:
+          type: integer
+        verbosity:
+          type: integer
+        lastJobId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The last sync job, if it still exists
+        lastJobStatus:
+          allOf:
+            - $ref: "#/components/schemas/JobStatus"
+          nullable: true
+        lastSyncedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When a sync last replaced the inventory's hosts and groups
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    InventorySourceSet:
+      type: object
+      required: [projectId, sourcePath, executionEnvironmentId]
+      additionalProperties: false
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        sourcePath:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: The inventory file or directory, relative to the project (e.g. `inventory_akips.yml`)
+        executionEnvironmentId:
+          type: string
+          format: uuid
+        credentialIds:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            format: uuid
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+          default: 600
+        verbosity:
+          type: integer
+          minimum: 0
+          maximum: 5
+          default: 0
 
     InventoryCreate:
       type: object
@@ -3617,11 +3883,12 @@ components:
 
     JobType:
       type: string
-      enum: [ansible, script, container]
+      enum: [ansible, script, container, inventory_sync]
       description: |
         `ansible` runs a playbook from a project with `ansible-playbook`.
         `script` runs a script from a project. `container` runs a command in
-        the execution environment, without a project.
+        the execution environment, without a project. `inventory_sync` syncs
+        an inventory from its source; job templates can't have it.
 
     Command:
       type: array
@@ -4017,6 +4284,7 @@ components:
         - launchedBy
         - schedule
         - relaunchOf
+        - syncInventoryId
         - config
         - cancelRequested
         - exitCode
@@ -4056,6 +4324,11 @@ components:
           format: uuid
           nullable: true
           description: The job this one reran, if it still exists
+        syncInventoryId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The inventory an `inventory_sync` job syncs, if it still exists
         config:
           $ref: "#/components/schemas/JobConfig"
         cancelRequested:
@@ -4218,6 +4491,8 @@ components:
         - description
         - jobTemplateId
         - jobTemplateName
+        - inventoryId
+        - inventoryName
         - cron
         - timezone
         - enabled
@@ -4240,7 +4515,16 @@ components:
         jobTemplateId:
           type: string
           format: uuid
+          nullable: true
+          description: The job template it launches, or `null` if it syncs an inventory
         jobTemplateName:
+          type: string
+        inventoryId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The inventory it syncs, or `null` if it launches a job template
+        inventoryName:
           type: string
         cron:
           $ref: "#/components/schemas/CronExpression"
@@ -4280,8 +4564,9 @@ components:
 
     ScheduleCreate:
       type: object
-      required: [name, jobTemplateId, cron]
+      required: [name, cron]
       additionalProperties: false
+      description: Give either `jobTemplateId` or `inventoryId`.
       properties:
         name:
           $ref: "#/components/schemas/Name"
@@ -4290,6 +4575,11 @@ components:
         jobTemplateId:
           type: string
           format: uuid
+          description: Launch this job template
+        inventoryId:
+          type: string
+          format: uuid
+          description: Sync this inventory from its source (no overrides)
         cron:
           $ref: "#/components/schemas/CronExpression"
         timezone:
@@ -4690,6 +4980,28 @@ components:
         cancelRequested:
           type: boolean
           description: Stop the job and finish it as `canceled`
+
+    RunnerInventoryResult:
+      type: object
+      required: [hostsAdded, hostsUpdated, hostsRemoved, groupsAdded, groupsUpdated, groupsRemoved, warnings]
+      properties:
+        hostsAdded:
+          type: integer
+        hostsUpdated:
+          type: integer
+        hostsRemoved:
+          type: integer
+        groupsAdded:
+          type: integer
+        groupsUpdated:
+          type: integer
+        groupsRemoved:
+          type: integer
+        warnings:
+          type: array
+          description: Parts of the inventory that were left out, and why
+          items:
+            type: string
 
     RunnerFinish:
       type: object

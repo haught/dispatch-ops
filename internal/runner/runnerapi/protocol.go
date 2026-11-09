@@ -5,4 +5,5 @@ package runnerapi
 // api.MinRunnerProtocol and api.MaxRunnerProtocol).
 //
 // 2: projects, and the ansible and script job types.
-const ProtocolVersion = 2
+// 3: the inventory_sync job type and its inventory report.
+const ProtocolVersion = 3

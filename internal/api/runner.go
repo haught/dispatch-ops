@@ -18,13 +18,14 @@ import (
 // old execution environment images is dropped.
 //
 // Protocol 2 added projects and the ansible and script job types.
+// Protocol 3 added the inventory_sync job type and its inventory report.
 const (
 	MinRunnerProtocol = 1
-	MaxRunnerProtocol = 2
+	MaxRunnerProtocol = 3
 )
 
 // minProtocolFor is the oldest runner protocol that can run each job type.
-var minProtocolFor = map[string]int{"container": 1, "ansible": 2, "script": 2}
+var minProtocolFor = map[string]int{"container": 1, "ansible": 2, "script": 2, "inventory_sync": 3}
 
 // runnerJob checks that the job token authenticates the job in the path.
 func runnerJob(ctx context.Context, pathJobID uuid.UUID) error {

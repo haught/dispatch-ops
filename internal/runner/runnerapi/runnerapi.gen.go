@@ -53,9 +53,10 @@ func (e CredentialKind) Valid() bool {
 
 // Defines values for JobType.
 const (
-	Ansible   JobType = "ansible"
-	Container JobType = "container"
-	Script    JobType = "script"
+	Ansible       JobType = "ansible"
+	Container     JobType = "container"
+	InventorySync JobType = "inventory_sync"
+	Script        JobType = "script"
 )
 
 // Valid indicates whether the value is a known member of the JobType enum.
@@ -64,6 +65,8 @@ func (e JobType) Valid() bool {
 	case Ansible:
 		return true
 	case Container:
+		return true
+	case InventorySync:
 		return true
 	case Script:
 		return true
@@ -105,7 +108,8 @@ type InventoryExport map[string]interface{}
 
 // JobType `ansible` runs a playbook from a project with `ansible-playbook`.
 // `script` runs a script from a project. `container` runs a command in
-// the execution environment, without a project.
+// the execution environment, without a project. `inventory_sync` syncs
+// an inventory from its source; job templates can't have it.
 type JobType string
 
 // Problem RFC 9457 problem details
@@ -156,6 +160,19 @@ type RunnerFinish struct {
 // RunnerFinishStatus defines model for RunnerFinish.Status.
 type RunnerFinishStatus string
 
+// RunnerInventoryResult defines model for RunnerInventoryResult.
+type RunnerInventoryResult struct {
+	GroupsAdded   int `json:"groupsAdded"`
+	GroupsRemoved int `json:"groupsRemoved"`
+	GroupsUpdated int `json:"groupsUpdated"`
+	HostsAdded    int `json:"hostsAdded"`
+	HostsRemoved  int `json:"hostsRemoved"`
+	HostsUpdated  int `json:"hostsUpdated"`
+
+	// Warnings Parts of the inventory that were left out, and why
+	Warnings []string `json:"warnings"`
+}
+
 // RunnerJobSpec defines model for RunnerJobSpec.
 type RunnerJobSpec struct {
 	Arguments   []string           `json:"arguments"`
@@ -170,7 +187,8 @@ type RunnerJobSpec struct {
 
 	// JobType `ansible` runs a playbook from a project with `ansible-playbook`.
 	// `script` runs a script from a project. `container` runs a command in
-	// the execution environment, without a project.
+	// the execution environment, without a project. `inventory_sync` syncs
+	// an inventory from its source; job templates can't have it.
 	JobType        JobType        `json:"jobType"`
 	Limit          string         `json:"limit"`
 	Project        *RunnerProject `json:"project"`
@@ -258,6 +276,9 @@ type PostRunnerJobEventsJSONRequestBody = RunnerEventBatch
 
 // FinishRunnerJobJSONRequestBody defines body for FinishRunnerJob for application/json ContentType.
 type FinishRunnerJobJSONRequestBody = RunnerFinish
+
+// PostRunnerInventoryJSONRequestBody defines body for PostRunnerInventory for application/json ContentType.
+type PostRunnerInventoryJSONRequestBody = InventoryExport
 
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -378,6 +399,28 @@ type ClientInterface interface {
 	// Corresponds with POST /runner/v1/jobs/{jobId}/heartbeat (the `RunnerHeartbeat` operationId).
 	RunnerHeartbeat(ctx context.Context, jobId JobId, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostRunnerInventoryWithBody Report the inventory an inventory_sync job found
+	//
+	// The body is the output of `ansible-inventory --list --export`. It
+	// replaces the hosts and groups of the inventory the job syncs. Send
+	// it before finishing the job. Bodies may be up to 32 MiB.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /runner/v1/jobs/{jobId}/inventory (the `PostRunnerInventory` operationId).
+	PostRunnerInventoryWithBody(ctx context.Context, jobId JobId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostRunnerInventory Report the inventory an inventory_sync job found
+	//
+	// The body is the output of `ansible-inventory --list --export`. It
+	// replaces the hosts and groups of the inventory the job syncs. Send
+	// it before finishing the job. Bodies may be up to 32 MiB.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /runner/v1/jobs/{jobId}/inventory (the `PostRunnerInventory` operationId).
+	PostRunnerInventory(ctx context.Context, jobId JobId, body PostRunnerInventoryJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetRunnerJobSpec Fetch the job to run, including decrypted credentials
 	//
 	// Can be called once per job. It moves the job to `running`. A runner
@@ -473,6 +516,48 @@ func (c *Client) FinishRunnerJob(ctx context.Context, jobId JobId, body FinishRu
 // Corresponds with POST /runner/v1/jobs/{jobId}/heartbeat (the `RunnerHeartbeat` operationId).
 func (c *Client) RunnerHeartbeat(ctx context.Context, jobId JobId, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRunnerHeartbeatRequest(c.Server, jobId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PostRunnerInventoryWithBody Report the inventory an inventory_sync job found
+//
+// The body is the output of `ansible-inventory --list --export`. It
+// replaces the hosts and groups of the inventory the job syncs. Send
+// it before finishing the job. Bodies may be up to 32 MiB.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /runner/v1/jobs/{jobId}/inventory (the `PostRunnerInventory` operationId).
+func (c *Client) PostRunnerInventoryWithBody(ctx context.Context, jobId JobId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostRunnerInventoryRequestWithBody(c.Server, jobId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PostRunnerInventory Report the inventory an inventory_sync job found
+//
+// The body is the output of `ansible-inventory --list --export`. It
+// replaces the hosts and groups of the inventory the job syncs. Send
+// it before finishing the job. Bodies may be up to 32 MiB.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /runner/v1/jobs/{jobId}/inventory (the `PostRunnerInventory` operationId).
+func (c *Client) PostRunnerInventory(ctx context.Context, jobId JobId, body PostRunnerInventoryJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostRunnerInventoryRequest(c.Server, jobId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -626,6 +711,53 @@ func NewRunnerHeartbeatRequest(server string, jobId JobId) (*http.Request, error
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewPostRunnerInventoryRequest calls the generic PostRunnerInventory builder with application/json body
+func NewPostRunnerInventoryRequest(server string, jobId JobId, body PostRunnerInventoryJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostRunnerInventoryRequestWithBody(server, jobId, "application/json", bodyReader)
+}
+
+// NewPostRunnerInventoryRequestWithBody constructs an http.Request for the PostRunnerInventory method, with any body, and a specified content type
+func NewPostRunnerInventoryRequestWithBody(server string, jobId JobId, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "jobId", jobId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/runner/v1/jobs/%s/inventory", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -785,6 +917,28 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /runner/v1/jobs/{jobId}/heartbeat (the `RunnerHeartbeat` operationId).
 	RunnerHeartbeatWithResponse(ctx context.Context, jobId JobId, reqEditors ...RequestEditorFn) (*RunnerHeartbeatResponse, error)
+
+	// PostRunnerInventoryWithBodyWithResponse Report the inventory an inventory_sync job found
+	//
+	// The body is the output of `ansible-inventory --list --export`. It
+	// replaces the hosts and groups of the inventory the job syncs. Send
+	// it before finishing the job. Bodies may be up to 32 MiB.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /runner/v1/jobs/{jobId}/inventory (the `PostRunnerInventory` operationId).
+	PostRunnerInventoryWithBodyWithResponse(ctx context.Context, jobId JobId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostRunnerInventoryResponse, error)
+
+	// PostRunnerInventoryWithResponse Report the inventory an inventory_sync job found
+	//
+	// The body is the output of `ansible-inventory --list --export`. It
+	// replaces the hosts and groups of the inventory the job syncs. Send
+	// it before finishing the job. Bodies may be up to 32 MiB.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /runner/v1/jobs/{jobId}/inventory (the `PostRunnerInventory` operationId).
+	PostRunnerInventoryWithResponse(ctx context.Context, jobId JobId, body PostRunnerInventoryJSONRequestBody, reqEditors ...RequestEditorFn) (*PostRunnerInventoryResponse, error)
 
 	// GetRunnerJobSpecWithResponse Fetch the job to run, including decrypted credentials
 	//
@@ -991,6 +1145,75 @@ func (r RunnerHeartbeatResponse) ContentType() string {
 	return ""
 }
 
+type PostRunnerInventoryResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *RunnerInventoryResult
+	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
+	ApplicationproblemJSON400 *BadRequest
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *Unauthorized
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *Forbidden
+	// ApplicationproblemJSON409 the response for an HTTP 409 `application/problem+json` response
+	ApplicationproblemJSON409 *Conflict
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r PostRunnerInventoryResponse) GetJSON200() *RunnerInventoryResult {
+	return r.JSON200
+}
+
+// GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
+func (r PostRunnerInventoryResponse) GetApplicationproblemJSON400() *BadRequest {
+	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r PostRunnerInventoryResponse) GetApplicationproblemJSON401() *Unauthorized {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r PostRunnerInventoryResponse) GetApplicationproblemJSON403() *Forbidden {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON409 returns the response for an HTTP 409 `application/problem+json` response
+func (r PostRunnerInventoryResponse) GetApplicationproblemJSON409() *Conflict {
+	return r.ApplicationproblemJSON409
+}
+
+// GetBody returns the raw response body bytes
+func (r PostRunnerInventoryResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r PostRunnerInventoryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostRunnerInventoryResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PostRunnerInventoryResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetRunnerJobSpecResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -1137,6 +1360,40 @@ func (c *ClientWithResponses) RunnerHeartbeatWithResponse(ctx context.Context, j
 	return ParseRunnerHeartbeatResponse(rsp)
 }
 
+// PostRunnerInventoryWithBodyWithResponse Report the inventory an inventory_sync job found
+//
+// The body is the output of `ansible-inventory --list --export`. It
+// replaces the hosts and groups of the inventory the job syncs. Send
+// it before finishing the job. Bodies may be up to 32 MiB.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /runner/v1/jobs/{jobId}/inventory (the `PostRunnerInventory` operationId).
+func (c *ClientWithResponses) PostRunnerInventoryWithBodyWithResponse(ctx context.Context, jobId JobId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostRunnerInventoryResponse, error) {
+	rsp, err := c.PostRunnerInventoryWithBody(ctx, jobId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostRunnerInventoryResponse(rsp)
+}
+
+// PostRunnerInventoryWithResponse Report the inventory an inventory_sync job found
+//
+// The body is the output of `ansible-inventory --list --export`. It
+// replaces the hosts and groups of the inventory the job syncs. Send
+// it before finishing the job. Bodies may be up to 32 MiB.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /runner/v1/jobs/{jobId}/inventory (the `PostRunnerInventory` operationId).
+func (c *ClientWithResponses) PostRunnerInventoryWithResponse(ctx context.Context, jobId JobId, body PostRunnerInventoryJSONRequestBody, reqEditors ...RequestEditorFn) (*PostRunnerInventoryResponse, error) {
+	rsp, err := c.PostRunnerInventory(ctx, jobId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostRunnerInventoryResponse(rsp)
+}
+
 // GetRunnerJobSpecWithResponse Fetch the job to run, including decrypted credentials
 //
 // Can be called once per job. It moves the job to `running`. A runner
@@ -1278,6 +1535,60 @@ func ParseRunnerHeartbeatResponse(rsp *http.Response) (*RunnerHeartbeatResponse,
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Forbidden
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest Conflict
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostRunnerInventoryResponse parses an HTTP response from a PostRunnerInventoryWithResponse call
+func ParsePostRunnerInventoryResponse(rsp *http.Response) (*PostRunnerInventoryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostRunnerInventoryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerInventoryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest Unauthorized

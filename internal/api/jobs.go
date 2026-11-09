@@ -22,7 +22,8 @@ import (
 func (h *Handlers) ListJobs(ctx context.Context, req apigen.ListJobsRequestObject) (apigen.ListJobsResponseObject, error) {
 	p := req.Params
 	items, total, err := h.Store.ListJobs(ctx,
-		store.JobFilter{Status: string(deref(p.Status)), TemplateID: p.JobTemplateId, ScheduleID: p.ScheduleId, ReadableBy: readableBy(ctx)},
+		store.JobFilter{Status: string(deref(p.Status)), TemplateID: p.JobTemplateId, ScheduleID: p.ScheduleId,
+			SyncInventoryID: p.SyncInventoryId, ReadableBy: readableBy(ctx)},
 		pageOf(p.Limit, p.Offset))
 	if err != nil {
 		return nil, err
@@ -250,6 +251,9 @@ func (h *Handlers) RelaunchJob(ctx context.Context, req apigen.RelaunchJobReques
 		return nil, err
 	}
 	p := caller(ctx)
+	if j.Config.JobType == store.JobTypeInventorySync {
+		return h.relaunchSync(ctx, j, req.Body)
+	}
 	if err := h.authorizeRelaunch(ctx, j); err != nil {
 		return nil, err
 	}
@@ -278,6 +282,26 @@ func (h *Handlers) RelaunchJob(ctx context.Context, req apigen.RelaunchJobReques
 		Action: apigen.Launch, ResourceType: apigen.AuditResourceTypeJob, ResourceID: job.ID, ResourceName: job.Name,
 		After: map[string]any{"jobTemplateId": j.TemplateID, "launchType": "relaunch", "relaunchOf": j.ID, "hosts": hosts},
 	})
+	return apigen.RelaunchJob201JSONResponse(toAPIJob(job)), nil
+}
+
+// relaunchSync syncs the inventory a sync job synced again, from its
+// source as it is now. That needs the admin role on the inventory.
+func (h *Handlers) relaunchSync(ctx context.Context, j store.Job, body *apigen.RelaunchJobJSONRequestBody) (apigen.RelaunchJobResponseObject, error) {
+	if body != nil && body.Hosts != nil && *body.Hosts == apigen.RelaunchRequestHostsFailed {
+		return nil, badRequest("only Ansible jobs can be relaunched on their failed hosts")
+	}
+	if j.SyncInventoryID == nil {
+		return nil, badRequest("the inventory this job synced no longer exists")
+	}
+	if err := h.authorize(ctx, rbac.Inventory, *j.SyncInventoryID, rbac.Admin); err != nil {
+		return nil, forbidden("Syncing an inventory again needs the admin role on it")
+	}
+	p := caller(ctx)
+	job, err := h.launchSync(ctx, *j.SyncInventoryID, store.NewSync{LaunchType: "relaunch", LaunchedBy: &p.UserID, RelaunchOf: &j.ID})
+	if err != nil {
+		return nil, err
+	}
 	return apigen.RelaunchJob201JSONResponse(toAPIJob(job)), nil
 }
 

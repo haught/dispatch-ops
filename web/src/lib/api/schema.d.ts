@@ -516,6 +516,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/inventories/{inventoryId}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        /** Get the source an inventory is synced from */
+        get: operations["getInventorySource"];
+        /**
+         * Sync an inventory from an inventory file in a project
+         * @description Gives the inventory a source, or replaces its source. A sync runs
+         *     `ansible-inventory --list --export` on the file, in the execution
+         *     environment, and replaces the inventory's hosts and groups with the
+         *     result. While an inventory has a source, its hosts and groups can't
+         *     be edited by hand; its own variables can. The job gets the
+         *     credentials like any job: generic credentials' inputs as
+         *     environment variables, which inventory plugins commonly read. Needs
+         *     the admin role on the inventory and the use role on the project and
+         *     each credential.
+         */
+        put: operations["setInventorySource"];
+        post?: never;
+        /**
+         * Stop syncing an inventory
+         * @description The hosts and groups the last sync brought in stay, and can be edited again.
+         */
+        delete: operations["deleteInventorySource"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inventories/{inventoryId}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sync an inventory from its source now
+         * @description Queues an `inventory_sync` job. Needs the admin role on the inventory.
+         */
+        post: operations["syncInventory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/inventories/{inventoryId}/hosts": {
         parameters: {
             query?: never;
@@ -1014,7 +1071,7 @@ export interface paths {
         };
         /**
          * List schedules
-         * @description Sorted by template name, then schedule name.
+         * @description Sorted by template or inventory name, then schedule name.
          */
         get: operations["listSchedules"];
         put?: never;
@@ -1198,6 +1255,30 @@ export interface paths {
          * @description The response says whether the job should be canceled.
          */
         post: operations["runnerHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/runner/v1/jobs/{jobId}/inventory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report the inventory an inventory_sync job found
+         * @description The body is the output of `ansible-inventory --list --export`. It
+         *     replaces the hosts and groups of the inventory the job syncs. Send
+         *     it before finishing the job. Bodies may be up to 32 MiB.
+         */
+        post: operations["postRunnerInventory"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1485,10 +1566,65 @@ export interface components {
             variables: components["schemas"]["Variables"];
             hostCount: number;
             groupCount: number;
+            /** @description Where the inventory is synced from; `null` if its hosts and groups are edited by hand */
+            source: components["schemas"]["InventorySourceSummary"] | null;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
             updatedAt: string;
+        };
+        InventorySourceSummary: {
+            /** Format: uuid */
+            projectId: string;
+            projectName: string;
+            sourcePath: string;
+            /** Format: date-time */
+            lastSyncedAt: string | null;
+            /** Format: uuid */
+            lastJobId: string | null;
+        };
+        InventorySource: {
+            /** Format: uuid */
+            inventoryId: string;
+            /** Format: uuid */
+            projectId: string;
+            projectName: string;
+            /** @description The inventory file or directory, relative to the project */
+            sourcePath: string;
+            /** Format: uuid */
+            executionEnvironmentId: string;
+            executionEnvironmentName: string;
+            credentialIds: string[];
+            timeoutSeconds: number;
+            verbosity: number;
+            /**
+             * Format: uuid
+             * @description The last sync job, if it still exists
+             */
+            lastJobId: string | null;
+            lastJobStatus: components["schemas"]["JobStatus"] | null;
+            /**
+             * Format: date-time
+             * @description When a sync last replaced the inventory's hosts and groups
+             */
+            lastSyncedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        InventorySourceSet: {
+            /** Format: uuid */
+            projectId: string;
+            /** @description The inventory file or directory, relative to the project (e.g. `inventory_akips.yml`) */
+            sourcePath: string;
+            /** Format: uuid */
+            executionEnvironmentId: string;
+            credentialIds?: string[];
+            /** @default 600 */
+            timeoutSeconds: number;
+            /** @default 0 */
+            verbosity: number;
         };
         InventoryCreate: {
             name: components["schemas"]["Name"];
@@ -1740,10 +1876,11 @@ export interface components {
         /**
          * @description `ansible` runs a playbook from a project with `ansible-playbook`.
          *     `script` runs a script from a project. `container` runs a command in
-         *     the execution environment, without a project.
+         *     the execution environment, without a project. `inventory_sync` syncs
+         *     an inventory from its source; job templates can't have it.
          * @enum {string}
          */
-        JobType: "ansible" | "script" | "container";
+        JobType: "ansible" | "script" | "container" | "inventory_sync";
         /** @description The program and its arguments. Not run through a shell. */
         Command: string[];
         /** @description Arguments passed to the script */
@@ -1929,6 +2066,11 @@ export interface components {
              * @description The job this one reran, if it still exists
              */
             relaunchOf: string | null;
+            /**
+             * Format: uuid
+             * @description The inventory an `inventory_sync` job syncs, if it still exists
+             */
+            syncInventoryId: string | null;
             config: components["schemas"]["JobConfig"];
             cancelRequested: boolean;
             exitCode: number | null;
@@ -2026,9 +2168,18 @@ export interface components {
             id: string;
             name: string;
             description: string;
-            /** Format: uuid */
-            jobTemplateId: string;
+            /**
+             * Format: uuid
+             * @description The job template it launches, or `null` if it syncs an inventory
+             */
+            jobTemplateId: string | null;
             jobTemplateName: string;
+            /**
+             * Format: uuid
+             * @description The inventory it syncs, or `null` if it launches a job template
+             */
+            inventoryId: string | null;
+            inventoryName: string;
             cron: components["schemas"]["CronExpression"];
             timezone: components["schemas"]["Timezone"];
             enabled: boolean;
@@ -2053,11 +2204,20 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        /** @description Give either `jobTemplateId` or `inventoryId`. */
         ScheduleCreate: {
             name: components["schemas"]["Name"];
             description?: components["schemas"]["Description"];
-            /** Format: uuid */
-            jobTemplateId: string;
+            /**
+             * Format: uuid
+             * @description Launch this job template
+             */
+            jobTemplateId?: string;
+            /**
+             * Format: uuid
+             * @description Sync this inventory from its source (no overrides)
+             */
+            inventoryId?: string;
             cron: components["schemas"]["CronExpression"];
             timezone?: components["schemas"]["Timezone"];
             /** @default true */
@@ -2253,6 +2413,16 @@ export interface components {
         RunnerJobState: {
             /** @description Stop the job and finish it as `canceled` */
             cancelRequested: boolean;
+        };
+        RunnerInventoryResult: {
+            hostsAdded: number;
+            hostsUpdated: number;
+            hostsRemoved: number;
+            groupsAdded: number;
+            groupsUpdated: number;
+            groupsRemoved: number;
+            /** @description Parts of the inventory that were left out, and why */
+            warnings: string[];
         };
         RunnerFinish: {
             /** @enum {string} */
@@ -3275,6 +3445,118 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
+    getInventorySource: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The inventory's source */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InventorySource"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    setInventorySource: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InventorySourceSet"];
+            };
+        };
+        responses: {
+            /** @description The inventory's source */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InventorySource"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteInventorySource: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    syncInventory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sync job */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description A sync of the inventory is already pending or running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     listHosts: {
         parameters: {
             query?: {
@@ -4224,6 +4506,8 @@ export interface operations {
                 status?: components["schemas"]["JobStatus"];
                 jobTemplateId?: string;
                 scheduleId?: string;
+                /** @description Only the sync jobs of this inventory */
+                syncInventoryId?: string;
             };
             header?: never;
             path?: never;
@@ -4454,6 +4738,7 @@ export interface operations {
                 /** @description Case-insensitive substring match on the name */
                 search?: components["parameters"]["Search"];
                 jobTemplateId?: string;
+                inventoryId?: string;
             };
             header?: never;
             path?: never;
@@ -4847,6 +5132,36 @@ export interface operations {
                     "application/json": components["schemas"]["RunnerJobState"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    postRunnerInventory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InventoryExport"];
+            };
+        };
+        responses: {
+            /** @description The inventory was replaced */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunnerInventoryResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];

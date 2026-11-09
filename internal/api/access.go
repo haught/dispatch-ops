@@ -131,7 +131,8 @@ func readableBy(ctx context.Context) *uuid.UUID {
 
 // authorizeJob checks that the caller may see a job (want is rbac.Read) or
 // cancel it (rbac.Execute): whoever launched it may do both, and roles on
-// its template apply.
+// its template apply. For an inventory sync, roles on the inventory apply:
+// read to see it, admin to cancel it.
 func (h *Handlers) authorizeJob(ctx context.Context, j store.Job, want rbac.Role) error {
 	p := caller(ctx)
 	if p.IsAdmin || (p.IsAuditor && want == rbac.Read) {
@@ -141,10 +142,23 @@ func (h *Handlers) authorizeJob(ctx context.Context, j store.Job, want rbac.Role
 		return nil
 	}
 	var held []rbac.Role
-	if j.TemplateID != nil {
+	switch {
+	case j.TemplateID != nil:
 		var err error
 		if held, err = h.Store.ResourceRoles(ctx, p.UserID, rbac.JobTemplate, j.TemplateID); err != nil {
 			return err
+		}
+	case j.SyncInventoryID != nil:
+		inv, err := h.Store.ResourceRoles(ctx, p.UserID, rbac.Inventory, j.SyncInventoryID)
+		if err != nil {
+			return err
+		}
+		// Admin on the inventory is what launches its syncs, so it is
+		// what cancels them; any role on it lets them be seen.
+		if rbac.Allows(inv, rbac.Admin) {
+			held = []rbac.Role{rbac.Execute}
+		} else if rbac.Allows(inv, rbac.Read) {
+			held = []rbac.Role{rbac.Read}
 		}
 	}
 	if rbac.Allows(held, want) {

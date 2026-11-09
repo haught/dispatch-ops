@@ -7,6 +7,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"dispatch-ops/internal/envname"
 )
 
 // Field is one input of a credential kind.
@@ -26,6 +28,8 @@ type Kind struct {
 	Name  string
 	Label string
 	// Freeform kinds accept any input names; all their values are secret.
+	// Jobs also get each input as an environment variable of that name, so
+	// names that envname.Reserved reports are refused.
 	Freeform bool
 	Fields   []Field
 }
@@ -98,6 +102,10 @@ func (k Kind) Split(inputs map[string]string) (public, secret map[string]string,
 		for name, v := range inputs {
 			if !freeformName.MatchString(name) {
 				problems = append(problems, fmt.Sprintf("%q is not a valid name (letters, digits and underscores)", name))
+				continue
+			}
+			if envname.Reserved(name) {
+				problems = append(problems, fmt.Sprintf("%q is reserved: each name is also set as an environment variable in jobs", name))
 				continue
 			}
 			if v != "" {

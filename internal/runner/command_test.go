@@ -179,3 +179,42 @@ func TestAskpass(t *testing.T) {
 		t.Error("answered an unknown prompt")
 	}
 }
+
+func TestInventorySyncCommand(t *testing.T) {
+	ws := testWorkspace(t)
+	ws.projectDir = filepath.Join(ws.dir, "project")
+	if err := os.MkdirAll(filepath.Join(ws.projectDir, "inventory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ws.env = []string{"AKIPS_HOST=https://akips.example.com"}
+	spec := &runnerapi.RunnerJobSpec{
+		JobType: runnerapi.InventorySync, Entrypoint: "inventory", Verbosity: 2,
+		Credentials: []runnerapi.RunnerCredential{
+			{Name: "v", Kind: runnerapi.Vault, Inputs: map[string]string{"password": "pw"}},
+			{Name: "g", Kind: runnerapi.Generic, Inputs: map[string]string{"AKIPS_HOST": "x"}},
+		},
+	}
+	c, err := buildCommand(spec, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ansible-inventory", "-i", filepath.Join(ws.projectDir, "inventory"), "--list", "--export",
+		"--output", inventoryResultFile(ws), "-vv", "--vault-password-file"}
+	if !slices.Equal(c.argv[:len(want)], want) || len(c.argv) != len(want)+1 {
+		t.Errorf("argv = %q", c.argv)
+	}
+	if c.dir != ws.projectDir || c.eventMarker != "" {
+		t.Errorf("dir = %q, marker = %q", c.dir, c.eventMarker)
+	}
+	for _, kv := range []string{"AKIPS_HOST=https://akips.example.com", "ANSIBLE_INVENTORY_UNPARSED_FAILED=True", "ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED=True"} {
+		if !slices.Contains(c.env, kv) {
+			t.Errorf("env lacks %s", kv)
+		}
+	}
+
+	// The source must be in the project.
+	spec.Entrypoint = "../etc"
+	if _, err := buildCommand(spec, ws); err == nil {
+		t.Error("a source outside the project was accepted")
+	}
+}

@@ -36,6 +36,8 @@ func buildCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, error)
 		return scriptCommand(spec, ws)
 	case runnerapi.Ansible:
 		return ansibleCommand(spec, ws)
+	case runnerapi.InventorySync:
+		return inventorySyncCommand(spec, ws)
 	}
 	return command{}, fmt.Errorf("This runner does not support %q jobs", spec.JobType)
 }
@@ -43,6 +45,12 @@ func buildCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, error)
 // projectFile resolves the job's entrypoint in the project checkout and
 // checks that it is a file there.
 func projectFile(spec *runnerapi.RunnerJobSpec, ws *workspace, what string) (string, error) {
+	return projectPath(spec, ws, what, false)
+}
+
+// projectPath resolves the job's entrypoint in the project checkout and
+// checks that it is a file there, or a directory if dirOK.
+func projectPath(spec *runnerapi.RunnerJobSpec, ws *workspace, what string, dirOK bool) (string, error) {
 	if ws.projectDir == "" || spec.Entrypoint == "" {
 		return "", fmt.Errorf("The job has no project or no %s", what)
 	}
@@ -56,6 +64,7 @@ func projectFile(spec *runnerapi.RunnerJobSpec, ws *workspace, what string) (str
 		return "", fmt.Errorf("The %s %s is not in the project", what, spec.Entrypoint)
 	case err != nil:
 		return "", err
+	case dirOK && fi.IsDir():
 	case !fi.Mode().IsRegular():
 		return "", fmt.Errorf("The %s %s is not a file", what, spec.Entrypoint)
 	}
@@ -148,18 +157,31 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 	if err := os.WriteFile(filepath.Join(pluginDir, "dispatch_events.py"), callbackPlugin, 0o600); err != nil {
 		return command{}, err
 	}
-	tmp := ws.path("ansible", "tmp")
-	if err := os.MkdirAll(tmp, 0o700); err != nil {
+	env, err := ansibleEnv(ws)
+	if err != nil {
 		return command{}, err
 	}
 	marker := "\x1edispatch-event:" + rand.Text()[:12] + ":"
-	env := append(ws.env[:len(ws.env):len(ws.env)],
+	env = append(env,
 		"DISPATCH_EVENT_MARKER="+marker,
 		// Ours first, then Ansible's defaults.
 		"ANSIBLE_CALLBACK_PLUGINS="+pluginDir+":~/.ansible/plugins/callback:/usr/share/ansible/plugins/callback",
+		"ANSIBLE_RETRY_FILES_ENABLED=False",
+	)
+	return command{argv: argv, dir: ws.projectDir, env: env, eventMarker: marker}, nil
+}
+
+// ansibleEnv is the environment of the Ansible commands the runner runs:
+// the job's, plus settings for running in a job pod and the search paths
+// of the project's requirements.
+func ansibleEnv(ws *workspace) ([]string, error) {
+	tmp := ws.path("ansible", "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		return nil, err
+	}
+	env := append(ws.env[:len(ws.env):len(ws.env)],
 		// Job pods start without known hosts.
 		"ANSIBLE_HOST_KEY_CHECKING=False",
-		"ANSIBLE_RETRY_FILES_ENABLED=False",
 		// Output is a pipe, not a terminal; the web log renders ANSI colors.
 		"ANSIBLE_FORCE_COLOR=True",
 		// Writable places, whatever the image's home directory is.
@@ -167,8 +189,52 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 		"ANSIBLE_SSH_CONTROL_PATH_DIR="+ws.path("ansible", "cp"),
 		"PYTHONUNBUFFERED=1",
 	)
-	env = append(env, ws.ansibleEnv...)
-	return command{argv: argv, dir: ws.projectDir, env: env, eventMarker: marker}, nil
+	return append(env, ws.ansibleEnv...), nil
+}
+
+// --- Inventory sync jobs -----------------------------------------------------
+
+// inventoryResultFile is where an inventory sync's ansible-inventory
+// writes the inventory it found.
+func inventoryResultFile(ws *workspace) string { return ws.path("inventory-result.json") }
+
+// inventorySyncCommand runs ansible-inventory on the source (a file or
+// directory in the project), in the project directory so the project's
+// ansible.cfg applies, writing the inventory to inventoryResultFile.
+// --export keeps group variables on their groups instead of merging them
+// into every host's. A source Ansible can't parse fails the job rather
+// than syncing an empty inventory. Vault credentials decrypt vaulted
+// variable files; other credentials reach inventory plugins and scripts
+// through the environment (see prepare).
+func inventorySyncCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, error) {
+	src, err := projectPath(spec, ws, "inventory source", true)
+	if err != nil {
+		return command{}, err
+	}
+	argv := []string{"ansible-inventory", "-i", src, "--list", "--export", "--output", inventoryResultFile(ws)}
+	if spec.Verbosity > 0 {
+		argv = append(argv, "-"+strings.Repeat("v", min(spec.Verbosity, 5)))
+	}
+	var vaults []runnerapi.RunnerCredential
+	for _, c := range spec.Credentials {
+		if c.Kind == runnerapi.Vault {
+			vaults = append(vaults, c)
+		}
+	}
+	credArgs, err := ansibleCredentialArgs(vaults, ws)
+	if err != nil {
+		return command{}, err
+	}
+	argv = append(argv, credArgs...)
+	env, err := ansibleEnv(ws)
+	if err != nil {
+		return command{}, err
+	}
+	env = append(env,
+		"ANSIBLE_INVENTORY_UNPARSED_FAILED=True",
+		"ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED=True",
+	)
+	return command{argv: argv, dir: ws.projectDir, env: env}, nil
 }
 
 // staticInventory converts an inventory in the dynamic inventory script

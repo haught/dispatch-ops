@@ -3,11 +3,15 @@ package runner
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"dispatch-ops/internal/runner/runnerapi"
 	"dispatch-ops/internal/tlscert"
@@ -86,4 +90,52 @@ func newClient(apiURL, token, version string, ca []byte) (*runnerapi.ClientWithR
 			return nil
 		}),
 	)
+}
+
+// maxInventoryBytes is the largest inventory the API accepts from a sync.
+const maxInventoryBytes = 32 << 20
+
+// reportInventory sends the inventory file at path, as ansible-inventory
+// wrote it, for the API to store.
+func reportInventory(ctx context.Context, client *runnerapi.ClientWithResponses, jobID uuid.UUID, path string) (*runnerapi.RunnerInventoryResult, error) {
+	var out *runnerapi.RunnerInventoryResult
+	err := retry(ctx, sendRetryTime, func(ctx context.Context) error {
+		f, err := os.Open(path)
+		if err != nil {
+			return &apiError{status: 0, body: err.Error()}
+		}
+		defer f.Close()
+		resp, err := client.PostRunnerInventoryWithBodyWithResponse(ctx, jobID, "application/json", f)
+		if err != nil {
+			return err
+		}
+		if err := classify(resp.StatusCode(), resp.Body, 200); err != nil {
+			return err
+		}
+		out = resp.JSON200
+		return nil
+	})
+	if err == nil && out == nil {
+		err = errors.New("the API sent no result")
+	}
+	return out, err
+}
+
+// problemText is the most useful part of an API error for a job's failure
+// reason: the problem's detail if the API sent one.
+func problemText(err error) string {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		var p struct {
+			Title  string `json:"title"`
+			Detail string `json:"detail"`
+		}
+		if json.Unmarshal([]byte(ae.body), &p) == nil && (p.Detail != "" || p.Title != "") {
+			if p.Detail != "" {
+				return p.Detail
+			}
+			return p.Title
+		}
+	}
+	return err.Error()
 }

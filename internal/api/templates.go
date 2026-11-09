@@ -49,6 +49,8 @@ func checkTemplate(f store.JobTemplateFields) error {
 		if t == string(apigen.Ansible) && len(f.Arguments) > 0 {
 			return badRequest("arguments are for script templates; pass variables to a playbook with extraVars")
 		}
+	case string(apigen.InventorySync):
+		return badRequest("inventory_sync jobs are launched by syncing an inventory, not from a job template")
 	default:
 		return badRequest("unknown job type %q", t)
 	}
@@ -407,6 +409,7 @@ func toAPIJob(j store.Job) apigen.Job {
 		out.Schedule = &apigen.ScheduleRef{Id: j.Schedule.ID, Name: j.Schedule.Name}
 	}
 	out.RelaunchOf = j.RelaunchOf
+	out.SyncInventoryId = j.SyncInventoryID
 	return out
 }
 

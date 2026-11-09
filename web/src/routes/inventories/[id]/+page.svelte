@@ -13,6 +13,7 @@
 	} from '#lib/api/client.js';
 	import GroupForm from '#lib/components/GroupForm.svelte';
 	import HostForm from '#lib/components/HostForm.svelte';
+	import InventorySourceCard from '#lib/components/InventorySourceCard.svelte';
 	import ResourceAccess from '#lib/components/ResourceAccess.svelte';
 	import UsedBy from '#lib/components/UsedBy.svelte';
 	import VarsField from '#lib/components/VarsField.svelte';
@@ -46,6 +47,9 @@
 	let exported = $state<string | null>(null);
 
 	const canAdmin = $derived(can('inventory', id, 'admin'));
+	// A synced inventory's hosts and groups come from its source.
+	const synced = $derived(Boolean(inventory?.source));
+	const canEditHosts = $derived(canAdmin && !synced);
 	const groupName = $derived(new Map(groups.map((g) => [g.id, g.name])));
 
 	function fill(inv: Inventory) {
@@ -261,12 +265,20 @@
 		<p class="muted small">Updated {fmtTime(inventory.updatedAt)}</p>
 	</section>
 
+	<InventorySourceCard {inventory} {canAdmin} onchanged={refresh} />
+
 	<section class="card">
 		<div class="page-header">
 			<h2>Hosts</h2>
 			<span class="spacer"></span>
-			{#if canAdmin}<button onclick={() => openHost('new')}>Add host</button>{/if}
+			{#if canEditHosts}<button onclick={() => openHost('new')}>Add host</button>{/if}
 		</div>
+		{#if synced}
+			<p class="muted small">
+				Synced from <code>{inventory.source?.sourcePath}</code>: each sync replaces these hosts and
+				groups, so they can't be edited here.
+			</p>
+		{/if}
 		<div class="filters">
 			<label>Search <input bind:value={hostSearch} placeholder="Name contains…" /></label>
 			<label>
@@ -314,9 +326,9 @@
 								<td>
 									<div class="row-actions">
 										<button class="secondary" onclick={() => openHost(h)}>
-											{canAdmin ? 'Edit' : 'View'}
+											{canEditHosts ? 'Edit' : 'View'}
 										</button>
-										{#if canAdmin}
+										{#if canEditHosts}
 											<button class="danger" onclick={() => removeHost(h)}>Delete</button>
 										{/if}
 									</div>
@@ -336,7 +348,7 @@
 					inventoryId={inventory.id}
 					host={hostOpen === 'new' ? null : hostOpen}
 					{groups}
-					readonly={!canAdmin}
+					readonly={!canEditHosts}
 					onsaved={hostSaved}
 					oncancel={() => (hostOpen = null)}
 				/>
@@ -348,7 +360,7 @@
 		<div class="page-header">
 			<h2>Groups</h2>
 			<span class="spacer"></span>
-			{#if canAdmin}<button onclick={() => openGroup('new')}>Add group</button>{/if}
+			{#if canEditHosts}<button onclick={() => openGroup('new')}>Add group</button>{/if}
 		</div>
 		{#if groupError}<p class="error" role="alert">{groupError}</p>{/if}
 		{#if groups.length === 0}
@@ -379,9 +391,9 @@
 									<div class="row-actions">
 										<button class="secondary" onclick={() => (hostGroup = g.id)}>Hosts</button>
 										<button class="secondary" onclick={() => openGroup(g)}>
-											{canAdmin ? 'Edit' : 'View'}
+											{canEditHosts ? 'Edit' : 'View'}
 										</button>
-										{#if canAdmin}
+										{#if canEditHosts}
 											<button class="danger" onclick={() => removeGroup(g)}>Delete</button>
 										{/if}
 									</div>
@@ -398,7 +410,7 @@
 					inventoryId={inventory.id}
 					group={groupOpen === 'new' ? null : groupOpen}
 					{groups}
-					readonly={!canAdmin}
+					readonly={!canEditHosts}
 					onsaved={groupSaved}
 					oncancel={() => (groupOpen = null)}
 				/>

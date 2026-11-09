@@ -52,7 +52,7 @@
 			<table>
 				<thead>
 					<tr>
-						<th>Job template</th>
+						<th>Launches</th>
 						<th>Schedule</th>
 						<th>When</th>
 						<th>Next run</th>
@@ -62,7 +62,13 @@
 				<tbody>
 					{#each schedules as s (s.id)}
 						<tr>
-							<td><a href="/templates/{s.jobTemplateId}">{s.jobTemplateName}</a></td>
+							<td>
+								{#if s.inventoryId}
+									Sync of <a href="/inventories/{s.inventoryId}">{s.inventoryName}</a>
+								{:else}
+									<a href="/templates/{s.jobTemplateId}">{s.jobTemplateName}</a>
+								{/if}
+							</td>
 							<td>
 								{s.name}
 								{#if s.description}<div class="muted small">{s.description}</div>{/if}
