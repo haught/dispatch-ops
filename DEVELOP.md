@@ -4,9 +4,19 @@ This guide is for people working on Dispatch Ops itself. For what the product
 does and how to install it, see [README.md](README.md); for running and using
 it, see [docs/](docs/).
 
+Development happens in the repository's dev container, which has every tool
+the project needs. On your machine you only need:
+
+- Docker Desktop. Pods in the dev cluster reach your database at
+  `host.docker.internal`, which Docker Desktop provides.
+- VS Code with the Dev Containers extension (or the
+  [`devcontainer` CLI](https://github.com/devcontainers/cli)).
+
+Every command in this guide runs in the dev container's terminal.
+
 - [Quickstart](#quickstart)
 - [The development loop](#the-development-loop)
-- [Dev container](#dev-container)
+- [How the dev container works](#how-the-dev-container-works)
 - [Repository layout](#repository-layout)
 - [Changing the API](#changing-the-api)
 - [Changing the DispatchOps resource](#changing-the-dispatchops-resource)
@@ -24,23 +34,12 @@ operator, the API server, the task manager and the job pods.
 [Tilt](https://tilt.dev) rebuilds and redeploys whatever a change affects.
 The database is a Postgres container you run yourself, outside the cluster.
 
-### 1. Get the tools
+### 1. Open the dev container
 
-The easiest way is the dev container: open the repository in VS Code and
-choose **Dev Containers: Reopen in Container**. It has every tool below and
-uses your host's Docker daemon, so Docker must be running on the host.
-
-To work on the host instead, install:
-
-| Tool | Version |
-|---|---|
-| Go | 1.27+ |
-| Node.js | 25+ |
-| Docker | Docker Desktop on macOS |
-| kubectl, Helm 3, kind, Tilt | recent |
-| socat | any (Tilt uses it to forward the API port) |
-| make, psql | any |
-| ansible-core | optional, for the playbook test in `make test-db` |
+Open the repository in VS Code and choose **Dev Containers: Reopen in
+Container**. The first build takes a few minutes. Docker must be running on
+your machine: the dev container uses its Docker daemon to run Postgres, the
+kind cluster and image builds.
 
 ### 2. Start Postgres
 
@@ -54,6 +53,10 @@ docker run -d --name postgresql --restart unless-stopped \
   postgres:17
 ```
 
+It runs on your machine's Docker, next to the dev container, so it survives
+rebuilding the dev container. The dev container and the kind cluster both
+reach it at `host.docker.internal:5432`.
+
 If you already have a Postgres container under another name, pass
 `PG_CONTAINER=<name>` (and `PG_SUPERUSER=<user>` if it isn't `postgres`) to
 `make db-init` in step 5.
@@ -66,9 +69,8 @@ make setup-env
 
 This copies `.env.example` to `.env` and fills in a new random encryption
 key. The defaults work with the container from step 2: the database URL
-points at `localhost:5432` with the user and password `dispatch`. Leave them
-as they are for now. Inside the dev container the Makefile rewrites
-`localhost` to `host.docker.internal` for you.
+points at `host.docker.internal:5432` with the user and password `dispatch`.
+Leave them as they are for now.
 
 ### 4. Install dependencies
 
@@ -93,9 +95,10 @@ in the `postgresql` container. Run it once; it is safe to run again.
 make dev
 ```
 
-This creates the `dispatch-ops` kind cluster (first run only) and runs
-`tilt up`. The first run builds the UI, the server, the operator and the
-execution environment images, so give it several minutes.
+This creates the `dispatch-ops` kind cluster (first run only), connects the
+dev container to it, and runs `tilt up`. The first run builds the UI, the
+server, the operator and the execution environment images, so give it
+several minutes.
 
 Open the Tilt UI at http://localhost:10350 and wait until every resource is
 green. `api-port-forward` comes up last.
@@ -111,9 +114,9 @@ make admin-password
 ```
 
 prints the password the operator generated for the user `admin`. Open
-https://localhost:8443 and accept the browser's warning about the
-self-signed certificate (the operator generated it; you only see the warning
-once). Sign in as `admin` with that password.
+https://localhost:8443 (VS Code forwards the port from the dev container) and
+accept the browser's warning about the self-signed certificate. Sign in as
+`admin` with that password.
 
 `make admin-password` reads a Secret in the cluster. The admin user is only
 created when the database has no user called `admin`, so if you recreated the
@@ -180,8 +183,7 @@ the external database from `.env`. The `Tiltfile` fills in the rest before
 applying it:
 
 - `spec.image`: the server image Tilt just built.
-- A Secret with `DISPATCH_DATABASE_URL`, with `localhost` changed to
-  `host.docker.internal`, where pods reach your Postgres.
+- A Secret with `DISPATCH_DATABASE_URL`.
 - A Secret with `DISPATCH_ENCRYPTION_KEY` (and `DISPATCH_OLD_ENCRYPTION_KEYS`
   if set).
 - `spec.externalURL`, `spec.sessionTTL` and, when `DISPATCH_OIDC_ISSUER` is
@@ -201,12 +203,13 @@ Set `DISPATCH_OIDC_ISSUER`, `DISPATCH_OIDC_CLIENT_ID` and
 `DISPATCH_OIDC_CLIENT_SECRET` in `.env`, and register
 `https://localhost:8443/api/v1/auth/oidc/callback` as the client's redirect
 URI. Tilt re-applies the installation when `.env` changes. See
-[Single sign-on](docs/user-guide.md#single-sign-on-oidc) for how users and groups are
-mapped.
+[Single sign-on](docs/user-guide.md#single-sign-on-oidc) for how users and
+groups are mapped.
 
-### Running the binary on the host
+### Running the CLI directly
 
-The CLI targets run on the host against `DISPATCH_DATABASE_URL`:
+These targets run the server binary in the dev container against
+`DISPATCH_DATABASE_URL`:
 
 ```sh
 make migrate        # apply pending migrations
@@ -219,24 +222,39 @@ You rarely need `make migrate` during normal work, because the operator runs
 migrations on every server image change. `make migrate-down` is useful while
 iterating on a new migration.
 
-## Dev container
+## How the dev container works
 
-`.devcontainer/` has everything the quickstart needs: Go, Node, the Docker
-CLI, kubectl, Helm, kind, Tilt, psql and ansible-core. It uses the host's
-Docker daemon through its socket and starts nothing by itself; use the same
-`make` targets as on the host.
+[.devcontainer/](.devcontainer/) has Go, Node, the Docker CLI, kubectl, Helm,
+kind, Tilt, psql, socat and ansible-core. It starts nothing by itself.
 
-Inside it:
+- **Docker** is your machine's daemon, through its socket (`DOCKER_HOST`).
+  Containers you start, including Postgres and the kind cluster's node, run
+  next to the dev container, not inside it.
+- **`host.docker.internal`** reaches ports those containers publish on your
+  machine. The dev container gets the name from `--add-host`; Docker Desktop
+  provides it to kind's pods.
+- **The kind cluster:** `make kind-up` connects the dev container to the
+  `kind` Docker network and writes a kubeconfig with the cluster's internal
+  address. A rebuilt dev container loses that connection: run
+  `make kind-join` (or `make kind-up`, which does it too). The `Tiltfile`
+  refuses to start if the kubectl context isn't `kind-dispatch-ops`.
+- **Ports** 8443 (Dispatch Ops), 10350 (Tilt) and 5173 (Vite) are forwarded
+  to your machine.
 
-- The Makefile points `DISPATCH_DATABASE_URL` at `host.docker.internal`
-  instead of `localhost` (it checks `DISPATCH_DEVCONTAINER`).
-- `make kind-up` also joins the container to the `kind` Docker network and
-  writes a kubeconfig with the cluster's internal address. After rebuilding
-  the container, run `make kind-join` to do that again for an existing
-  cluster. The `Tiltfile` refuses to start if the kubectl context isn't
-  `kind-dispatch-ops`, and tells you to run it.
-- Ports 8443 (Dispatch Ops), 10350 (Tilt) and 5173 (Vite) are forwarded to
-  the host.
+### Personal settings
+
+To add mounts, features or extensions for yourself, copy
+`.devcontainer/devcontainer.json` to `.devcontainer/local/devcontainer.json`,
+which is gitignored, and change its build to
+`"build": { "dockerfile": "../Dockerfile" }`. **Dev Containers: Reopen in
+Container** then offers both configurations. For example, mount a checkout
+of your own execution environment from elsewhere on your machine:
+
+```jsonc
+"mounts": [
+  "source=${localEnv:HOME}/src/my-ee,target=${containerWorkspaceFolder}/images/local/my-ee,type=bind"
+]
+```
 
 ## Repository layout
 
@@ -312,9 +330,8 @@ make helm-lint # lint the operator chart
 - The runner is tested end to end against the real API in
   `internal/api/jobs_test.go`, and the task manager against a fake Kubernetes
   client.
-- `make test-db` also runs a real playbook if `ansible-playbook` is on your
-  `PATH` (the dev container has it; on the host, `pip install ansible-core`
-  in a virtualenv). Otherwise that test is skipped.
+- `make test-db` also runs a real playbook with the dev container's
+  `ansible-playbook`.
 
 ## Execution environments in development
 
@@ -322,8 +339,9 @@ make helm-lint # lint the operator chart
 `dispatch-ops/<name>:dev`. `make kind-load` builds them and loads them into
 the kind cluster; Tilt runs it whenever the runner or `images/` changes.
 
-To work on your own EE against the runner in this checkout, put it (or a
-symlink to its repository) in `images/local/<name>/`, which is gitignored.
+To work on your own EE against the runner in this checkout, clone its
+repository into `images/local/<name>/`, which is gitignored (or mount it
+there, see [Personal settings](#personal-settings)).
 `make kind-load` then builds it on top of the local starter EEs and loads it
 as `dispatch-ops/local-<name>:dev`. See
 [images/local/README.md](images/local/README.md).
@@ -457,13 +475,13 @@ docker run --rm -e DISPATCH_DATABASE_URL=... -e DISPATCH_ENCRYPTION_KEY=... \
 | `deps` | Go modules and npm packages |
 | `db-init` | Create the role and the `dispatch` and `dispatch_test` databases |
 | `dev` / `dev-down` | Start the kind cluster and Tilt / remove what Tilt deployed |
-| `kind-up` / `kind-down` / `kind-join` | Create or delete the cluster; rejoin it from a rebuilt dev container |
+| `kind-up` / `kind-down` / `kind-join` | Create the cluster and connect to it / delete it / reconnect after a dev container rebuild |
 | `admin-password` | Print the generated `admin` password |
 | `web-dev` | Vite dev server with hot reload |
 | `generate` / `manifests` | Regenerate code from the OpenAPI spec / the CRD |
 | `test` / `test-db` / `check` / `helm-lint` | Tests and linters |
 | `images` / `kind-load` | Build the EE images / and load them into kind |
-| `migrate` / `migrate-down` / `admin` | Database and user commands on the host |
+| `migrate` / `migrate-down` / `admin` | Database and user commands, run directly |
 | `build` / `docker` / `runner` / `publish-images` | Binaries and images |
 | `chart` / `dist` | Package the Helm chart / all release assets, in `dist/` |
 

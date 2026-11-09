@@ -22,7 +22,7 @@ JOB_NAMESPACE = 'dispatch-jobs'
 CHART = 'deploy/helm/dispatch-ops-operator'
 
 if k8s_context() != CONTEXT:
-    fail('kubectl context is %r, not %r: run `make kind-up` (or `make kind-join` in the dev container)' % (k8s_context(), CONTEXT))
+    fail('kubectl context is %r, not %r: run `make kind-up` (it also reconnects a rebuilt dev container)' % (k8s_context(), CONTEXT))
 
 # --- .env ----------------------------------------------------------------------
 
@@ -46,10 +46,8 @@ def require(key):
         fail('%s is not set in .env (see .env.example)' % key)
     return env[key]
 
-# Pods reach ports published on the host at host.docker.internal.
+# Pods reach your Postgres where the dev container does: host.docker.internal.
 database_url = require('DISPATCH_DATABASE_URL')
-for local_host in ['@localhost:', '@127.0.0.1:']:
-    database_url = database_url.replace(local_host, '@host.docker.internal:')
 
 version = str(local('git describe --tags --always --dirty 2>/dev/null || echo dev', quiet=True, echo_off=True)).strip()
 go_build = 'CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=%s"' % version

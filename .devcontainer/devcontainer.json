@@ -1,6 +1,7 @@
-// Dev container for dispatch-ops. Nothing is started automatically: use the
-// Makefile (`make help`) as on the host. Docker commands (`make kind-up`,
-// `make dev`, `make images`) run against the host's Docker daemon.
+// Dev container for dispatch-ops, the supported development environment (see
+// DEVELOP.md). Nothing is started automatically: use the Makefile
+// (`make help`). Docker commands (`make kind-up`, `make dev`, `make images`)
+// run against the host's Docker daemon.
 {
 	"name": "dispatch-ops",
 	"build": { "dockerfile": "Dockerfile" },
@@ -14,8 +15,6 @@
 	},
 	"remoteUser": "vscode",
 	"containerEnv": {
-		// The Makefile adjusts host addresses for the dev container when set.
-		"DISPATCH_DEVCONTAINER": "true",
 		// Use the host's socket directly, not the feature's socat relay on
 		// /var/run/docker.sock: socat drops a connection 0.5s after one side
 		// closes, which cuts off `docker exec` (kind's `kubeadm init` returns

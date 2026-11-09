@@ -9,6 +9,7 @@ RUN apt-get update \
         python3 \
         python3-venv \
         openssh-client \
+        socat \
         sshpass \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,7 +22,7 @@ ENV PATH=/opt/ansible/bin:$PATH
 
 # The development loop (Tiltfile, `make dev`): tilt, the kind CLI it uses to
 # load images into the cluster, and helm, which renders the operator's chart.
-# Keep KIND_VERSION in step with the Makefile.
+# (socat, above, carries the Tiltfile's port-forward of the API.)
 ARG TILT_VERSION=0.37.8
 ARG KIND_VERSION=v0.33.0
 ARG HELM_VERSION=v3.22.1

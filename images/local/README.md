@@ -9,12 +9,17 @@ This is for trying an EE against the runner in your checkout before you push
 it. Keep the EE itself in its own repository, where it has history, review
 and a CI build that pushes it to a registry your cluster can pull from. Start
 that repository from [`examples/ee-template`](../../examples/ee-template).
-Then link a checkout of it here:
+Then clone it here, in the dev container:
 
 ```sh
-ln -s ~/src/my-ee images/local/my-ee
+git clone https://github.com/acme/my-ee.git images/local/my-ee
 make kind-load        # builds dispatch-ops/local-my-ee:dev
 ```
+
+A symlink to a checkout outside the workspace doesn't work, because the dev
+container can't see it. To keep the checkout elsewhere on your machine, mount
+it at `images/local/<name>` from a personal dev container configuration (see
+[DEVELOP.md](../../DEVELOP.md#personal-settings)).
 
 The build passes `IMAGE_REPO=dispatch-ops` and `IMAGE_TAG=dev`, so a
 Dockerfile that starts `FROM ${IMAGE_REPO}/ee-ansible:${IMAGE_TAG}`, as the

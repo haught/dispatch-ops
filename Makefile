@@ -16,22 +16,13 @@ PG_SUPERUSER ?= postgres
 # dev keeps dispatch-ops/<name>:dev, the names EEs are registered by.
 IMAGE_REPO ?= dispatch-ops
 IMAGE_TAG ?= dev
-KIND_VERSION := v0.33.0
-KIND := go run sigs.k8s.io/kind@$(KIND_VERSION)
+KIND := kind
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 CHART := deploy/helm/dispatch-ops-operator
 KIND_CLUSTER := dispatch-ops
 KUBE_CONTEXT := kind-$(KIND_CLUSTER)
 DISPATCH_JOB_NAMESPACE ?= dispatch-jobs
 DEV_NAMESPACE := dispatch-ops
-
-# In the dev container (.devcontainer), Docker runs on the host, so Postgres's
-# published port is on host.docker.internal rather than localhost. (Pods in
-# kind reach it there too; the Tiltfile rewrites the URL the same way.)
-ifdef DISPATCH_DEVCONTAINER
-DISPATCH_DATABASE_URL := $(subst @localhost:,@host.docker.internal:,$(DISPATCH_DATABASE_URL))
-TEST_DATABASE_URL := $(subst @localhost:,@host.docker.internal:,$(TEST_DATABASE_URL))
-endif
 
 .DEFAULT_GOAL := help
 
@@ -66,7 +57,8 @@ manifests: ## Regenerate the DispatchOps CRD and its deepcopy code from internal
 # --- Database ----------------------------------------------------------------
 
 # The database runs outside the cluster, in your own Postgres container
-# ($(PG_CONTAINER)); DISPATCH_DATABASE_URL in .env says how to reach it.
+# ($(PG_CONTAINER)) on the host's Docker; DISPATCH_DATABASE_URL in .env says
+# how to reach it (host.docker.internal, from the dev container and kind).
 .PHONY: db-init
 db-init: ## Create DISPATCH_DATABASE_URL's role, database and _test database in your Postgres container (PG_CONTAINER)
 	@url='$(DISPATCH_DATABASE_URL)'; \
@@ -114,16 +106,14 @@ web-dev: ## Run the Vite dev server with hot reload (proxies /api to the in-clus
 # --- Dev cluster and execution environments ----------------------------------
 
 .PHONY: kind-up
-kind-up: ## Create the kind cluster and the job namespace
+kind-up: ## Create the kind cluster and the job namespace, and connect the dev container to it
 	@$(KIND) get clusters 2>/dev/null | grep -qx $(KIND_CLUSTER) || $(KIND) create cluster --config deploy/dev/kind.yaml
-ifdef DISPATCH_DEVCONTAINER
 	@$(MAKE) --no-print-directory kind-join
-endif
 	@kubectl --context $(KUBE_CONTEXT) get namespace $(DISPATCH_JOB_NAMESPACE) >/dev/null 2>&1 \
 		|| kubectl --context $(KUBE_CONTEXT) create namespace $(DISPATCH_JOB_NAMESPACE)
 
 .PHONY: kind-join
-kind-join: ## Dev container only: join the kind network and point kubectl at it (run after a rebuild)
+kind-join: ## Join the kind network and point kubectl at the cluster (after rebuilding the dev container)
 	@docker inspect -f '{{range $$k, $$v := .NetworkSettings.Networks}}{{$$k}} {{end}}' $$(hostname) | grep -qw kind \
 		|| docker network connect kind $$(hostname)
 	@$(KIND) export kubeconfig --name $(KIND_CLUSTER) --internal
@@ -133,8 +123,8 @@ kind-down: ## Delete the kind cluster
 	$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 EES := ee-shell ee-python ee-ansible
-# Your own EEs: each images/local/<name>/ with a Dockerfile (a directory, or a
-# symlink to a checkout of your EE repo) builds as $(IMAGE_REPO)/local-<name>,
+# Your own EEs: each images/local/<name>/ with a Dockerfile (a checkout of
+# your EE repo, cloned there) builds as $(IMAGE_REPO)/local-<name>,
 # on top of the starter EEs built here. images/local is gitignored; see
 # images/local/README.md.
 LOCAL_EES := $(notdir $(patsubst %/Dockerfile,%,$(wildcard images/local/*/Dockerfile)))
