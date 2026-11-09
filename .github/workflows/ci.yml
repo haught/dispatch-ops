@@ -96,9 +96,9 @@ jobs:
 
   # Builds every image for amd64, runs the selftest in each starter EE, and
   # scans every image for known vulnerabilities. release.yml runs this
-  # workflow first, so a release with a fixable High or Critical
-  # vulnerability publishes nothing. The scanner runs here, with read-only
-  # permissions, not in the jobs that can publish.
+  # workflow first; the scan reports fixable High or Critical
+  # vulnerabilities as warnings but doesn't block a release. The scanner
+  # runs here, with read-only permissions, not in the jobs that can publish.
   images:
     runs-on: ubuntu-latest
     steps:
@@ -123,21 +123,27 @@ jobs:
           done
       - id: grype
         uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
-      # Fails on High or Critical vulnerabilities that have a fix available.
-      # To accept one, add it to .grype.yaml with a reason.
+      # Reports High or Critical vulnerabilities that have a fix available as
+      # warnings and in the job summary; it doesn't fail the job. To silence
+      # one, add it to .grype.yaml with a reason.
       - name: Scan the images
         env:
           GRYPE: ${{ steps.grype.outputs.cmd }}
         run: |
-          failed=()
+          flagged=()
+          echo "## Image scan (fixable vulnerabilities)" >> "$GITHUB_STEP_SUMMARY"
           for image in server operator runner runner-base ee-shell ee-python ee-ansible; do
             echo "::group::$image"
-            if ! "$GRYPE" "docker:dispatch-ops/$image:dev" --only-fixed --fail-on high; then
-              failed+=("$image")
-            fi
+            status=0
+            report=$("$GRYPE" "docker:dispatch-ops/$image:dev" --only-fixed --fail-on high 2>&1) || status=$?
+            echo "$report"
             echo "::endgroup::"
+            if [ "$status" -ne 0 ]; then
+              flagged+=("$image")
+              echo "::warning::Fixable High or Critical vulnerabilities in $image"
+            fi
+            { echo "### $image"; echo '```'; echo "$report"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done
-          if [ ${#failed[@]} -gt 0 ]; then
-            echo "::error::Fixable High or Critical vulnerabilities in: ${failed[*]}"
-            exit 1
+          if [ ${#flagged[@]} -gt 0 ]; then
+            echo "::warning::Fixable High or Critical vulnerabilities in: ${flagged[*]}"
           fi

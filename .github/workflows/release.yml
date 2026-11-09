@@ -124,6 +124,10 @@ jobs:
           REVISION: ${{ github.sha }}
           PLATFORMS: linux/amd64,linux/arm64
           # No GHA_CACHE: no cache-from or cache-to (docker-bake.hcl).
+          # Keeps provenance out of the metadata output (it's still attached
+          # to the images). With it, the metadata is too big for the
+          # environment variable the signing step reads it from.
+          BUILDX_METADATA_PROVENANCE: disabled
         with:
           source: .
           push: true

@@ -1,5 +1,5 @@
-# Grype settings for the image scan in .github/workflows/ci.yml, which fails
-# on High or Critical vulnerabilities that have a fix available.
+# Grype settings for the image scan in .github/workflows/ci.yml, which reports
+# High or Critical vulnerabilities that have a fix available as warnings.
 #
 # To accept one (say, it's in code the image never runs, or the fix isn't
 # released for the base image yet), add it here with a reason and a date to
