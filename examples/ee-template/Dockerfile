@@ -3,15 +3,15 @@
 # A Dispatch Ops execution environment: a starter EE plus whatever
 # packages.txt, requirements.txt and requirements.yml list. See README.md.
 
-# The starter EE to build on: ee-ansible, ee-python or ee-shell. Set
-# IMAGE_REPO to where your Dispatch Ops images are published, and pin
+# The starter EE to build on: ee-ansible, ee-python or ee-shell. IMAGE_REPO
+# is where Dispatch Ops releases publish them (change it for a mirror); pin
 # IMAGE_TAG to the release your server runs. `make images` in a Dispatch Ops
 # checkout overrides both (IMAGE_REPO=dispatch-ops, IMAGE_TAG=dev) when this
 # directory is linked into images/local.
-ARG IMAGE_REPO=ghcr.io/your-org/dispatch-ops
+ARG IMAGE_REPO=ghcr.io/haught/dispatch-ops
 # Renovate bumps the tag below; keep depName in step with IMAGE_REPO and the
 # starter EE named in FROM.
-# renovate: datasource=docker depName=ghcr.io/your-org/dispatch-ops/ee-ansible
+# renovate: datasource=docker depName=ghcr.io/haught/dispatch-ops/ee-ansible
 ARG IMAGE_TAG=latest
 FROM ${IMAGE_REPO}/ee-ansible:${IMAGE_TAG}
 

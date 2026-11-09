@@ -1,0 +1,115 @@
+# Tests, linters and image builds for pull requests and main. Nothing is
+# published from here; release.yml publishes on v* tags.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: dispatch
+          POSTGRES_PASSWORD: dispatch
+          POSTGRES_DB: dispatch_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U dispatch"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The DB tests create their own dispatch_test* databases from this.
+      DISPATCH_TEST_DATABASE_URL: postgres://dispatch:dispatch@localhost:5432/dispatch_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - name: gofmt
+        run: |
+          out="$(gofmt -l cmd internal web/web.go)"
+          if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
+      - run: go test -count=1 ./...
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run lint
+      - run: npm run build
+
+  # The generated Go server and runner client, TS client and CRD match their
+  # sources (api/openapi.yaml, internal/operator/api).
+  generated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+      - run: make generate
+      - name: Check for changes
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::Generated files are out of date; run 'make generate' and commit the result."
+            exit 1
+          fi
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - run: make helm-lint
+      - name: Package
+        run: make chart CHART_VERSION=0.0.0-ci
+
+  # Builds every image for amd64 and runs the selftest in each starter EE.
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/bake-action@v6
+        env:
+          VERSION: ci
+          REVISION: ${{ github.sha }}
+          GHA_CACHE: "1"
+        with:
+          source: .
+          load: true
+          set: |
+            *.platform=linux/amd64
+      - name: Selftest the starter EEs
+        run: |
+          for ee in ee-shell ee-python ee-ansible; do
+            echo "::group::$ee"
+            docker run --rm "dispatch-ops/$ee:dev" selftest
+            echo "::endgroup::"
+          done

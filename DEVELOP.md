@@ -373,14 +373,67 @@ certificate. The full API is in `api/openapi.yaml`.
 
 ## Building images and releases
 
+### Cutting a release
+
+Push a version tag:
+
 ```sh
-make docker            # server (dispatch-ops:<version>) and operator (dispatch-ops-operator:<version>)
-make runner            # static dispatch-runner binaries for linux amd64 and arm64, in bin/
-make publish-images IMAGE_REPO=ghcr.io/<org>/dispatch-ops PUBLISH_TAGS="1.4.0 1.4 latest"
+git tag v1.4.0
+git push origin v1.4.0
 ```
 
-`make publish-images` builds and pushes `runner`, `runner-base` and the
-starter EEs for amd64 and arm64. The version comes from `git describe`.
+[.github/workflows/release.yml](.github/workflows/release.yml) then publishes:
+
+| What | Where |
+|---|---|
+| Images `server`, `operator`, `runner`, `runner-base`, `ee-shell`, `ee-python`, `ee-ansible`, for amd64 and arm64, with provenance and SBOM attestations | `ghcr.io/haught/dispatch-ops/<name>:1.4.0`, `:1.4` and `:latest` |
+| The Helm chart, with `version` and `appVersion` set to `1.4.0` | `oci://ghcr.io/haught/dispatch-ops/charts/dispatch-ops-operator`, and the Helm repository `https://haught.github.io/dispatch-ops` (`index.yaml` on the `gh-pages` branch) |
+| A GitHub Release with generated notes, the `dispatch-runner` binaries (linux amd64 and arm64), the chart `.tgz` and `SHA256SUMS` | [Releases](https://github.com/haught/dispatch-ops/releases) |
+
+A prerelease tag such as `v1.4.0-rc.1` publishes only the `1.4.0-rc.1` image
+tag, leaves `latest` and `1.4` alone, and marks the GitHub Release as a
+prerelease. Helm only shows prerelease charts with `--devel`.
+
+Pull requests and pushes to `main` run
+[.github/workflows/ci.yml](.github/workflows/ci.yml): Go vet, gofmt and tests
+(with a PostgreSQL service, so the DB tests run), the UI's type check, lint
+and build, a check that generated code is up to date, the Helm lint, and an
+amd64 build of every image with the starter EEs' `selftest`. Nothing is
+published from `main`.
+
+The in-tree `Chart.yaml` keeps `version: 0.1.0` and `appVersion: dev`; the
+release sets both when it packages the chart.
+
+One-time setup, after the first release:
+
+- GHCR packages owned by a personal account may start out private. On each
+  package's settings page (server, operator, runner, runner-base, the EEs and
+  `charts/dispatch-ops-operator`), check that it is linked to this repository
+  and set its visibility to public.
+- In the repository's Settings → Pages, deploy from the `gh-pages` branch
+  (root), which the first release creates.
+
+### Building locally
+
+[docker-bake.hcl](docker-bake.hcl) defines every image. The EEs build on the
+`runner-base` of the same bake, so nothing has to be pushed first.
+
+```sh
+docker buildx bake --load                 # every image as dispatch-ops/<name>:dev
+docker buildx bake ees --load             # runner-base and the starter EEs
+docker buildx bake --print                # what would be built, with tags
+make publish-images IMAGE_REPO=registry.example.com/dispatch-ops PUBLISH_TAGS="1.4.0 1.4 latest"
+make dist CHART_VERSION=1.4.0             # the release assets, in dist/
+```
+
+`make publish-images` pushes every image for amd64 and arm64 to your own
+registry, for mirrors or forks. The version built into the binaries comes
+from `git describe`. The Go and UI builds run on the build platform and
+cross-compile, so arm64 images don't build under emulation.
+
+`make docker` still builds the server and operator alone, as
+`dispatch-ops:<version>` and `dispatch-ops-operator:<version>`, and
+`make images` the EEs for the dev cluster.
 
 The server image serves health probes at `/healthz` (liveness) and `/readyz`
 (checks the database). To try it outside Kubernetes:
@@ -408,3 +461,4 @@ docker run --rm -e DISPATCH_DATABASE_URL=... -e DISPATCH_ENCRYPTION_KEY=... \
 | `images` / `kind-load` | Build the EE images / and load them into kind |
 | `migrate` / `migrate-down` / `admin` | Database and user commands on the host |
 | `build` / `docker` / `runner` / `publish-images` | Binaries and images |
+| `chart` / `dist` | Package the Helm chart / all release assets, in `dist/` |

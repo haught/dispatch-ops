@@ -18,9 +18,10 @@ need to. For anything else, add `RUN` steps to the `Dockerfile` before its final
 ## Set up
 
 1. Create a repository from this directory.
-2. In `Dockerfile`, set `IMAGE_REPO` to where your Dispatch Ops images are
-   published, and pin `IMAGE_TAG` to the release your server runs. Update the
-   `# renovate:` line to match.
+2. In `Dockerfile`, pin `IMAGE_TAG` to the release your server runs.
+   `IMAGE_REPO` points at the published starter EEs
+   (`ghcr.io/haught/dispatch-ops`); change it, and the `# renovate:` line to
+   match, if you use a mirror.
 3. Edit the three files, and keep them even when they list nothing.
 4. Push. `.github/workflows/build.yml` builds the image, runs
    `dispatch-runner selftest` in it, and pushes it to

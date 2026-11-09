@@ -152,7 +152,7 @@ finished Kubernetes Jobs after a TTL (1 hour by default).
 |---|---|
 | **Kubernetes** | A cluster you can install a CRD and a cluster-scoped operator into. Job pods run in a namespace you choose. |
 | **PostgreSQL** | 15 or later. Use an external, backed-up database for production. The operator can run one for you (`postgres:17` on a 10 Gi PersistentVolume by default), but it has no backups or replication. |
-| **Container registry** | One your cluster can pull from, holding the server, operator and execution environment images. The Helm chart's defaults are the unqualified names `dispatch-ops` and `dispatch-ops-operator`; build and push them to your registry (see [Building images and releases](DEVELOP.md#building-images-and-releases)) and set `image.repository` and `serverImage.repository`. |
+| **Container registry** | Access to `ghcr.io`, where releases publish the server, operator, runner and starter execution environment images (`ghcr.io/haught/dispatch-ops/<name>`, amd64 and arm64) that the Helm chart uses by default. Without it, mirror them, or build your own (see [Building images and releases](DEVELOP.md#building-images-and-releases)), into a registry your cluster can pull from and set `image.repository` and `serverImage.repository`. Your own execution environments go in a registry too. |
 | **Ingress** | An ingress controller and a DNS name for the UI and API. The API server speaks HTTPS to the ingress controller too. |
 | **TLS certificate** | Optional. Without one, the operator generates a self-signed certificate for the API server. cert-manager works well. |
 | **OIDC provider** | Optional. Any provider that supports the authorization code flow with PKCE (Keycloak, Entra ID, Okta, Google and so on). |
@@ -193,12 +193,25 @@ and to everything your playbooks touch.
 
 ### 1. Install the operator
 
+Each [release](https://github.com/haught/dispatch-ops/releases) publishes the
+chart as an OCI artifact on GHCR and in a Helm repository. Install it from
+either, choosing a version from the releases page:
+
 ```sh
-helm install dispatch-ops-operator deploy/helm/dispatch-ops-operator \
-  --namespace dispatch-ops-system --create-namespace \
-  --set image.repository=registry.example.com/dispatch-ops-operator \
-  --set serverImage.repository=registry.example.com/dispatch-ops
+helm install dispatch-ops-operator \
+  oci://ghcr.io/haught/dispatch-ops/charts/dispatch-ops-operator --version <version> \
+  --namespace dispatch-ops-system --create-namespace
 ```
+
+```sh
+helm repo add dispatch-ops https://haught.github.io/dispatch-ops
+helm install dispatch-ops-operator dispatch-ops/dispatch-ops-operator --version <version> \
+  --namespace dispatch-ops-system --create-namespace
+```
+
+The chart runs the images of its own version from
+`ghcr.io/haught/dispatch-ops`. To use a registry mirror, add
+`--set image.repository=registry.example.com/dispatch-ops/operator --set serverImage.repository=registry.example.com/dispatch-ops/server`.
 
 The chart installs the `DispatchOps` CRD (group `dispatch-ops.io`, short name
 `dops`). The CRD is kept when the chart is uninstalled, so installations
@@ -239,10 +252,6 @@ The chart can also create the installation and its Secrets from the
 
 ```yaml
 # lab-values.yaml
-serverImage:
-  repository: registry.lab.example/dispatch-ops
-image:
-  repository: registry.lab.example/dispatch-ops-operator
 installation:
   enabled: true
   namespace: dispatch-ops
@@ -263,7 +272,8 @@ installation:
 ```
 
 ```sh
-helm upgrade --install dispatch-ops-operator deploy/helm/dispatch-ops-operator \
+helm upgrade --install dispatch-ops-operator \
+  oci://ghcr.io/haught/dispatch-ops/charts/dispatch-ops-operator --version <version> \
   --namespace dispatch-ops-system --create-namespace -f lab-values.yaml
 ```
 
@@ -654,7 +664,8 @@ the `haught.akips.akips_inventory` plugin:
 An execution environment is an image whose entrypoint is `dispatch-runner`
 and that runs as a numeric non-root user. Register it by name and image on
 the *Execution environments* page, with a registry credential if it is
-private. The starter images are:
+private. The starter images, published with each release as
+`ghcr.io/haught/dispatch-ops/<name>:<version>`, are:
 
 - `ee-shell`: bash, curl, jq, git and ssh.
 - `ee-python`: Python in a virtualenv on `PATH`, with requests and PyYAML.
@@ -675,7 +686,7 @@ There are three ways to get what your jobs need, simplest first:
    `dispatch-ee-install`, which puts those files in the right places:
 
    ```dockerfile
-   FROM ghcr.io/<org>/dispatch-ops/ee-ansible:1.4
+   FROM ghcr.io/haught/dispatch-ops/ee-ansible:1.4
    USER root
    COPY packages.txt requirements.txt requirements.yml /tmp/ee/
    RUN dispatch-ee-install /tmp/ee && rm -rf /tmp/ee
@@ -687,7 +698,7 @@ There are three ways to get what your jobs need, simplest first:
 
    ```dockerfile
    FROM registry.example.com/hardened/python:3.13
-   COPY --from=ghcr.io/<org>/dispatch-ops/runner:1.4 /dispatch-runner /usr/local/bin/dispatch-runner
+   COPY --from=ghcr.io/haught/dispatch-ops/runner:1.4 /dispatch-runner /usr/local/bin/dispatch-runner
    USER 1000:1000
    ENTRYPOINT ["/usr/local/bin/dispatch-runner"]
    ```

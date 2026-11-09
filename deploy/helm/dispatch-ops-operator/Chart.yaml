@@ -3,6 +3,13 @@ name: dispatch-ops-operator
 description: Installs the Dispatch Ops operator, which runs Dispatch Ops from DispatchOps resources.
 type: application
 version: 0.1.0
-# The operator and server image tag. Development builds use "dev".
+# The operator and server image tag. Releases set this and version to the
+# release version when packaging (`make chart`); development builds use "dev".
 appVersion: dev
 kubeVersion: ">=1.30.0-0"
+home: https://github.com/haught/dispatch-ops
+sources:
+  - https://github.com/haught/dispatch-ops
+maintainers:
+  - name: Matt Haught
+    url: https://github.com/haught

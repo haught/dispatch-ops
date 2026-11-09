@@ -39,7 +39,7 @@ func main() {
 		watchNamespace string
 		showVersion    bool
 	)
-	flag.StringVar(&serverImage, "server-image", "dispatch-ops:"+version,
+	flag.StringVar(&serverImage, "server-image", "ghcr.io/haught/dispatch-ops/server:"+version,
 		"dispatch-ops server image for DispatchOps resources that don't name one")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", `metrics address; "0" turns metrics off`)
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe address")

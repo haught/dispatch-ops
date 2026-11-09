@@ -138,8 +138,9 @@ LOCAL_EES := $(notdir $(patsubst %/Dockerfile,%,$(wildcard images/local/*/Docker
 # What `make publish-images` pushes: each tag, for each platform.
 PUBLISH_TAGS ?= $(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
-publish_tags = $(foreach t,$(PUBLISH_TAGS),-t $(IMAGE_REPO)/$(1):$(t))
-BUILDX := docker buildx build --push --platform $(PLATFORMS)
+comma := ,
+empty :=
+space := $(empty) $(empty)
 
 .PHONY: images
 images: ## Build the runner images, the starter EEs and any EEs in images/local
@@ -160,13 +161,12 @@ kind-load: images ## Build the images and load them into the kind cluster
 		$(foreach ee,$(LOCAL_EES),$(IMAGE_REPO)/local-$(ee):$(IMAGE_TAG))
 
 .PHONY: publish-images
-publish-images: ## Push multi-platform runner, runner-base and starter EEs (IMAGE_REPO=ghcr.io/<org>/dispatch-ops PUBLISH_TAGS="1.4.0 1.4 latest")
+publish-images: ## Push every image (docker-bake.hcl), multi-platform (IMAGE_REPO=ghcr.io/<org>/dispatch-ops PUBLISH_TAGS="1.4.0 1.4 latest")
 	@if [ "$(IMAGE_REPO)" = dispatch-ops ]; then \
 		echo "Set IMAGE_REPO to the registry to push to, e.g. IMAGE_REPO=ghcr.io/<org>/dispatch-ops"; exit 1; fi
-	$(BUILDX) -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) --target runner $(call publish_tags,runner) .
-	$(BUILDX) -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) $(call publish_tags,runner-base) .
-	$(foreach ee,$(EES),$(BUILDX) --build-arg RUNNER_BASE=$(IMAGE_REPO)/runner-base:$(firstword $(PUBLISH_TAGS)) \
-		$(call publish_tags,$(ee)) images/$(ee) &&) true
+	REGISTRY=$(IMAGE_REPO) TAGS="$(subst $(space),$(comma),$(strip $(PUBLISH_TAGS)))" \
+		VERSION=$(VERSION) REVISION=$$(git rev-parse HEAD) PLATFORMS=$(PLATFORMS) \
+		docker buildx bake --push
 
 .PHONY: runner
 runner: ## Build static dispatch-runner binaries (linux amd64/arm64) for custom EE images
@@ -208,3 +208,20 @@ docker: ## Build the server and operator container images
 helm-lint: ## Lint the operator's Helm chart
 	helm lint $(CHART)
 	helm lint $(CHART) -f $(CHART)/ci/installation-values.yaml
+
+# --- Release -----------------------------------------------------------------
+
+# The chart version for `make chart`: the git version without its leading v.
+CHART_VERSION ?= $(patsubst v%,%,$(VERSION))
+
+.PHONY: chart
+chart: ## Package the operator's Helm chart into dist/ as CHART_VERSION (also its appVersion: the image tag)
+	helm package $(CHART) --version $(CHART_VERSION) --app-version $(CHART_VERSION) -d dist
+
+.PHONY: dist
+dist: chart ## Release assets in dist/: dispatch-runner binaries, the chart and SHA256SUMS
+	for arch in amd64 arm64; do \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o dist/dispatch-runner-linux-$$arch ./cmd/dispatch-runner || exit 1; \
+	done
+	cd dist && sha256sum dispatch-runner-linux-* dispatch-ops-operator-$(CHART_VERSION).tgz > SHA256SUMS

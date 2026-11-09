@@ -111,7 +111,13 @@ local_resource(
 
 # --- Operator ------------------------------------------------------------------
 
-k8s_yaml(helm(CHART, name='dispatch-ops-operator', namespace=OPERATOR_NAMESPACE, set=['logLevel=debug']))
+k8s_yaml(helm(CHART, name='dispatch-ops-operator', namespace=OPERATOR_NAMESPACE, set=[
+    'logLevel=debug',
+    # The chart defaults to the published GHCR images; Tilt swaps in the
+    # images it builds by these local names.
+    'image.repository=dispatch-ops-operator',
+    'serverImage.repository=dispatch-ops',
+]))
 k8s_resource(
     'dispatch-ops-operator',
     objects=[

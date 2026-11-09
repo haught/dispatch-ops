@@ -1,5 +1,6 @@
 .git
 bin
+dist
 .env
 web/node_modules
 web/.svelte-kit

@@ -1,0 +1,148 @@
+# Publishes a release when a vX.Y.Z tag is pushed:
+#
+#   images   every image to ghcr.io/<owner>/<repo>/<name> for amd64 and arm64,
+#            tagged X.Y.Z, X.Y and latest (a prerelease, vX.Y.Z-rc.1, only
+#            gets its own tag)
+#   release  a GitHub Release with the dispatch-runner binaries, the Helm chart
+#            and SHA256SUMS; the chart pushed to oci://ghcr.io/<owner>/<repo>/charts;
+#            and the chart added to the Helm repository index on gh-pages
+#
+# Cut a release with: git tag v1.2.3 && git push origin v1.2.3
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# One release at a time, so gh-pages index updates don't race.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository }}
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: version
+        name: Version and tags
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$GITHUB_REF_NAME is not a vX.Y.Z or vX.Y.Z-pre tag"
+            exit 1
+          fi
+          if [[ "$version" == *-* ]]; then
+            tags="$version"; prerelease=true
+          else
+            tags="$version,${version%.*},latest"; prerelease=false
+          fi
+          {
+            echo "version=$version"
+            echo "tags=$tags"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing $REGISTRY/*:{$tags}"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/bake-action@v6
+        env:
+          TAGS: ${{ steps.version.outputs.tags }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REVISION: ${{ github.sha }}
+          PLATFORMS: linux/amd64,linux/arm64
+          GHA_CACHE: "1"
+        with:
+          source: .
+          push: true
+          provenance: mode=max
+          sbom: true
+
+  release:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.images.outputs.version }}
+      PRERELEASE: ${{ needs.images.outputs.prerelease }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4
+
+      - name: Build release assets
+        run: make dist VERSION="$VERSION" CHART_VERSION="$VERSION"
+
+      - name: GitHub Release
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            flags=()
+            if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+              --title "$GITHUB_REF_NAME" "${flags[@]}" dist/*
+          fi
+
+      - name: Push the chart to GHCR
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "dist/dispatch-ops-operator-$VERSION.tgz" "oci://$REGISTRY/charts"
+
+      # The Helm repository (https://<owner>.github.io/<repo>) is only
+      # index.yaml on the gh-pages branch; chart downloads come from the
+      # GitHub Release.
+      - name: Update the Helm repository index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch --depth=1 origin gh-pages
+            git worktree add pages FETCH_HEAD
+          else
+            git worktree add --orphan -b gh-pages pages
+          fi
+
+          mkdir -p "$RUNNER_TEMP/chart"
+          cp "dist/dispatch-ops-operator-$VERSION.tgz" "$RUNNER_TEMP/chart/"
+          merge=()
+          if [ -f pages/index.yaml ]; then merge=(--merge pages/index.yaml); fi
+          helm repo index "$RUNNER_TEMP/chart" "${merge[@]}" \
+            --url "https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME"
+          cp "$RUNNER_TEMP/chart/index.yaml" pages/index.yaml
+          touch pages/.nojekyll
+
+          cd pages
+          git add index.yaml .nojekyll
+          if git diff --cached --quiet; then
+            echo "index.yaml already lists $VERSION"
+          else
+            git commit -m "dispatch-ops-operator $VERSION"
+            git push origin HEAD:gh-pages
+          fi

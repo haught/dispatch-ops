@@ -1,6 +1,6 @@
 # The operator image.
 image:
-  repository: dispatch-ops-operator
+  repository: ghcr.io/haught/dispatch-ops/operator
   # Defaults to the chart's appVersion.
   tag: ""
   pullPolicy: IfNotPresent
@@ -8,7 +8,7 @@ image:
 # The dispatch-ops server image that DispatchOps resources without
 # spec.image run. Upgrading the chart upgrades them to its version.
 serverImage:
-  repository: dispatch-ops
+  repository: ghcr.io/haught/dispatch-ops/server
   # Defaults to the chart's appVersion.
   tag: ""
 
