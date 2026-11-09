@@ -80,3 +80,24 @@ export function parseArgv(text: string): string[] {
 export function fmtSeconds(seconds: number): string {
 	return fmtDuration(new Date(0).toISOString(), new Date(seconds * 1000).toISOString());
 }
+
+/** How long ago (or, for a future date, how soon) a date is, e.g. "5m ago" or "in 2h". */
+export function fmtRelative(date: string | null | undefined, now = Date.now()): string {
+	if (!date) return '—';
+	const diff = new Date(date).getTime() - now;
+	const s = Math.round(Math.abs(diff) / 1000);
+	let text: string;
+	if (s < 45) text = `${s}s`;
+	else if (s < 3600) text = `${Math.round(s / 60)}m`;
+	else if (s < 86400) text = `${Math.round(s / 3600)}h`;
+	else text = `${Math.round(s / 86400)}d`;
+	if (s < 5) return 'just now';
+	return diff < 0 ? `${text} ago` : `in ${text}`;
+}
+
+/** A 0–1 ratio as a percentage, e.g. "97.5%", or a dash. */
+export function fmtPercent(ratio: number | null | undefined): string {
+	if (ratio == null) return '—';
+	const pct = ratio * 100;
+	return `${pct >= 99.95 || pct === 0 ? pct.toFixed(0) : pct.toFixed(1)}%`;
+}

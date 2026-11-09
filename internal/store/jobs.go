@@ -279,15 +279,23 @@ func (s *Store) ListJobs(ctx context.Context, f JobFilter, page Page) ([]Job, in
 	if f.ReadableBy != nil {
 		q.args = append(q.args, *f.ReadableBy)
 		n := strconv.Itoa(len(q.args))
-		conds = append(conds, `(j.launched_by = $`+n+` OR EXISTS (SELECT 1 FROM user_roles r
-			WHERE r.user_id = $`+n+` AND r.resource_type = 'job_template'
-				AND (r.resource_id IS NULL OR r.resource_id = j.job_template_id))
-			OR (j.sync_inventory_id IS NOT NULL AND EXISTS (SELECT 1 FROM user_roles r
-			WHERE r.user_id = $`+n+` AND r.resource_type = 'inventory'
-				AND (r.resource_id IS NULL OR r.resource_id = j.sync_inventory_id))))`)
+		conds = append(conds, jobReadableCond("j", "$"+n))
 	}
 	q.where = strings.Join(conds, " AND ")
 	return list(ctx, s.pool, q, page, scanJob)
+}
+
+// jobReadableCond is the SQL condition that a user may see the job aliased
+// as alias: they launched it, hold a role on its template, or hold a role
+// on the inventory it syncs. userParam is the placeholder for the user's ID.
+func jobReadableCond(alias, userParam string) string {
+	j, u := alias, userParam
+	return `(` + j + `.launched_by = ` + u + ` OR EXISTS (SELECT 1 FROM user_roles r
+			WHERE r.user_id = ` + u + ` AND r.resource_type = 'job_template'
+				AND (r.resource_id IS NULL OR r.resource_id = ` + j + `.job_template_id))
+			OR (` + j + `.sync_inventory_id IS NOT NULL AND EXISTS (SELECT 1 FROM user_roles r
+			WHERE r.user_id = ` + u + ` AND r.resource_type = 'inventory'
+				AND (r.resource_id IS NULL OR r.resource_id = ` + j + `.sync_inventory_id))))`
 }
 
 // CancelJob cancels a pending job at once, or asks a started job's runner to

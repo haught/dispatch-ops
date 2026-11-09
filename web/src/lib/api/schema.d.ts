@@ -21,6 +21,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Dashboard statistics
+         * @description Job counts, durations and trends over a window, counted over the jobs
+         *     the caller may see. `queue` and `notifications` are system-wide, so
+         *     they are only filled in for system administrators and auditors.
+         */
+        get: operations["getStats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/login": {
         parameters: {
             query?: never;
@@ -1326,6 +1348,133 @@ export interface components {
             database: "ok" | "unavailable";
             version?: string;
         };
+        /**
+         * @description How far back statistics look, ending now.
+         * @default 7d
+         * @enum {string}
+         */
+        StatsWindow: "24h" | "7d" | "30d";
+        DashboardStats: {
+            window: components["schemas"]["StatsWindow"];
+            /**
+             * @description The width of each `series` bucket
+             * @enum {string}
+             */
+            bucket: "hour" | "day";
+            totals: components["schemas"]["JobTotals"];
+            previousTotals: components["schemas"]["JobTotals"];
+            /** @description Jobs created in each bucket of the window, oldest first. Empty buckets are included. */
+            series: components["schemas"]["JobSeriesBucket"][];
+            /** @description The most-run job templates in the window (up to 10) */
+            templates: components["schemas"]["TemplateStats"][];
+            /** @description The hosts that failed or were unreachable in the most jobs in the window (up to 10) */
+            problemHosts: components["schemas"]["ProblemHost"][];
+            /** @description Every inventory source the caller may see, least recently synced first */
+            inventorySyncs: components["schemas"]["InventorySyncHealth"][];
+            queue?: components["schemas"]["QueueStats"] | null;
+            notifications?: components["schemas"]["NotificationStats"] | null;
+        };
+        /**
+         * @description Jobs created in a window. Durations and queue waits are over the
+         *     jobs that started (and, for durations, finished); they are null if
+         *     there were none.
+         */
+        JobTotals: {
+            total: number;
+            successful: number;
+            failed: number;
+            error: number;
+            canceled: number;
+            /** @description Jobs that are pending, waiting or running */
+            active: number;
+            /** @description successful / (successful + failed + error), from 0 to 1; null if none finished that way */
+            successRate?: number | null;
+            p50DurationSeconds?: number | null;
+            p95DurationSeconds?: number | null;
+            /** @description Median time from creation to start */
+            p50QueueWaitSeconds?: number | null;
+        };
+        JobSeriesBucket: {
+            /** Format: date-time */
+            start: string;
+            successful: number;
+            failed: number;
+            error: number;
+            canceled: number;
+            active: number;
+        };
+        TemplateStats: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            runs: number;
+            /** @description Runs that ended failed or error */
+            failures: number;
+            p50DurationSeconds?: number | null;
+            /** @description The statuses of the template's last 10 jobs (any age), newest first */
+            recent: components["schemas"]["JobStatus"][];
+        };
+        ProblemHost: {
+            hostName: string;
+            /** @description Jobs in which a task failed on the host (failures with ignore_errors don't count) */
+            failedJobs: number;
+            /** @description Jobs in which the host was unreachable */
+            unreachableJobs: number;
+            /**
+             * Format: date-time
+             * @description When the host last failed or was unreachable
+             */
+            lastSeenAt: string;
+            /**
+             * Format: uuid
+             * @description The job it last failed or was unreachable in
+             */
+            lastJobId: string;
+        };
+        InventorySyncHealth: {
+            /** Format: uuid */
+            inventoryId: string;
+            inventoryName: string;
+            /** Format: date-time */
+            lastSyncedAt?: string | null;
+            /** Format: uuid */
+            lastJobId?: string | null;
+            lastJobStatus?: components["schemas"]["JobStatus"] | null;
+            /** Format: date-time */
+            lastJobFinishedAt?: string | null;
+        };
+        QueueStats: {
+            pending: number;
+            waiting: number;
+            running: number;
+            /** @description How long the oldest pending job has waited (0 if none) */
+            oldestPendingSeconds: number;
+            notificationsPending: number;
+        };
+        /** @description Notification deliveries created in the window */
+        NotificationStats: {
+            byKind: components["schemas"]["NotificationKindStats"][];
+            /** @description The latest failed deliveries (up to 5) */
+            recentFailures: components["schemas"]["NotificationFailure"][];
+        };
+        NotificationKindStats: {
+            kind: components["schemas"]["NotificationKind"];
+            sent: number;
+            failed: number;
+            pending: number;
+        };
+        NotificationFailure: {
+            /** Format: uuid */
+            targetId: string;
+            targetName: string;
+            kind: components["schemas"]["NotificationKind"];
+            /** Format: uuid */
+            jobId: string;
+            event: components["schemas"]["NotificationEvent"];
+            error: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
         LoginRequest: {
             username: string;
             password: string;
@@ -2531,6 +2680,29 @@ export interface operations {
                     "application/json": components["schemas"]["Health"];
                 };
             };
+        };
+    };
+    getStats: {
+        parameters: {
+            query?: {
+                window?: components["schemas"]["StatsWindow"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Statistics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardStats"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
         };
     };
     login: {

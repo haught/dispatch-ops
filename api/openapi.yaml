@@ -101,6 +101,39 @@ paths:
               schema:
                 $ref: "#/components/schemas/Health"
 
+  /api/v1/stats:
+    get:
+      operationId: getStats
+      tags: [system]
+      summary: Dashboard statistics
+      description: |
+        Job counts, durations and trends over a window, counted over the jobs
+        the caller may see. `queue` and `notifications` are system-wide, so
+        they are only filled in for system administrators and auditors.
+      parameters:
+        - name: window
+          in: query
+          schema:
+            $ref: "#/components/schemas/StatsWindow"
+        - name: tz
+          in: query
+          description: IANA time zone whose hours and days `series` buckets follow (default UTC)
+          schema:
+            type: string
+            maxLength: 64
+            example: America/New_York
+      responses:
+        "200":
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /api/v1/auth/login:
     post:
       operationId: login
@@ -2734,6 +2767,246 @@ components:
           enum: [ok, unavailable]
         version:
           type: string
+
+    StatsWindow:
+      type: string
+      description: How far back statistics look, ending now.
+      enum: ["24h", "7d", "30d"]
+      default: "7d"
+
+    DashboardStats:
+      type: object
+      required:
+        [window, bucket, totals, previousTotals, series, templates, problemHosts, inventorySyncs]
+      properties:
+        window:
+          $ref: "#/components/schemas/StatsWindow"
+        bucket:
+          type: string
+          enum: [hour, day]
+          description: The width of each `series` bucket
+        totals:
+          $ref: "#/components/schemas/JobTotals"
+        previousTotals:
+          $ref: "#/components/schemas/JobTotals"
+        series:
+          type: array
+          description: Jobs created in each bucket of the window, oldest first. Empty buckets are included.
+          items:
+            $ref: "#/components/schemas/JobSeriesBucket"
+        templates:
+          type: array
+          description: The most-run job templates in the window (up to 20), most first
+          items:
+            $ref: "#/components/schemas/TemplateStats"
+        problemHosts:
+          type: array
+          description: The hosts that failed or were unreachable in the most jobs in the window (up to 10)
+          items:
+            $ref: "#/components/schemas/ProblemHost"
+        inventorySyncs:
+          type: array
+          description: Every inventory source the caller may see, least recently synced first
+          items:
+            $ref: "#/components/schemas/InventorySyncHealth"
+        queue:
+          allOf:
+            - $ref: "#/components/schemas/QueueStats"
+          nullable: true
+        notifications:
+          allOf:
+            - $ref: "#/components/schemas/NotificationStats"
+          nullable: true
+
+    JobTotals:
+      type: object
+      description: |
+        Jobs created in a window. Durations and queue waits are over the
+        jobs that started (and, for durations, finished); they are null if
+        there were none.
+      required: [total, successful, failed, error, canceled, active]
+      properties:
+        total:
+          type: integer
+        successful:
+          type: integer
+        failed:
+          type: integer
+        error:
+          type: integer
+        canceled:
+          type: integer
+        active:
+          type: integer
+          description: Jobs that are pending, waiting or running
+        successRate:
+          type: number
+          nullable: true
+          description: successful / (successful + failed + error), from 0 to 1; null if none finished that way
+        p50DurationSeconds:
+          type: number
+          nullable: true
+        p95DurationSeconds:
+          type: number
+          nullable: true
+        p50QueueWaitSeconds:
+          type: number
+          nullable: true
+          description: Median time from creation to start
+
+    JobSeriesBucket:
+      type: object
+      required: [start, successful, failed, error, canceled, active]
+      properties:
+        start:
+          type: string
+          format: date-time
+        successful:
+          type: integer
+        failed:
+          type: integer
+        error:
+          type: integer
+        canceled:
+          type: integer
+        active:
+          type: integer
+
+    TemplateStats:
+      type: object
+      required: [id, name, runs, failures, recent]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        runs:
+          type: integer
+        failures:
+          type: integer
+          description: Runs that ended failed or error
+        p50DurationSeconds:
+          type: number
+          nullable: true
+        recent:
+          type: array
+          description: The statuses of the template's last 10 jobs (any age), newest first
+          items:
+            $ref: "#/components/schemas/JobStatus"
+
+    ProblemHost:
+      type: object
+      required: [hostName, failedJobs, unreachableJobs, lastSeenAt, lastJobId]
+      properties:
+        hostName:
+          type: string
+        failedJobs:
+          type: integer
+          description: Jobs in which a task failed on the host (failures with ignore_errors don't count)
+        unreachableJobs:
+          type: integer
+          description: Jobs in which the host was unreachable
+        lastSeenAt:
+          type: string
+          format: date-time
+          description: When the host last failed or was unreachable
+        lastJobId:
+          type: string
+          format: uuid
+          description: The job it last failed or was unreachable in
+
+    InventorySyncHealth:
+      type: object
+      required: [inventoryId, inventoryName]
+      properties:
+        inventoryId:
+          type: string
+          format: uuid
+        inventoryName:
+          type: string
+        lastSyncedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastJobId:
+          type: string
+          format: uuid
+          nullable: true
+        lastJobStatus:
+          allOf:
+            - $ref: "#/components/schemas/JobStatus"
+          nullable: true
+        lastJobFinishedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    QueueStats:
+      type: object
+      required: [pending, waiting, running, oldestPendingSeconds, notificationsPending]
+      properties:
+        pending:
+          type: integer
+        waiting:
+          type: integer
+        running:
+          type: integer
+        oldestPendingSeconds:
+          type: number
+          description: How long the oldest pending job has waited (0 if none)
+        notificationsPending:
+          type: integer
+
+    NotificationStats:
+      type: object
+      description: Notification deliveries created in the window
+      required: [byKind, recentFailures]
+      properties:
+        byKind:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationKindStats"
+        recentFailures:
+          type: array
+          description: The latest failed deliveries (up to 5)
+          items:
+            $ref: "#/components/schemas/NotificationFailure"
+
+    NotificationKindStats:
+      type: object
+      required: [kind, sent, failed, pending]
+      properties:
+        kind:
+          $ref: "#/components/schemas/NotificationKind"
+        sent:
+          type: integer
+        failed:
+          type: integer
+        pending:
+          type: integer
+
+    NotificationFailure:
+      type: object
+      required: [targetId, targetName, kind, jobId, event, error, createdAt]
+      properties:
+        targetId:
+          type: string
+          format: uuid
+        targetName:
+          type: string
+        kind:
+          $ref: "#/components/schemas/NotificationKind"
+        jobId:
+          type: string
+          format: uuid
+        event:
+          $ref: "#/components/schemas/NotificationEvent"
+        error:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
 
     LoginRequest:
       type: object

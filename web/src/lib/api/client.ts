@@ -41,6 +41,15 @@ export type CredentialField = components['schemas']['CredentialField'];
 export type ExecutionEnvironment = components['schemas']['ExecutionEnvironment'];
 export type PullPolicy = components['schemas']['PullPolicy'];
 export type Project = components['schemas']['Project'];
+export type DashboardStats = components['schemas']['DashboardStats'];
+export type StatsWindow = components['schemas']['StatsWindow'];
+export type JobTotals = components['schemas']['JobTotals'];
+export type JobSeriesBucket = components['schemas']['JobSeriesBucket'];
+export type TemplateStats = components['schemas']['TemplateStats'];
+export type ProblemHost = components['schemas']['ProblemHost'];
+export type InventorySyncHealth = components['schemas']['InventorySyncHealth'];
+export type QueueStats = components['schemas']['QueueStats'];
+export type NotificationStats = components['schemas']['NotificationStats'];
 
 /** Image pull policies, as Kubernetes names them. */
 export const pullPolicies: PullPolicy[] = ['IfNotPresent', 'Always', 'Never'];

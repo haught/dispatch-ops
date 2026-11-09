@@ -170,10 +170,18 @@ k8s_resource(
 )
 
 # kubectl port-forward ends when its pod goes away, as on every rollout, so
-# restart it.
+# restart it. It listens on an internal port behind socat: if 8443 itself
+# stopped listening during the restart, VS Code would drop its forward of 8443
+# from the dev container to the host and not bring it back, leaving the browser
+# with "connection refused" until the port was forwarded again by hand.
 local_resource(
     'api-port-forward',
-    serve_cmd='while true; do kubectl --context %s -n %s port-forward svc/dispatch-ops-api 8443:8443; sleep 2; done' % (CONTEXT, NAMESPACE),
+    serve_cmd=' '.join([
+        "trap 'kill 0' EXIT INT TERM;",
+        'socat TCP4-LISTEN:8443,bind=127.0.0.1,reuseaddr,fork TCP4:127.0.0.1:18443 &',
+        'socat TCP6-LISTEN:8443,bind=[::1],reuseaddr,fork TCP4:127.0.0.1:18443 &',
+        'while true; do kubectl --context %s -n %s port-forward --address 127.0.0.1 svc/dispatch-ops-api 18443:8443; sleep 2; done' % (CONTEXT, NAMESPACE),
+    ]),
     resource_deps=['dispatch-ops'],
     links=[link('https://localhost:8443', 'Dispatch Ops')],
     labels=['cluster'],
