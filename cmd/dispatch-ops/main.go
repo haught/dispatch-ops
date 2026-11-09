@@ -59,7 +59,7 @@ Commands:
   gen-key                   Print a new random credential encryption key
   version                   Print the version
 
-Configuration is read from DISPATCH_* environment variables; see README.md.
+Configuration is read from DISPATCH_* environment variables; see docs/configuration.md.
 `
 
 func main() {

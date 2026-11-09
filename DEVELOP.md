@@ -1,7 +1,8 @@
 # Developing Dispatch Ops
 
 This guide is for people working on Dispatch Ops itself. For what the product
-does and how to run it in production, see [README.md](README.md).
+does and how to install it, see [README.md](README.md); for running and using
+it, see [docs/](docs/).
 
 - [Quickstart](#quickstart)
 - [The development loop](#the-development-loop)
@@ -14,6 +15,7 @@ does and how to run it in production, see [README.md](README.md).
 - [Using the API from the command line](#using-the-api-from-the-command-line)
 - [Building images and releases](#building-images-and-releases)
 - [Make targets](#make-targets)
+- [Documentation](#documentation)
 
 ## Quickstart
 
@@ -62,10 +64,10 @@ If you already have a Postgres container under another name, pass
 make setup-env
 ```
 
-This copies `.env.example` to `.env`. The defaults work with the container
-from step 2: the database URL points at `localhost:5432` with the user and
-password `dispatch`, and there is a development-only encryption key. Leave
-them as they are for now. Inside the dev container the Makefile rewrites
+This copies `.env.example` to `.env` and fills in a new random encryption
+key. The defaults work with the container from step 2: the database URL
+points at `localhost:5432` with the user and password `dispatch`. Leave them
+as they are for now. Inside the dev container the Makefile rewrites
 `localhost` to `host.docker.internal` for you.
 
 ### 4. Install dependencies
@@ -191,13 +193,7 @@ changes to the objects it created.
 Keep `DISPATCH_ENCRYPTION_KEY` for as long as you keep the database. If it
 changes, stored credentials can no longer be decrypted. To change it, move
 the old key to `DISPATCH_OLD_ENCRYPTION_KEYS` and set a new one.
-
-`make setup-env` generates the key. Older `.env.example` files shipped a
-fixed example key, which the server now refuses as the current key because
-it is public. If your `.env` still has it
-(`ZGV2LW9ubHktZGlzcGF0Y2gtb3BzLWtleS0zMmJ5dGU=`), move it to
-`DISPATCH_OLD_ENCRYPTION_KEYS` and set `DISPATCH_ENCRYPTION_KEY` to the output
-of `go run ./cmd/dispatch-ops gen-key`; existing credentials stay readable.
+`go run ./cmd/dispatch-ops gen-key` prints a new key.
 
 ### Single sign-on in development
 
@@ -205,7 +201,7 @@ Set `DISPATCH_OIDC_ISSUER`, `DISPATCH_OIDC_CLIENT_ID` and
 `DISPATCH_OIDC_CLIENT_SECRET` in `.env`, and register
 `https://localhost:8443/api/v1/auth/oidc/callback` as the client's redirect
 URI. Tilt re-applies the installation when `.env` changes. See
-[Single sign-on](README.md#single-sign-on-oidc) for how users and groups are
+[Single sign-on](docs/user-guide.md#single-sign-on-oidc) for how users and groups are
 mapped.
 
 ### Running the binary on the host
@@ -270,6 +266,7 @@ Inside it:
 | `deploy/dev/` | kind cluster config, the dev `DispatchOps`, and the Dockerfiles Tilt builds from |
 | `deploy/helm/dispatch-ops-operator` | Helm chart that installs the operator and the CRD (`files/` is generated) |
 | `deploy/examples/` | A production-style `DispatchOps` |
+| `docs/` | Administration guide, user guide and configuration reference |
 | `web/` | SvelteKit / Svelte 5 single-page app, embedded into the server binary |
 | `Tiltfile` | The development loop |
 
@@ -337,9 +334,8 @@ Check any image with:
 docker run --rm <image> selftest
 ```
 
-It verifies that the image runs as a non-root user, has git and ssh, and, for
-Ansible images, the Ansible tools. It lists the collections, prints the runner
-protocol, and exits non-zero when the image can't run jobs.
+See [Execution environments](docs/user-guide.md#execution-environments) for
+what an image must provide.
 
 ### Runner protocol
 
@@ -439,7 +435,7 @@ registry, for mirrors or forks. The version built into the binaries comes
 from `git describe`. The Go and UI builds run on the build platform and
 cross-compile, so arm64 images don't build under emulation.
 
-`make docker` still builds the server and operator alone, as
+`make docker` builds the server and operator alone, as
 `dispatch-ops:<version>` and `dispatch-ops-operator:<version>`, and
 `make images` the EEs for the dev cluster.
 
@@ -470,3 +466,22 @@ docker run --rm -e DISPATCH_DATABASE_URL=... -e DISPATCH_ENCRYPTION_KEY=... \
 | `migrate` / `migrate-down` / `admin` | Database and user commands on the host |
 | `build` / `docker` / `runner` / `publish-images` | Binaries and images |
 | `chart` / `dist` | Package the Helm chart / all release assets, in `dist/` |
+
+## Documentation
+
+Keep the documentation describing the product as it is now, for its
+audience. It is not a changelog: don't describe what changed or how things
+used to work (release notes cover that), and update or remove text a change
+makes wrong.
+
+| File | Audience | Holds |
+|---|---|---|
+| [README.md](README.md) | Anyone evaluating or installing Dispatch Ops | What it is, requirements, quick start, the production checklist. Keep it short and link to `docs/` for detail |
+| [docs/administration.md](docs/administration.md) | Cluster and platform administrators | Architecture, security model, TLS, upgrades, backups, monitoring |
+| [docs/user-guide.md](docs/user-guide.md) | People using the UI or API | Access control, job types, projects, inventories, execution environments, schedules, notifications |
+| [docs/configuration.md](docs/configuration.md) | Anyone running the server without the operator | Environment variables and CLI commands |
+| `DEVELOP.md` | Contributors | Development setup, repository layout, tests, releases |
+
+Field-level detail of the `DispatchOps` resource belongs in the kubebuilder
+comments in `types.go` (shown by `kubectl explain`), and API detail in
+`api/openapi.yaml`.

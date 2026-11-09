@@ -1,5 +1,5 @@
 # A production-style Dispatch Ops installation. Create the Secrets it
-# names first; see README.md ("Installing on Kubernetes").
+# names first; see README.md ("Going to production").
 apiVersion: dispatch-ops.io/v1alpha1
 kind: DispatchOps
 metadata:
@@ -15,7 +15,7 @@ spec:
     # The API server serves HTTPS itself too (the ingress uses HTTPS to
     # reach it). Without this, the operator generates a self-signed
     # certificate; here a cert-manager Certificate keeps it renewed. See
-    # README.md ("TLS").
+    # docs/administration.md ("TLS").
     tls:
       secretName: dispatch-ops-api-tls
   taskManager:

@@ -21,7 +21,7 @@ replicaCount: 1
 # all namespaces, and the operator gets a ClusterRole that can read and
 # write every Secret and workload in the cluster. Set, it gets a Role in
 # each of these namespaces (and allowedJobNamespaces) instead, and nothing
-# cluster-wide; see README.md ("Operator permissions").
+# cluster-wide; see docs/administration.md ("Operator permissions").
 watchNamespaces: []
 
 # Namespaces any DispatchOps may run its jobs in (spec.taskManager

@@ -4,10 +4,10 @@ permission it grants the task manager in a job namespace (jobs, pods,
 secrets, leases), since Kubernetes only lets it grant those.
 
 With watchNamespaces empty, that is a ClusterRole for every namespace:
-effectively cluster-admin over Secrets and workloads (see README.md,
-"Operator permissions"). With watchNamespaces set, it is a Role in each
-watched namespace and each of allowedJobNamespaces, and nothing
-cluster-wide.
+effectively cluster-admin over Secrets and workloads (see
+docs/administration.md, "Operator permissions"). With watchNamespaces set,
+it is a Role in each watched namespace and each of allowedJobNamespaces,
+and nothing cluster-wide.
 */ -}}
 {{- define "dispatch-ops-operator.rules" -}}
 - apiGroups: [dispatch-ops.io]
