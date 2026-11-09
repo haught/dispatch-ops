@@ -29,6 +29,11 @@ func New(apiHandler http.Handler, st *store.Store, ui fs.FS, log *slog.Logger, o
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if len(o.trustedProxies) == 0 {
+		log.Warn("DISPATCH_TRUSTED_PROXIES is empty, so X-Forwarded-For is ignored: behind an ingress or load balancer, " +
+			"every client shares the proxy's address, and its failed sign-ins can lock out all password sign-ins. " +
+			"Set it to the proxy's addresses (never a range that includes job pods)")
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler)
 	mux.Handle("/runner/", apiHandler)
@@ -52,7 +57,7 @@ func New(apiHandler http.Handler, st *store.Store, ui fs.FS, log *slog.Logger, o
 
 	var h http.Handler = mux
 	h = limitBodyReadTime(o.bodyReadTimeout, h)
-	h = withClientIP(o.trustedProxies, h)
+	h = withClientIP(o.trustedProxies, log, h)
 	h = http.NewCrossOriginProtection().Handler(h)
 	h = securityHeaders(contentSecurityPolicy(ui), h)
 	h = recoverPanics(log, h)

@@ -94,9 +94,10 @@ pages (or `/api/v1/role-grants`):
   [below](#roles-that-amount-to-credential-access)), also needs `use` on all
   the credentials it keeps. Overriding the inventory at launch needs `use`
   on it.
-- A job can be seen by whoever launched it and by anyone with a role on its
-  template. It can be canceled by whoever launched it and by those with
-  `execute` on its template.
+- A job can be seen by anyone with a role on its template; launching it
+  grants nothing extra, so a launcher who loses every role on the template
+  can no longer see its jobs. It can be canceled by those with `execute` on
+  its template, and by whoever launched it while they can still see it.
 - An inventory's source is set, changed and synced by those with `admin` on
   the inventory (and `use` on the project and credentials they add, or on
   all its credentials when they change its project, path or execution
@@ -116,17 +117,20 @@ Grant these roles only to people you would also give the credentials to.
 
 | Role or permission | Can reach | Because |
 |---|---|---|
-| `admin` on a job template | Its credentials, once they hold `use` on them | It decides the command, playbook, arguments, extra vars, project, inventory and image. Changing any of these, or allowing `command`, `extraVars` or `inventory` to be overridden, needs `use` on all the template's credentials. Other changes (name, limit, tags, schedule) don't. |
+| `admin` on a job template | Its credentials, once they hold `use` on them | It decides the command, playbook, arguments, extra vars, project, inventory and image, the verbosity, tags, skipped tags and limit (tags and a limit can skip a playbook's guard tasks or plays), and which credentials the job gets (one credential's variables, like `VAULT_ADDR`, can decide where another's secrets, like `VAULT_TOKEN`, are sent). Changing any of these, adding or removing a credential, or allowing `command`, `extraVars`, `inventory`, `tags`, `skipTags` or `limit` to be overridden, needs `use` on all the credentials the template will have (not on those it removes). Other changes (name, description, timeout, schedule) don't. |
 | `execute` on a template that allows overriding `command` | Its credentials | The command is the launcher's. |
 | `execute` on a template that allows overriding `extraVars` | Possibly its credentials | Extra vars named `ansible_*` and any with Jinja (`{{`, `{%`, `{#`) are refused at launch, so they can't change how Ansible connects or read files. Ordinary variables still steer the playbook, which may be enough to send a secret somewhere, depending on the playbook. |
 | `execute` on a template that allows overriding `inventory`, plus `use` on an inventory they control | Its credentials | Host and group variables in their inventory (`ansible_ssh_common_args`, `ansible_host`, Jinja) decide where and how Ansible connects. |
-| `admin` on an inventory | The credentials of every template that uses it, including other teams' templates that hold only `use` on it | The same host and group variables. |
+| `admin` on an inventory | The credentials of every template that uses it, including other teams' templates that hold only `use` on it | The same host and group variables. Changing its source's project, path, image or credentials needs `use` on all the credentials the source will have. |
 | Push access to a project's repository, or to the repository of an inventory source | The credentials of every template and inventory source that uses the project | The repository is the playbook, script or inventory plugin that runs. |
 | `admin` on a project | The credentials of every template and inventory source that uses the project | It can change `scmUrl` and `scmRef`, so it picks the code that runs. Moving the project to another server (a different scheme, host or port) while keeping its `scm` credential needs `use` on that credential. |
 | `admin` on a credential | Its secrets, only by entering new ones | Changing where the secrets are sent (a registry's `server`, an API token's `url`) needs every secret entered again in the same change. |
 | `system_admin` | Everything | It manages execution environments, the images every job runs in. |
 
-Other safeguards: a `limit`, and a host name (which *Relaunch on failed
+Other safeguards: a job whose generic credentials set the same
+environment variable (compared ignoring case) is refused, and so is a
+template or inventory source that would get such credentials, rather than
+one silently overriding the other; a `limit`, and a host name (which *Relaunch on failed
 hosts* puts in one), can't name a file (`@path`), which Ansible would
 otherwise read and print into the job log; and the project's `scm` username
 and password are given only to the project's own server, not to submodules
@@ -138,7 +142,11 @@ Every change made through the API, every launch and cancel, and every
 sign-in is recorded with who made it, how they authenticated and when:
 creates with the new resource, deletes with the old one, and updates with
 the fields that changed. Secrets are never recorded; a credential update
-lists which inputs changed. System administrators and auditors can read it
+lists which inputs changed. The server also records, with no actor, when a
+sign-in limit starts refusing attempts (`login_throttled`, once per limit
+per throttle window, with the client address and, for a real account, the
+user), and when a schedule turns itself off because its owner may no longer
+launch it (an `update` of the schedule with the reason in `lastError`). System administrators and auditors can read it
 on the *Audit log* page or at `GET /api/v1/audit-log`.
 
 ## Job types
@@ -244,9 +252,11 @@ found, so an image can make a requirements file unnecessary.
 Generic credential names that the job's tools depend on are reserved and
 refused when the credential is saved: `PATH`, `HOME`, `USER`, `SHELL`, `PWD`,
 `LANG`, `TMPDIR`, `HOSTNAME`, and names starting with `DISPATCH_`,
-`ANSIBLE_`, `LD_`, `LC_`, `PYTHON`, `GIT_`, `SSH_` or `KUBERNETES_`. If two
-generic credentials on a job set the same name, the later one wins and the
-job log says so. This lets tools that read their settings from the
+`ANSIBLE_`, `LD_`, `LC_`, `PYTHON`, `GIT_`, `SSH_` or `KUBERNETES_`. Two
+generic credentials on a template or inventory source can't set the same
+name (compared ignoring case), since one would decide where the other's
+secrets go; if they come to (a credential edited later), the job fails
+before it runs, naming both. This lets tools that read their settings from the
 environment, such as Ansible inventory plugins, use a generic credential
 directly.
 

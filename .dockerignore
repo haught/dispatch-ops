@@ -5,3 +5,13 @@ dist
 web/node_modules
 web/.svelte-kit
 web/build
+# Not needed by any build (see the COPYs in Dockerfile and
+# images/runner-base/Dockerfile), and better kept out of build stages.
+SECURITY_REVIEW.md
+PLAN.md
+SPECS
+docs
+.claude
+.devcontainer
+.github
+images/local

@@ -106,6 +106,8 @@ The chart is also in a Helm repository:
 
 ```sh
 kubectl create namespace dispatch-ops
+# Jobs run only where Pod Security is enforced (job pods comply).
+kubectl label namespace dispatch-ops pod-security.kubernetes.io/enforce=restricted
 kubectl apply -f - <<'EOF'
 apiVersion: dispatch-ops.io/v1alpha1
 kind: DispatchOps
@@ -172,11 +174,23 @@ names first. In short:
 - **Provide and back up the encryption key** (`spec.encryptionKeySecret`).
   Without it, stored credentials can't be decrypted.
 - **Limit the operator** to the namespaces it manages, and **run jobs in a
-  separate namespace**. Install the chart with
-  `--set 'watchNamespaces={dispatch-ops}' --set 'allowedJobNamespaces={dispatch-jobs}'`
-  and set `spec.taskManager.jobNamespace`.
+  separate namespace**, one per installation, never shared. Install the
+  chart with
+  `--set 'watchNamespaces={dispatch-ops}' --set 'allowedJobNamespaces.dispatch-jobs={dispatch-ops}'`
+  (each job namespace maps to the namespaces whose `DispatchOps` may use
+  it, and must not be watched itself), label the job namespace
+  `pod-security.kubernetes.io/enforce=restricted` (the operator requires
+  it), and set `spec.taskManager.jobNamespace`. Each namespace hosts one
+  installation; see
+  [One installation per namespace](docs/administration.md#operator-permissions).
+- **Treat creating a `DispatchOps` as privileged.** It lets you create pods
+  in its job namespace, Ingresses with any host and annotations, and
+  `LoadBalancer` Services; see
+  [Operator permissions](docs/administration.md#operator-permissions).
 - **Expose it through an ingress** (`spec.api.ingress`) with a proper
-  certificate, and set `spec.externalURL` and `spec.api.trustedProxies`.
+  certificate, and set `spec.externalURL` and `spec.api.trustedProxies`
+  (the ingress controller pods' exact IPs, or a range only they use, such as
+  dedicated nodes' pod CIDRs; never a range that includes job pods).
 - **Set up single sign-on** (`spec.oidc`) and map provider groups to teams.
 - **Review who can change what jobs run.** Some roles are as good as the
   credentials a job uses; see

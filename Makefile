@@ -1,7 +1,20 @@
 # Dispatch Ops development tasks. Run `make help` for a list.
 
 -include .env
-export
+# .env's variables reach the environment only of the targets that run
+# dispatch-ops itself (DOTENV_TARGETS), not every recipe: npm, docker and
+# go test have no business with the encryption key or the database
+# password. Recipes that need one otherwise take it as a make variable.
+# That holds only for plain NAME=value lines: make reads .env as a
+# makefile, so a line written `export NAME=value` exports NAME to every
+# recipe. Leave `export` out of .env.
+DOTENV_VARS := $(shell sed -nE 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\1/p' .env 2>/dev/null)
+DOTENV_TARGETS := migrate migrate-down admin
+$(foreach v,$(DOTENV_VARS),$(eval $(DOTENV_TARGETS): export $(v) := $$($(v))))
+# The Vite dev server's proxy target, if .env sets it.
+ifdef DISPATCH_API_URL
+web-dev: export DISPATCH_API_URL := $(DISPATCH_API_URL)
+endif
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -111,6 +124,9 @@ kind-up: ## Create the kind cluster and the job namespace, and connect the dev c
 	@$(MAKE) --no-print-directory kind-join
 	@kubectl --context $(KUBE_CONTEXT) get namespace $(DISPATCH_JOB_NAMESPACE) >/dev/null 2>&1 \
 		|| kubectl --context $(KUBE_CONTEXT) create namespace $(DISPATCH_JOB_NAMESPACE)
+	@# The operator runs jobs only where Pod Security is enforced.
+	@kubectl --context $(KUBE_CONTEXT) label --overwrite namespace $(DISPATCH_JOB_NAMESPACE) \
+		pod-security.kubernetes.io/enforce=restricted >/dev/null
 
 .PHONY: kind-join
 kind-join: ## Join the kind network and point kubectl at the cluster (after rebuilding the dev container)
@@ -184,7 +200,8 @@ test: ## Run Go tests (DB tests are skipped unless DISPATCH_TEST_DATABASE_URL is
 
 .PHONY: test-db
 test-db: ## Run Go tests including DB tests, against dispatch_test* databases (see db-init)
-	DISPATCH_TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -count=1 ./...
+	@echo 'DISPATCH_TEST_DATABASE_URL=<DISPATCH_DATABASE_URL, _test database> go test -count=1 ./...'
+	@DISPATCH_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -count=1 ./...
 
 .PHONY: check
 check: ## Vet/format-check Go and type-check/lint the UI
@@ -201,6 +218,12 @@ docker: ## Build the server and operator container images
 helm-lint: ## Lint the operator's Helm chart
 	helm lint $(CHART)
 	helm lint $(CHART) -f $(CHART)/ci/installation-values.yaml
+	helm lint $(CHART) -f $(CHART)/ci/namespaced-values.yaml
+	@# A watched namespace must never be a job namespace too: the chart refuses.
+	@! helm template $(CHART) --set 'watchNamespaces={team-a,jobs-a}' --set 'allowedJobNamespaces.jobs-a={team-a}' \
+		>/dev/null 2>&1 || { echo 'the chart rendered a job namespace that is also watched'; exit 1; }
+	@! helm template $(CHART) --set 'allowedJobNamespaces={jobs-a}' >/dev/null 2>&1 \
+		|| { echo 'the chart rendered allowedJobNamespaces without the namespaces allowed to use them'; exit 1; }
 
 # --- Release -----------------------------------------------------------------
 

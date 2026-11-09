@@ -71,3 +71,46 @@ func TestCheckCurrentKeyRefusesPublishedDevKey(t *testing.T) {
 		t.Errorf("the published dev key as an old key: %v", err)
 	}
 }
+
+func TestDeriveSeparatesPurposeAndKeepsRotation(t *testing.T) {
+	oldKey, newKey := GenerateKey(), GenerateKey()
+	oldRing, err := NewKeyring(oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ring, err := NewKeyring(newKey, oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived, err := ring.Derive("test purpose v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if derived.CurrentKeyID() == ring.CurrentKeyID() {
+		t.Error("derived key has the master key's ID")
+	}
+
+	// What the derived keyring seals, the master keyring can't open, nor
+	// can a keyring derived for another purpose.
+	ct, id, err := derived.Encrypt([]byte("x"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ring.Decrypt(ct, id, nil); err == nil {
+		t.Error("master keyring opened a derived ciphertext")
+	}
+	other, _ := ring.Derive("other purpose v1")
+	if _, err := other.Decrypt(ct, id, nil); err == nil {
+		t.Error("another purpose's keyring opened it")
+	}
+	if pt, err := derived.Decrypt(ct, id, nil); err != nil || string(pt) != "x" {
+		t.Errorf("round trip = %q, %v", pt, err)
+	}
+
+	// Derivation is deterministic, and old keys still decrypt.
+	oldDerived, _ := oldRing.Derive("test purpose v1")
+	ct, id, _ = oldDerived.Encrypt([]byte("old"), nil)
+	if pt, err := derived.Decrypt(ct, id, nil); err != nil || string(pt) != "old" {
+		t.Errorf("derived from rotated key = %q, %v", pt, err)
+	}
+}

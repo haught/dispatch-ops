@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"dispatch-ops/internal/extravars"
 	"dispatch-ops/internal/hostpattern"
 	"dispatch-ops/internal/runner/runnerapi"
 )
@@ -50,7 +54,9 @@ func projectFile(spec *runnerapi.RunnerJobSpec, ws *workspace, what string) (str
 }
 
 // projectPath resolves the job's entrypoint in the project checkout and
-// checks that it is a file there, or a directory if dirOK.
+// checks that it is a file there, or a directory if dirOK. Symbolic links
+// are followed, and must end inside the project too: a repository can't
+// point the entrypoint at the job's secrets or anywhere else in the pod.
 func projectPath(spec *runnerapi.RunnerJobSpec, ws *workspace, what string, dirOK bool) (string, error) {
 	if ws.projectDir == "" || spec.Entrypoint == "" {
 		return "", fmt.Errorf("The job has no project or no %s", what)
@@ -59,10 +65,22 @@ func projectPath(spec *runnerapi.RunnerJobSpec, ws *workspace, what string, dirO
 		return "", fmt.Errorf("The %s path %q is not inside the project", what, spec.Entrypoint)
 	}
 	path := filepath.Join(ws.projectDir, spec.Entrypoint)
-	fi, err := os.Stat(path)
+	root, err := filepath.EvalSymlinks(ws.projectDir)
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return "", fmt.Errorf("The %s %s is not in the project", what, spec.Entrypoint)
+	case err != nil:
+		return "", err
+	}
+	if rel, err := filepath.Rel(root, real); err != nil || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("The %s %s is a link to outside the project", what, spec.Entrypoint)
+	}
+	fi, err := os.Stat(real)
+	switch {
 	case err != nil:
 		return "", err
 	case dirOK && fi.IsDir():
@@ -131,7 +149,11 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 		}
 		argv = append(argv, "-i", inv)
 	}
-	argv = append(argv, "-e", "@"+ws.vars)
+	varArgs, err := ansibleVarArgs(spec, ws)
+	if err != nil {
+		return command{}, err
+	}
+	argv = append(argv, varArgs...)
 	if spec.Limit != "" {
 		// The API refuses such limits; this is in case one gets through.
 		if err := hostpattern.CheckLimit(spec.Limit); err != nil {
@@ -178,6 +200,134 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 		"ANSIBLE_HOST_PATTERN_MISMATCH=ignore",
 	)
 	return command{argv: argv, dir: ws.projectDir, env: env, eventMarker: marker}, nil
+}
+
+// ansibleVarArgs writes the job's extra vars for ansible-playbook and
+// returns the -e options that pass them.
+//
+// The launcher's overrides (ws.overrideVars), unlike the template's own
+// extra vars, go in a second JSON file in which every string is marked
+// unsafe (see unsafeJSON), so Ansible never evaluates them as templates
+// (they could otherwise read the credential files with lookup or pipe).
+// That file comes last, so the overrides still take precedence. They are
+// checked again here, as the API checked them at launch; the check also
+// refuses __ansible_* keys, which the JSON loader would honor.
+func ansibleVarArgs(spec *runnerapi.RunnerJobSpec, ws *workspace) ([]string, error) {
+	if len(ws.overrideVars) == 0 {
+		return []string{"-e", "@" + ws.vars}, nil
+	}
+	if err := extravars.Check(ws.overrideVars); err != nil {
+		return nil, fmt.Errorf("The job's launch overrides were refused: %w", err)
+	}
+	template := maps.Clone(map[string]any(spec.ExtraVars))
+	for k := range ws.overrideVars {
+		delete(template, k)
+	}
+	if template == nil {
+		template = map[string]any{}
+	}
+	templateFile := ws.secret("template-vars.json")
+	if err := writeJSON(templateFile, template, 0o600); err != nil {
+		return nil, err
+	}
+	b, err := unsafeJSON(ws.overrideVars)
+	if err != nil {
+		return nil, fmt.Errorf("The job's launch overrides: %w", err)
+	}
+	overridesFile := ws.secret("override-vars.json")
+	if err := os.WriteFile(overridesFile, b, 0o600); err != nil {
+		return nil, err
+	}
+	return []string{"-e", "@" + templateFile, "-e", "@" + overridesFile}, nil
+}
+
+// unsafeJSON encodes vars as a JSON object for an Ansible extra vars file,
+// in which every string value, at any depth, is written as
+// {"__ansible_unsafe": "<string>"}. Ansible's JSON loader turns those into
+// unsafe strings, which it never templates, whatever delimiters they hold
+// (a #jinja2: header can set its own), and keeps as strings: YAML's
+// !unsafe tag doesn't in ansible-core 2.19 and later, which re-resolve the
+// scalar ("01234" becomes 668, "no" false, "" null). Keys are written
+// plainly; extravars.Check refuses launcher keys with Jinja or __ansible_.
+//
+// Integers are written as integers, so Ansible reads them as ints. It
+// handles what encoding/json decodes into an any (with or without
+// UseNumber): maps, slices, strings, numbers, bools and nil.
+func unsafeJSON(vars map[string]any) ([]byte, error) {
+	v, err := markUnsafe(vars)
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+func markUnsafe(v any) (any, error) {
+	switch v := v.(type) {
+	case nil, bool, int, int64:
+		return v, nil
+	case string:
+		return map[string]string{"__ansible_unsafe": v}, nil
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("can't write %v as an extra var", v)
+		}
+		// encoding/json writes integral floats below 1e21 without a
+		// fraction or exponent, which Ansible reads as ints.
+		return v, nil
+	case json.Number:
+		return jsonNumber(v)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, x := range v {
+			m, err := markUnsafe(x)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = m
+		}
+		return out, nil
+	case []any:
+		out := make([]any, len(v))
+		for i, x := range v {
+			m, err := markUnsafe(x)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = m
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("can't write a %T as an extra var", v)
+}
+
+// jsonNumber normalizes a number decoded with UseNumber: integer literals
+// are kept as they are (Ansible reads them as ints, of any size), and an
+// integral number written otherwise (1e15, 3.0) is written as an integer
+// if it fits in an int64, as it would be after a round trip through a
+// float64.
+func jsonNumber(n json.Number) (any, error) {
+	s := n.String()
+	if !strings.ContainsAny(s, ".eE") {
+		if _, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n, nil
+		}
+		// Too big for an int64: write it as a float, so Python's JSON
+		// parser (which refuses integers of over 4300 digits, and then
+		// makes Ansible read the file as YAML, unmarked) never sees a long
+		// literal.
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsInf(f, 0) {
+		return nil, fmt.Errorf("can't write %q as an extra var", s)
+	}
+	if f == math.Trunc(f) && math.Abs(f) < 1<<63 {
+		return json.Number(strconv.FormatFloat(f, 'f', -1, 64)), nil
+	}
+	return f, nil
 }
 
 // ansibleEnv is the environment of the Ansible commands the runner runs:

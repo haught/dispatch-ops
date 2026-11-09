@@ -323,6 +323,23 @@ func TestInventorySyncAccess(t *testing.T) {
 	other := e.project("file:///nowhere", "main")
 	admin.mustDo("PUT", e.invPath+"/source", map[string]any{"projectId": other, "sourcePath": "hosts.yml", "executionEnvironmentId": e.ee}, 400)
 
+	// Changing the source's credentials needs use on all those it will
+	// have: the inventory admin's VAULT_ADDR beside someone else's
+	// VAULT_TOKEN would send the token to them.
+	generic := func(inputs map[string]string) string {
+		return e.c.mustDo("POST", "/api/v1/credentials", map[string]any{"name": unique("cred"), "kind": "generic", "inputs": inputs}, 201)["id"].(string)
+	}
+	token, mine := generic(map[string]string{"VAULT_TOKEN": "s3cret"}), generic(map[string]string{"VAULT_ADDR": "https://evil.example"})
+	grant(e.c, map[string]any{"role": "use", "resourceType": "credential", "resourceId": mine, "userId": adminID})
+	withCreds := func(ids ...string) map[string]any {
+		return map[string]any{"projectId": proj, "sourcePath": "other.yml", "executionEnvironmentId": e.ee, "credentialIds": ids}
+	}
+	e.c.mustDo("PUT", e.invPath+"/source", withCreds(token), 200)
+	admin.mustDo("PUT", e.invPath+"/source", withCreds(token), 200) // unchanged
+	admin.mustDo("PUT", e.invPath+"/source", withCreds(token, mine), 403)
+	admin.mustDo("PUT", e.invPath+"/source", withCreds(mine), 200)
+	e.c.mustDo("PUT", e.invPath+"/source", withCreds(mine, generic(map[string]string{"VAULT_ADDR": "https://other.example"})), 400)
+
 	// Someone with no role on the inventory sees nothing.
 	stranger, _ := newUser(t, srv, e.c)
 	stranger.mustDo("GET", "/api/v1/jobs/"+job, nil, 404)

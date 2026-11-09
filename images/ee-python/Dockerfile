@@ -14,11 +14,15 @@
 ARG RUNNER_BASE=dispatch-ops/runner-base:dev
 FROM ${RUNNER_BASE}
 USER root
+# Pinned, so a rebuild gives the same image; bump these deliberately (as in
+# ee-ansible, with the same requests).
+ARG REQUESTS_VERSION=2.34.2
+ARG PYYAML_VERSION=6.0.3
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv git openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir requests pyyaml \
+    && /opt/venv/bin/pip install --no-cache-dir "requests==${REQUESTS_VERSION}" "PyYAML==${PYYAML_VERSION}" \
     && chown -R 1000:1000 /opt/venv
 ENV PATH=/opt/venv/bin:$PATH \
     DISPATCH_EE_PIP=/opt/venv/bin/pip

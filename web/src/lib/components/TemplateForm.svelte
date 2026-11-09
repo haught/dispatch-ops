@@ -128,6 +128,16 @@
 			)
 			.map((o) => o.label.toLowerCase())
 	);
+	// Allowed overrides that let a launcher skip plays or tasks, including
+	// any checks the playbook relies on (the API asks for use on the
+	// credentials to allow these too).
+	const guardOverrides = $derived(
+		overrideOptions
+			.filter(
+				(o) => ['limit', 'tags', 'skipTags'].includes(o.field) && allowOverrides.includes(o.field)
+			)
+			.map((o) => o.label.toLowerCase())
+	);
 	const commandProblem = $derived(jobType === 'container' ? argvError(command) : '');
 	const argsProblem = $derived(jobType === 'script' ? argvError(args) : '');
 
@@ -326,6 +336,11 @@
 					: `${hiddenCredentialIds.length} credentials`} you can't see.
 			</p>
 		{/if}
+		{#if template}
+			<p class="muted small">
+				Adding or removing a credential needs the use role on all those the template keeps.
+			</p>
+		{/if}
 	</div>
 	<VarsField bind:value={vars} label="Extra variables" />
 
@@ -373,6 +388,12 @@
 				{#if allowOverrides.includes('extraVars')}
 					Launch-time extra variables named <code>ansible_*</code> or containing Jinja are refused.
 				{/if}
+			</p>
+		{/if}
+		{#if guardOverrides.length > 0}
+			<p class="small warning">
+				Allowing {guardOverrides.join(' and ')} to be overridden lets launchers skip plays or tasks, including
+				any checks the playbook makes before it uses the credentials.
 			</p>
 		{/if}
 	</div>

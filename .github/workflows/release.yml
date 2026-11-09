@@ -12,8 +12,13 @@
 #            cosign; and the chart added to the Helm repository index on gh-pages
 #
 # Every action is pinned to a full commit SHA (Dependabot keeps them current,
-# see .github/dependabot.yml). Protect v* tags with a repository ruleset so
-# only maintainers can create them.
+# see .github/dependabot.yml). The release jobs restore no Actions caches
+# (setup-go's, or the bake's GHA layer cache), which code run by ci.yml on
+# main could have written: signed artifacts are built from scratch.
+#
+# The gates below live in this workflow, which a pushed tag could replace:
+# protect v* tags with a repository ruleset so only maintainers can create
+# them (DEVELOP.md, "Release tag ruleset", has the gh api command).
 #
 # Verify a published artifact with, for example:
 #   cosign verify ghcr.io/<owner>/<repo>/server:X.Y.Z \
@@ -118,7 +123,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           REVISION: ${{ github.sha }}
           PLATFORMS: linux/amd64,linux/arm64
-          GHA_CACHE: "1"
+          # No GHA_CACHE: no cache-from or cache-to (docker-bake.hcl).
         with:
           source: .
           push: true
@@ -163,6 +168,7 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+          cache: false
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: ${{ env.HELM_VERSION }}

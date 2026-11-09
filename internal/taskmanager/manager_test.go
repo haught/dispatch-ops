@@ -51,6 +51,10 @@ func TestBuildJob(t *testing.T) {
 	if *kj.Spec.BackoffLimit != 0 || *kj.Spec.TTLSecondsAfterFinished != 3600 || *kj.Spec.ActiveDeadlineSeconds != 600+600+300 {
 		t.Errorf("job spec = backoff %d ttl %d deadline %d", *kj.Spec.BackoffLimit, *kj.Spec.TTLSecondsAfterFinished, *kj.Spec.ActiveDeadlineSeconds)
 	}
+	// Started only once its Secrets exist (see Manager.launch).
+	if kj.Spec.Suspend == nil || !*kj.Spec.Suspend {
+		t.Error("the Job isn't created suspended")
+	}
 	pod := kj.Spec.Template.Spec
 	if pod.RestartPolicy != corev1.RestartPolicyNever || *pod.AutomountServiceAccountToken || !*pod.SecurityContext.RunAsNonRoot {
 		t.Error("pod is not locked down")
@@ -125,7 +129,7 @@ func TestBuildJob(t *testing.T) {
 }
 
 func TestBuildPullSecret(t *testing.T) {
-	s, err := buildPullSecret(testJob(), ns, map[string]string{"server": "ghcr.io", "username": "bot", "password": "pw"})
+	s, err := buildPullSecret(testJob(), Config{Namespace: ns}, map[string]string{"server": "ghcr.io", "username": "bot", "password": "pw"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +222,7 @@ func (e *env) k8sJob(id uuid.UUID) *batchv1.Job {
 // addPod adds a pod for the job, as the Job controller would.
 func (e *env) addPod(id uuid.UUID, status corev1.PodStatus) {
 	e.t.Helper()
-	labels := labelsFor(store.Job{ID: id})
+	labels := labelsFor(store.Job{ID: id}, e.m.Config.Installation)
 	_, err := e.kube.CoreV1().Pods(ns).Create(e.ctx, &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: k8sJobName(id.String()) + "-abcde", Namespace: ns, Labels: labels},
 		Status:     status,

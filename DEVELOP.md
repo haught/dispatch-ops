@@ -434,6 +434,45 @@ One-time setup, after the first release:
   and set its visibility to public.
 - In the repository's Settings → Pages, deploy from the `gh-pages` branch
   (root), which the first release creates.
+- Protect release tags with a tag ruleset (below). Required: the release
+  gates (the tag must be on `main`, CI must pass) live in `release.yml`
+  itself, and someone who can push a branch and a `v*` tag could push a
+  `release.yml` without them. The cosign identity
+  (`release.yml@refs/tags/v…`) would still match, so a signature doesn't
+  prove the gates ran.
+
+### Release tag ruleset
+
+Only repository admins may create, move or delete `v*` tags; nobody else
+may do any of the three. Create the ruleset once (it needs admin on the
+repository; `actor_id` 5 is the built-in Repository admin role):
+
+```sh
+gh api --method POST repos/haught/dispatch-ops/rulesets --input - <<'JSON'
+{
+  "name": "Release tags",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+  "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
+  "bypass_actors": [
+    {"actor_type": "RepositoryRole", "actor_id": 5, "bypass_mode": "always"}
+  ]
+}
+JSON
+```
+
+Check it with `gh api repos/haught/dispatch-ops/rulesets` (and the ruleset's
+own URL for its rules and bypass list), or in Settings → Rules → Rulesets,
+where the bypass list should read Repository admin. A bypass actor bypasses
+every rule in the ruleset, so admins can still move or delete a published
+tag; the ruleset stops everyone else. (To let a role create tags but not
+move or delete them, put `creation` in one ruleset with that role as a
+bypass actor, and `update` and `deletion` in another without it.) The
+Maintain role (`actor_id` 2) exists only on repositories owned by an
+organization; there, adjust the bypass list if maintainers should cut
+releases too. A repository owned by a user has no Maintain role: keep
+admin alone.
 
 ### Building locally
 

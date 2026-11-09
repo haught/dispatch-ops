@@ -6,8 +6,24 @@
 
 	let username = $state('');
 	let password = $state('');
-	// Single sign-on reports failures by sending the browser here with ?error=.
-	let error = $state(page.url.searchParams.get('error') ?? '');
+	// Single sign-on reports failures by sending the browser here with
+	// ?error=<code> (loginErrorCode in internal/api/oidc.go). Only these fixed
+	// messages are shown, never text from the URL, so a crafted link can't
+	// put its own words on this page.
+	const ssoErrors: Record<string, string> = {
+		provider_unavailable: 'The sign-on provider is unavailable. Try again later.',
+		provider_refused: 'Sign-in was refused by the sign-on provider.',
+		expired: 'Your sign-in expired or was started in another browser. Try again.',
+		no_code: 'The sign-on provider did not complete the sign-in. Try again.',
+		failed: 'Sign-in failed. Try again.',
+		username_taken: 'Your username belongs to another account. Ask an administrator to rename it.',
+		deactivated: 'Your account is deactivated.'
+	};
+	function ssoError(code: string | null): string {
+		if (!code) return '';
+		return Object.hasOwn(ssoErrors, code) ? ssoErrors[code] : 'Sign-in failed. Try again.';
+	}
+	let error = $state(ssoError(page.url.searchParams.get('error')));
 	let busy = $state(false);
 	let sso = $state<{ name: string } | null>(null);
 

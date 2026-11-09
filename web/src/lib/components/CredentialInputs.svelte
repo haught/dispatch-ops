@@ -51,6 +51,14 @@
 			: []
 	);
 	const reenter = $derived(movedFields.length > 0);
+	// Freeform kinds: any value added or changed could redirect the others
+	// (e.g. VAULT_ADDR next to VAULT_TOKEN), so the API wants every kept value
+	// given again with it.
+	const freeformReenter = $derived(
+		editing &&
+			kind.freeform &&
+			rows.some((r) => !r.remove && r.name.trim() !== '' && r.value !== '')
+	);
 
 	function secretPlaceholder(name: string): string {
 		if (!isSet(name)) return '';
@@ -114,7 +122,12 @@
 				type="password"
 				autocomplete="new-password"
 				disabled={r.remove}
-				placeholder={r.existing ? 'Leave blank to keep the current value' : ''}
+				required={r.existing && !r.remove && freeformReenter}
+				placeholder={r.existing
+					? freeformReenter
+						? 'Enter it again'
+						: 'Leave blank to keep the current value'
+					: ''}
 			/>
 			{#if r.existing}
 				<label class="inline small"><input type="checkbox" bind:checked={r.remove} /> Remove</label>
@@ -133,7 +146,8 @@
 		<span class="muted small"
 			>All values are secret. Jobs get each one as an environment variable of that name (e.g.
 			AKIPS_PASSWORD) and as a file in DISPATCH_CREDENTIALS_DIR. Names such as PATH, HOME and those
-			starting with ANSIBLE_, DISPATCH_, LD_ or PYTHON are reserved.</span
+			starting with ANSIBLE_, DISPATCH_, LD_ or PYTHON are reserved. Adding or changing a value
+			means entering all the others again.</span
 		>
 	</p>
 {:else}

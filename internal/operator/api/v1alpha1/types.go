@@ -132,9 +132,11 @@ type DispatchOpsSpec struct {
 //   - the API server and task manager accept metrics scrapes from any pod
 //     but job pods;
 //   - job pods accept no connections, and may connect to the API server,
-//     DNS (port 53), and any address outside 169.254.0.0/16 (link-local,
-//     where cloud metadata services are), fe80::/10, fd00:ec2::254/128 and
-//     JobEgressExcept.
+//     the cluster DNS (port 53; the operator's --job-dns-* flags say where
+//     it is), and any address outside 169.254.0.0/16 (link-local, where
+//     most cloud metadata services are), 100.100.100.200/32 (Alibaba
+//     Cloud's), fe80::/10, fd00:ec2::254/128 (AWS's), fd20:ce::254/128
+//     (Google Cloud's) and JobEgressExcept.
 type NetworkPolicySpec struct {
 	// +kubebuilder:default=true
 	// +optional
@@ -194,11 +196,18 @@ type APISpec struct {
 	// +optional
 	TLS APITLSSpec `json:"tls,omitempty"`
 	// TrustedProxies are the addresses or CIDRs of the ingress controller
-	// or load balancer in front of the API server, e.g. 10.0.0.0/8. Only
-	// from these is X-Forwarded-For believed, so sign-in throttling can
-	// tell clients apart; without them, every client behind a proxy shares
-	// the proxy's address and limit. List only proxies that overwrite
-	// X-Forwarded-For, or clients can pick their own address.
+	// or load balancer in front of the API server: its pods' exact IPs, or
+	// the narrowest CIDR that holds only them. Only from these is
+	// X-Forwarded-For believed, so sign-in throttling can tell clients
+	// apart; without them, every client behind a proxy shares the proxy's
+	// address and limit. List only proxies that overwrite X-Forwarded-For,
+	// or clients can pick their own address. Never list a broad range such
+	// as the cluster's pod CIDR: job pods can reach the API server, and
+	// from an address in this list they could forge X-Forwarded-For. Pod
+	// IPs change as pods are rescheduled, so rather than exact IPs you can
+	// give the ingress controller a range of its own and list that: run it
+	// on dedicated nodes (tainted against other pods) and list their pod
+	// CIDRs, or give it a dedicated pod IP pool.
 	// +kubebuilder:validation:items:Pattern=`^[0-9a-fA-F:.]+(/[0-9]{1,3})?$`
 	// +optional
 	TrustedProxies []string `json:"trustedProxies,omitempty"`
@@ -253,10 +262,21 @@ type TaskManagerSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 	// JobNamespace is where job pods run. It must exist. Defaults to the
 	// DispatchOps namespace. Any other namespace must be opted in, since
-	// the task manager can read its Secrets and create Jobs there: listed
-	// in the operator's --allowed-job-namespaces (the chart's
+	// the task manager creates pods there, and a pod can mount any Secret
+	// in its namespace: mapped to this DispatchOps's namespace in the
+	// operator's --allowed-job-namespaces (the chart's
 	// allowedJobNamespaces) or, when the operator watches all namespaces,
-	// labeled dispatch-ops.io/allow-jobs-from=<this DispatchOps's namespace>.
+	// labeled dispatch-ops.io/allow-jobs-from=<this DispatchOps's
+	// namespace>. A namespace serves one installation: while another holds
+	// it (by its dispatch-ops-claim ConfigMap), or it hosts another
+	// DispatchOps, this one is refused (JobNamespaceInUse); one that was
+	// another installation's job namespace, or a deleted one's namespace,
+	// is refused until an administrator clears it (JobNamespaceReleased).
+	// It must enforce
+	// Pod Security
+	// (pod-security.kubernetes.io/enforce=restricted, or baseline) unless
+	// the operator was started with
+	// --allow-job-namespaces-without-pod-security.
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +optional
@@ -370,8 +390,23 @@ type DispatchOpsStatus struct {
 	// server and task manager run (or are rolling out to).
 	// +optional
 	Image string `json:"image,omitempty"`
+	// EncryptionKeyGenerated records that the operator generated the
+	// encryption key Secret. If that Secret goes missing later, the operator
+	// doesn't generate another, which would leave the stored credentials
+	// unreadable: it reports Degraded (EncryptionKeyMissing) until the
+	// Secret is restored.
+	// +optional
+	EncryptionKeyGenerated bool `json:"encryptionKeyGenerated,omitempty"`
+	// JobNamespaces are the namespaces, other than its own, where the
+	// installation holds (or is about to take) a claim: the operator's
+	// record of where to clean up, whatever the spec or the namespaces'
+	// opt-in say by then. Written by the operator only: don't grant
+	// tenants update on dispatchops/status.
+	// +listType=set
+	// +optional
+	JobNamespaces []string `json:"jobNamespaces,omitempty"`
 	// Conditions: DatabaseReady, Migrated, APIReady, TaskManagerReady and
-	// Ready (all of them).
+	// Ready (all of them), and Degraded while the encryption key is missing.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

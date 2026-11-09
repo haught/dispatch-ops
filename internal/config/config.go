@@ -86,9 +86,16 @@ type LoginThrottle struct {
 	// Window is the period failures are counted over
 	// (DISPATCH_LOGIN_THROTTLE_WINDOW, default 15m).
 	Window time.Duration
-	// MaxPerUsername is how many failures one username may have in Window
-	// before its sign-ins are refused (DISPATCH_LOGIN_MAX_FAILURES_PER_USER,
-	// default 10). A success clears it.
+	// MaxPerUsernameIP is how many failures one username may have from one
+	// client address in Window before its sign-ins from there are refused
+	// (DISPATCH_LOGIN_MAX_FAILURES_PER_USER, default 10). A success from
+	// that address clears it.
+	MaxPerUsernameIP int
+	// MaxPerUsername is how many failures one username may have from all
+	// client addresses together in Window before its sign-ins are refused,
+	// except from addresses it has signed in from recently
+	// (DISPATCH_LOGIN_MAX_FAILURES_PER_USER_TOTAL, default 100). It is high
+	// so that locking an account out takes many addresses.
 	MaxPerUsername int
 	// MaxPerIP is how many failures one client address may have in Window
 	// (DISPATCH_LOGIN_MAX_FAILURES_PER_IP, default 100).
@@ -128,6 +135,10 @@ func (c Config) OIDCRedirectURL() string {
 type TaskManager struct {
 	// Namespace is where job pods run (DISPATCH_JOB_NAMESPACE).
 	Namespace string
+	// Installation labels the Kubernetes objects the task manager creates
+	// and names its leader Lease (DISPATCH_INSTALLATION; the operator sets
+	// it to the DispatchOps's UID). See taskmanager.Config.Installation.
+	Installation string
 	// KubeContext selects a kubeconfig context when running outside the
 	// cluster (DISPATCH_KUBE_CONTEXT). In a pod, the in-cluster config is used.
 	KubeContext string
@@ -198,6 +209,7 @@ func Load() (Config, error) {
 		},
 		TaskManager: TaskManager{
 			Namespace:       getenv("DISPATCH_JOB_NAMESPACE", "dispatch-jobs"),
+			Installation:    os.Getenv("DISPATCH_INSTALLATION"),
 			KubeContext:     os.Getenv("DISPATCH_KUBE_CONTEXT"),
 			RunnerAPIURL:    strings.TrimRight(os.Getenv("DISPATCH_RUNNER_API_URL"), "/"),
 			RunnerAPITLSDir: os.Getenv("DISPATCH_RUNNER_API_TLS_DIR"),
@@ -233,12 +245,14 @@ func Load() (Config, error) {
 	collect(err)
 	c.Login.Window, err = getduration("DISPATCH_LOGIN_THROTTLE_WINDOW", 15*time.Minute)
 	collect(err)
-	c.Login.MaxPerUsername, err = getint("DISPATCH_LOGIN_MAX_FAILURES_PER_USER", 10)
+	c.Login.MaxPerUsernameIP, err = getint("DISPATCH_LOGIN_MAX_FAILURES_PER_USER", 10)
+	collect(err)
+	c.Login.MaxPerUsername, err = getint("DISPATCH_LOGIN_MAX_FAILURES_PER_USER_TOTAL", 100)
 	collect(err)
 	c.Login.MaxPerIP, err = getint("DISPATCH_LOGIN_MAX_FAILURES_PER_IP", 100)
 	collect(err)
-	if c.Login.MaxPerUsername < 0 || c.Login.MaxPerIP < 0 {
-		errs = append(errs, errors.New("DISPATCH_LOGIN_MAX_FAILURES_PER_USER and DISPATCH_LOGIN_MAX_FAILURES_PER_IP must not be negative"))
+	if c.Login.MaxPerUsernameIP < 0 || c.Login.MaxPerUsername < 0 || c.Login.MaxPerIP < 0 {
+		errs = append(errs, errors.New("DISPATCH_LOGIN_MAX_FAILURES_PER_USER, DISPATCH_LOGIN_MAX_FAILURES_PER_USER_TOTAL and DISPATCH_LOGIN_MAX_FAILURES_PER_IP must not be negative"))
 	}
 	for _, v := range strings.FieldsFunc(os.Getenv("DISPATCH_TRUSTED_PROXIES"), isListSep) {
 		p, err := parsePrefix(v)

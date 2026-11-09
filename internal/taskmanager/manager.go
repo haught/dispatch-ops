@@ -7,7 +7,6 @@ package taskmanager
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -34,7 +33,13 @@ import (
 
 // Config holds the task manager's settings.
 type Config struct {
-	Namespace    string
+	Namespace string
+	// Installation labels the Kubernetes objects this task manager creates
+	// (joblabels.Installation) and names its leader Lease: the operator
+	// sets it to the DispatchOps's UID. The task manager deletes only
+	// Kubernetes Jobs with its own label or whose job is in its database
+	// (see Manager.isOurs). Empty, they are unlabeled.
+	Installation string
 	RunnerAPIURL string
 	// RunnerAPITLSDir holds the API server's certificate Secret; job pods
 	// trust what tlscert.ReadTrustBundle reads from it. Read for each job,
@@ -192,7 +197,7 @@ func (m *Manager) dispatch(ctx context.Context) error {
 		if err := m.launch(ctx, j, tokens[j.ID]); err != nil {
 			m.Log.Error("creating Kubernetes Job failed", "job_id", j.ID, "err", err)
 			metrics.JobsDispatched.WithLabelValues("error").Inc()
-			m.end(ctx, j, store.JobError, "Could not create the Kubernetes Job: "+err.Error(), true)
+			m.end(ctx, j, store.JobError, "Could not create the Kubernetes Job: "+err.Error(), nil)
 			continue
 		}
 		metrics.JobsDispatched.WithLabelValues("ok").Inc()
@@ -201,8 +206,12 @@ func (m *Manager) dispatch(ctx context.Context) error {
 	return nil
 }
 
-// launch creates the job's Secrets and Kubernetes Job, then makes the Job
-// own the Secrets so they are deleted with it.
+// launch creates the job's Kubernetes Job suspended, then its Secrets with
+// that Job as their owner, so they are garbage collected with it, and only
+// then lets the Job start (its pod needs the Secrets). So the task manager
+// only ever creates Secrets: its Role has no other verb on them, not even
+// patch, which would return any Secret it names. If anything fails once the
+// Job exists, deleting the Job deletes whatever Secrets were made.
 func (m *Manager) launch(ctx context.Context, j store.Job, token string) error {
 	ns := m.Config.Namespace
 	var ca []byte
@@ -212,7 +221,7 @@ func (m *Manager) launch(ctx context.Context, j store.Job, token string) error {
 			return fmt.Errorf("read the API server's certificate for the runner: %w", err)
 		}
 	}
-	secrets := []*corev1.Secret{buildTokenSecret(j, ns, token, ca)}
+	secrets := []*corev1.Secret{buildTokenSecret(j, m.Config, token, ca)}
 	if credID := j.Config.ExecutionEnvironment.RegistryCredentialID; credID != nil {
 		creds, err := m.Store.GetCredentials(ctx, []uuid.UUID{*credID})
 		if errors.Is(err, store.ErrNotFound) {
@@ -225,42 +234,34 @@ func (m *Manager) launch(ctx context.Context, j store.Job, token string) error {
 		if err != nil {
 			return err
 		}
-		pull, err := buildPullSecret(j, ns, inputs)
+		pull, err := buildPullSecret(j, m.Config, inputs)
 		if err != nil {
 			return err
 		}
 		secrets = append(secrets, pull)
 	}
 
-	var created []string
-	cleanup := func() {
-		for _, name := range created {
-			_ = m.Kube.CoreV1().Secrets(ns).Delete(context.WithoutCancel(ctx), name, metav1.DeleteOptions{})
-		}
-	}
-	for _, s := range secrets {
-		if _, err := m.Kube.CoreV1().Secrets(ns).Create(ctx, s, metav1.CreateOptions{}); err != nil {
-			cleanup()
-			return fmt.Errorf("create secret: %w", err)
-		}
-		created = append(created, s.Name)
-	}
-
 	kj, err := m.Kube.BatchV1().Jobs(ns).Create(ctx, buildJob(j, m.Config, len(secrets) > 1, len(ca) > 0), metav1.CreateOptions{})
 	if err != nil {
-		cleanup()
 		return fmt.Errorf("create job: %w", err)
 	}
-
-	owner, _ := json.Marshal(map[string]any{"metadata": map[string]any{"ownerReferences": []metav1.OwnerReference{{
-		APIVersion: "batch/v1", Kind: "Job", Name: kj.Name, UID: kj.UID,
-		BlockOwnerDeletion: new(true),
-	}}}})
-	for _, name := range created {
-		if _, err := m.Kube.CoreV1().Secrets(ns).Patch(ctx, name, types.MergePatchType, owner, metav1.PatchOptions{}); err != nil {
-			// Not fatal: reconcile deletes unowned secrets later.
-			m.Log.Warn("setting secret owner failed", "secret", name, "err", err)
+	fail := func(err error) error {
+		m.deleteK8sJob(context.WithoutCancel(ctx), kj, true)
+		return err
+	}
+	// No blockOwnerDeletion: it needs update on jobs/finalizers where
+	// OwnerReferencesPermissionEnforcement is on, and the task manager
+	// deletes Jobs in the background anyway.
+	owner := metav1.OwnerReference{APIVersion: "batch/v1", Kind: "Job", Name: kj.Name, UID: kj.UID}
+	for _, s := range secrets {
+		s.OwnerReferences = []metav1.OwnerReference{owner}
+		if _, err := m.Kube.CoreV1().Secrets(ns).Create(ctx, s, metav1.CreateOptions{}); err != nil {
+			return fail(fmt.Errorf("create secret: %w", err))
 		}
+	}
+	if _, err := m.Kube.BatchV1().Jobs(ns).Patch(ctx, kj.Name, types.MergePatchType, []byte(`{"spec":{"suspend":false}}`),
+		metav1.PatchOptions{}); err != nil {
+		return fail(fmt.Errorf("start job: %w", err))
 	}
 	return nil
 }
@@ -288,10 +289,13 @@ func (m *Manager) reconcile(ctx context.Context) error {
 		return fmt.Errorf("list pods: %w", err)
 	}
 
+	// Every job object, whatever its installation label: whose it is
+	// depends on the database too (see isOurs).
 	kjobByID := map[uuid.UUID]*batchv1.Job{}
 	for i := range kjobs.Items {
-		if id, err := uuid.Parse(kjobs.Items[i].Labels[LabelJobID]); err == nil {
-			kjobByID[id] = &kjobs.Items[i]
+		kj := &kjobs.Items[i]
+		if id, err := uuid.Parse(kj.Labels[LabelJobID]); err == nil {
+			kjobByID[id] = kj
 		}
 	}
 	podsByID := map[uuid.UUID][]corev1.Pod{}
@@ -304,13 +308,52 @@ func (m *Manager) reconcile(ctx context.Context) error {
 	isActive := map[uuid.UUID]bool{}
 	for _, j := range active {
 		isActive[j.ID] = true
+		// In the database, so ours whatever its label.
 		m.check(ctx, now, j, kjobByID[j.ID], podsByID[j.ID])
 	}
 
-	if err := m.reapOrphans(ctx, now, kjobByID, isActive); err != nil {
-		return err
+	return m.reapOrphans(ctx, now, kjobByID, isActive)
+}
+
+// owner is whose a job object is, by its installation label alone.
+type owner int
+
+const (
+	// ours: labeled with this task manager's installation (or, without
+	// one, unlabeled).
+	ours owner = iota
+	// unlabeled: from a task manager that didn't label its installation
+	// yet.
+	unlabeled
+	// notOurs: labeled with another installation.
+	notOurs
+)
+
+// ownership says whose a job object with these labels is, by its label.
+func (m *Manager) ownership(labels map[string]string) owner {
+	inst, labeled := labels[LabelInstallation]
+	switch {
+	case labeled && inst == m.Config.Installation:
+		return ours
+	case labeled:
+		return notOurs
+	case m.Config.Installation == "":
+		return ours
+	default:
+		return unlabeled
 	}
-	return m.reapSecrets(ctx)
+}
+
+// isOurs reports whether a Kubernetes Job is this installation's, and so
+// one it may delete: its job is in this installation's database (inDB),
+// whatever its label says, or it is labeled with this installation. A
+// label alone isn't the whole story: a DispatchOps deleted and created
+// again on the same database has a new UID, and an older task manager
+// didn't label Jobs. A Job labeled otherwise whose job isn't in the
+// database is never ours. The job namespace serves one installation (the
+// operator refuses a second), so this is defense in depth.
+func (m *Manager) isOurs(labels map[string]string, inDB bool) bool {
+	return inDB || m.ownership(labels) == ours
 }
 
 // check decides whether an active job has failed, from its database record
@@ -328,40 +371,46 @@ func (m *Manager) check(ctx context.Context, now time.Time, j store.Job, kj *bat
 	case store.JobWaiting:
 		switch {
 		case j.CancelRequested:
-			m.end(ctx, j, store.JobCanceled, "Canceled before it started", true)
+			m.end(ctx, j, store.JobCanceled, "Canceled before it started", kj)
 		case kj == nil:
 			if since(j.DispatchedAt) > cfg.MissingGrace {
-				m.end(ctx, j, store.JobError, "The job's Kubernetes Job is missing", false)
+				m.end(ctx, j, store.JobError, "The job's Kubernetes Job is missing", nil)
+			}
+		case kj.Spec.Suspend != nil && *kj.Spec.Suspend:
+			// launch stopped before it started the Job (see launch); its
+			// Secrets may be missing.
+			if since(j.DispatchedAt) > cfg.MissingGrace {
+				m.end(ctx, j, store.JobError, "The job's Kubernetes Job was never started", kj)
 			}
 		case jobDone(kj):
-			m.end(ctx, j, store.JobError, "The job pod ended before the runner started"+describePods(pods)+oldRunnerHint(pods), false)
+			m.end(ctx, j, store.JobError, "The job pod ended before the runner started"+describePods(pods)+oldRunnerHint(pods), nil)
 		case since(j.DispatchedAt) > cfg.ImagePullTimeout && imagePullProblem(pods) != "":
 			m.end(ctx, j, store.JobError, fmt.Sprintf("Cannot pull image %s: %s",
-				j.Config.ExecutionEnvironment.Image, imagePullProblem(pods)), true)
+				j.Config.ExecutionEnvironment.Image, imagePullProblem(pods)), kj)
 		case since(j.DispatchedAt) > cfg.StartTimeout:
-			m.end(ctx, j, store.JobError, fmt.Sprintf("The job did not start within %s", cfg.StartTimeout)+describePods(pods), true)
+			m.end(ctx, j, store.JobError, fmt.Sprintf("The job did not start within %s", cfg.StartTimeout)+describePods(pods), kj)
 		}
 
 	case store.JobRunning:
 		timeout := time.Duration(j.Config.TimeoutSeconds) * time.Second
 		switch {
 		case kj == nil:
-			m.end(ctx, j, store.JobError, "The job's Kubernetes Job disappeared while it was running", false)
+			m.end(ctx, j, store.JobError, "The job's Kubernetes Job disappeared while it was running", nil)
 		case jobDone(kj):
-			m.end(ctx, j, store.JobError, "The job pod ended without reporting a result"+describePods(pods), false)
+			m.end(ctx, j, store.JobError, "The job pod ended without reporting a result"+describePods(pods), nil)
 		case since(j.LastHeartbeatAt) > cfg.HeartbeatTimeout:
-			m.end(ctx, j, store.JobError, fmt.Sprintf("The runner stopped responding (no heartbeat for %s)", cfg.HeartbeatTimeout), true)
+			m.end(ctx, j, store.JobError, fmt.Sprintf("The runner stopped responding (no heartbeat for %s)", cfg.HeartbeatTimeout), kj)
 		case since(j.StartedAt) > timeout+cfg.TimeoutGrace:
-			m.end(ctx, j, store.JobFailed, fmt.Sprintf("Timed out after %s (the runner did not stop the job, so its pod was deleted)", timeout), true)
+			m.end(ctx, j, store.JobFailed, fmt.Sprintf("Timed out after %s (the runner did not stop the job, so its pod was deleted)", timeout), kj)
 		case j.CancelRequested && since(j.CancelRequestedAt) > cfg.CancelGrace:
-			m.end(ctx, j, store.JobCanceled, "Canceled (the runner did not stop in time, so its pod was deleted)", true)
+			m.end(ctx, j, store.JobCanceled, "Canceled (the runner did not stop in time, so its pod was deleted)", kj)
 		}
 	}
 }
 
 // end gives a job a final status, unless its runner got there first, and
-// optionally deletes its Kubernetes Job.
-func (m *Manager) end(ctx context.Context, j store.Job, status, reason string, deleteK8sJob bool) {
+// then deletes kj, its Kubernetes Job, unless nil.
+func (m *Manager) end(ctx context.Context, j store.Job, status, reason string, kj *batchv1.Job) {
 	err := m.Store.EndJob(ctx, j.ID, status, nil, reason, store.JobWaiting, store.JobRunning)
 	switch {
 	case errors.Is(err, store.ErrJobState):
@@ -372,29 +421,38 @@ func (m *Manager) end(ctx context.Context, j store.Job, status, reason string, d
 	}
 	m.Log.Info("job ended by task manager", "job_id", j.ID, "status", status, "reason", reason)
 	metrics.JobsEndedByTaskManager.WithLabelValues(status).Inc()
-	if deleteK8sJob {
-		m.deleteK8sJob(ctx, k8sJobName(j.ID.String()))
+	if kj != nil {
+		m.deleteK8sJob(ctx, kj, true)
 	}
 }
 
-func (m *Manager) deleteK8sJob(ctx context.Context, name string) {
-	// Background propagation deletes the pods and owned Secrets too.
+// deleteK8sJob deletes a Kubernetes Job, if it is this installation's (see
+// isOurs; inDB says its job is in this installation's database), and only
+// that very Job (by UID). Background propagation deletes its pods and the
+// Secrets it owns too: the task manager can't delete Secrets itself.
+func (m *Manager) deleteK8sJob(ctx context.Context, kj *batchv1.Job, inDB bool) {
+	if !m.isOurs(kj.Labels, inDB) {
+		m.Log.Warn("not deleting another installation's Kubernetes Job", "k8s_job", kj.Name,
+			"installation", kj.Labels[LabelInstallation])
+		return
+	}
 	policy := metav1.DeletePropagationBackground
-	err := m.Kube.BatchV1().Jobs(m.Config.Namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy})
+	opts := metav1.DeleteOptions{PropagationPolicy: &policy}
+	if kj.UID != "" {
+		opts.Preconditions = &metav1.Preconditions{UID: &kj.UID}
+	}
+	err := m.Kube.BatchV1().Jobs(m.Config.Namespace).Delete(ctx, kj.Name, opts)
 	if err != nil && !apierrors.IsNotFound(err) {
-		m.Log.Warn("deleting Kubernetes Job", "k8s_job", name, "err", err)
+		m.Log.Warn("deleting Kubernetes Job", "k8s_job", kj.Name, "err", err)
 	}
 }
 
-// reapOrphans deletes Kubernetes Jobs that are still running although their
-// dispatch-ops job has finished (or no longer exists).
+// reapOrphans deletes this installation's Kubernetes Jobs that are still
+// running although their dispatch-ops job has finished (or no longer
+// exists). One whose job isn't in the database is deleted only if it is
+// labeled with this installation (see isOurs).
 func (m *Manager) reapOrphans(ctx context.Context, now time.Time, kjobs map[uuid.UUID]*batchv1.Job, isActive map[uuid.UUID]bool) error {
-	var candidates []uuid.UUID
-	for id, kj := range kjobs {
-		if !isActive[id] && !jobDone(kj) {
-			candidates = append(candidates, id)
-		}
-	}
+	candidates := m.orphanCandidates(kjobs, isActive)
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -403,34 +461,32 @@ func (m *Manager) reapOrphans(ctx context.Context, now time.Time, kjobs map[uuid
 		return err
 	}
 	for _, id := range candidates {
-		finishedAt, exists := ended[id]
+		finishedAt, inDB := ended[id]
 		switch {
-		case !exists:
+		case !m.isOurs(kjobs[id].Labels, inDB):
+			continue // another installation's
+		case !inDB:
 		case finishedAt == nil:
 			continue // became active after we listed active jobs
 		case now.Sub(*finishedAt) < m.Config.OrphanGrace:
 			continue
 		}
 		m.Log.Info("deleting orphaned Kubernetes Job", "job_id", id, "k8s_job", kjobs[id].Name)
-		m.deleteK8sJob(ctx, kjobs[id].Name)
+		m.deleteK8sJob(ctx, kjobs[id], inDB)
 	}
 	return nil
 }
 
-// reapSecrets deletes job Secrets left without an owner Job, e.g. after a
-// crash between creating them and creating the Job.
-func (m *Manager) reapSecrets(ctx context.Context) error {
-	secrets, err := m.Kube.CoreV1().Secrets(m.Config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: managedSelector})
-	if err != nil {
-		return fmt.Errorf("list secrets: %w", err)
-	}
-	for _, s := range secrets.Items {
-		if len(s.OwnerReferences) == 0 && time.Since(s.CreationTimestamp.Time) > 5*time.Minute {
-			m.Log.Info("deleting orphaned job secret", "secret", s.Name)
-			_ = m.Kube.CoreV1().Secrets(m.Config.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
+// orphanCandidates are the Kubernetes Jobs reapOrphans looks up in the
+// database: unfinished and not active, whatever their label (see isOurs).
+func (m *Manager) orphanCandidates(kjobs map[uuid.UUID]*batchv1.Job, isActive map[uuid.UUID]bool) []uuid.UUID {
+	var candidates []uuid.UUID
+	for id, kj := range kjobs {
+		if !isActive[id] && !jobDone(kj) {
+			candidates = append(candidates, id)
 		}
 	}
-	return nil
+	return candidates
 }
 
 // --- Kubernetes status helpers ---------------------------------------------

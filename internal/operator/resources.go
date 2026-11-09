@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"dispatch-ops/internal/operator/api/v1alpha1"
+	"dispatch-ops/internal/taskmanager/joblabels"
 	"dispatch-ops/internal/tlscert"
 )
 
@@ -51,6 +52,11 @@ const (
 	// operator renews it renewBefore its expiry (see certNeedsRenewal).
 	selfSignedValidity = 365 * 24 * time.Hour
 	renewBefore        = 30 * 24 * time.Hour
+	// postgresCAValidity is how long the managed database's CA is valid. The
+	// operator renews it postgresCARenewBefore its expiry, so a certificate
+	// it issues (selfSignedValidity) always expires before the CA does.
+	postgresCAValidity    = 10 * 365 * 24 * time.Hour
+	postgresCARenewBefore = selfSignedValidity + renewBefore
 	// generatedAnnotation marks the Secrets the operator made; it only ever
 	// renews those, never one you provide.
 	generatedAnnotation = "dispatch-ops.io/generated"
@@ -63,7 +69,8 @@ const (
 	AllowJobsFromLabel = "dispatch-ops.io/allow-jobs-from"
 	// DefaultPostgresImage is the managed database's image when its spec
 	// names none: postgres:17.11, pinned to the digest of its multi-arch
-	// index.
+	// index. Dependabot doesn't track images named in Go source: bump it by
+	// hand (with the CI service container in .github/workflows/ci.yml).
 	DefaultPostgresImage = "postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f"
 	// postgresUID is the postgres user of the Debian-based images.
 	postgresUID = 999
@@ -72,12 +79,21 @@ const (
 	// key it can read.
 	postgresTLSPath       = "/var/run/postgresql-tls"
 	postgresTLSSecretPath = "/var/run/postgresql-tls-secret"
-	// componentJobs names the NetworkPolicy for job pods.
-	componentJobs = "jobs"
-	// The labels the task manager gives job pods (see internal/taskmanager).
-	jobPodManagedBy = "dispatch-ops"
-	jobPodComponent = "job"
-	jobPodIDLabel   = "dispatch-ops/job-id"
+	// postgresCAPath is where the servers find the managed database's CA
+	// (see generatedPostgresCASecret), to verify it (sslmode=verify-full).
+	postgresCAPath = "/var/run/dispatch-ops/postgres-ca"
+	// componentJobs names the NetworkPolicy for job pods. Operators before
+	// it selected all job pods made a second one, componentUnlabeledJobs, for
+	// those without an installation label; it is deleted.
+	componentJobs          = "jobs"
+	componentUnlabeledJobs = "jobs-unlabeled"
+	// The labels the task manager gives job pods: the same constants.
+	jobPodManagedBy    = joblabels.ManagedByValue
+	jobPodComponent    = joblabels.ComponentValue
+	jobPodIDLabel      = joblabels.JobID
+	installationLabel  = joblabels.Installation
+	installationEnv    = joblabels.InstallationEnv
+	podSecurityEnforce = "pod-security.kubernetes.io/enforce"
 )
 
 // install wraps a DispatchOps with the values the operator derives from it.
@@ -92,15 +108,27 @@ type install struct {
 	// postgresCertHash identifies the managed database's certificate, so
 	// its pod restarts (PostgreSQL reads it only at start) when renewed.
 	postgresCertHash string
+	// postgresCAHash identifies the CA that issues it, so the servers'
+	// pods restart (they read it only at start) when it changes, which is
+	// far rarer than the certificate.
+	postgresCAHash string
 	// skipAdmin leaves the administrator out of the migration Job: the
 	// installation has migrated before and the password Secret was deleted
 	// after first sign-in, as the README recommends.
 	skipAdmin bool
+	// heldJobNamespace is the job namespace this reconcile found the
+	// installation may use and holds the claim on (see
+	// Reconciler.holdJobNamespace), or "".
+	heldJobNamespace string
 }
 
 // postgresCertAnnotation records on the managed database's pod which
 // certificate it serves.
 const postgresCertAnnotation = "dispatch-ops.io/tls-cert-sha256"
+
+// postgresCAAnnotation records on server pods which CA they trust the
+// managed database's certificate from.
+const postgresCAAnnotation = "dispatch-ops.io/postgres-ca-sha256"
 
 // dbSSLModeAnnotation records on server pods which sslmode the managed
 // database's URL had when they were created.
@@ -140,9 +168,16 @@ func (in install) jobNamespace() string {
 // namespace.
 func (in install) jobRBACName() string { return in.jobObjectName(componentTaskManager) }
 
-// jobObjectName names an object in the job namespace. In another
-// namespace it includes the DispatchOps namespace, so two installations
-// can share a job namespace.
+// installation identifies the installation on the objects its task
+// manager creates (joblabels.Installation) and in its leader Lease's name.
+// The UID, not the name: a DispatchOps deleted and created again under the
+// same name doesn't inherit what the old one left behind.
+func (in install) installation() string { return string(in.UID) }
+
+// jobObjectName names an object in the job namespace. A job namespace
+// serves a single installation (the operator refuses a second; see
+// the claims in claim.go); in another namespace the name still
+// includes the DispatchOps namespace, so it says whose it is.
 func (in install) jobObjectName(component string) string {
 	if in.jobNamespace() == in.Namespace {
 		return in.name(component)
@@ -151,8 +186,20 @@ func (in install) jobObjectName(component string) string {
 }
 
 // foreignJobObjectName is jobObjectName in a namespace other than the
-// DispatchOps's.
+// DispatchOps's: its namespace and name, shortened if need be, and a hash
+// of both, so "a"/"b-x" and "a-b"/"x" don't collide.
 func (in install) foreignJobObjectName(component string) string {
+	sum := sha256.Sum256([]byte(in.Namespace + "/" + in.Name + "/" + component))
+	prefix := in.Namespace + "-" + in.name(component)
+	if len(prefix) > 54 {
+		prefix = strings.TrimRight(prefix[:54], "-.")
+	}
+	return prefix + "-" + hex.EncodeToString(sum[:])[:8]
+}
+
+// legacyForeignJobObjectName is what operators before
+// foreignJobObjectName's hash named the object; pruning still deletes it.
+func (in install) legacyForeignJobObjectName(component string) string {
 	return in.Namespace + "-" + in.name(component)
 }
 
@@ -179,19 +226,86 @@ func (in install) databaseURLSecret() corev1.SecretKeySelector {
 	return corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: in.name(componentDatabase)}, Key: "url"}
 }
 
-// postgresURL is the connection URL of the managed database, which serves
-// TLS with a self-signed certificate: encrypted, though not verified.
+// postgresSSLMode is the managed database URL's sslmode: it serves TLS
+// with a certificate from the operator's CA, which the servers verify,
+// mounted at postgresCAPath (see withDatabaseCA).
+const postgresSSLMode = "verify-full"
+
+// postgresURL is the connection URL of the managed database.
 func (in install) postgresURL(password string) string {
 	return "postgres://" + postgresUser + ":" + password + "@" + in.name(componentDatabase) + "." + in.Namespace +
-		".svc:" + strconv.Itoa(postgresPort) + "/" + postgresDB + "?sslmode=require"
+		".svc:" + strconv.Itoa(postgresPort) + "/" + postgresDB + "?" + postgresTLSQuery().Encode()
+}
+
+// postgresTLSQuery is the managed database URL's TLS parameters.
+func postgresTLSQuery() url.Values {
+	return url.Values{"sslmode": {postgresSSLMode}, "sslrootcert": {postgresCAPath + "/ca.crt"}}
 }
 
 func (in install) postgresTLSSecretName() string { return in.name(componentDatabase) + "-tls" }
 
-// generatedPostgresTLSSecret is a self-signed certificate for the managed
-// database. The operator renews it before it expires.
-func (in install) generatedPostgresTLSSecret() (*corev1.Secret, error) {
-	return in.selfSignedSecret(componentDatabase, in.postgresTLSSecretName(), in.postgresCertHosts())
+// postgresCASecretName holds the CA that issues the managed database's
+// certificate.
+func (in install) postgresCASecretName() string { return in.name(componentDatabase) + "-ca" }
+
+// The keys of the CA Secret.
+const (
+	caCertKey = "ca.crt"
+	caKeyKey  = "ca.key"
+)
+
+// generatedPostgresCASecret is a new CA for the managed database's
+// certificates, valid for postgresCAValidity. The servers trust only it,
+// and read it only when they start: so the certificate the database serves
+// can be renewed under it without their losing the database, and only a
+// new CA (once a decade) restarts them.
+func (in install) generatedPostgresCASecret() (*corev1.Secret, error) {
+	certPEM, keyPEM, err := tlscert.CA(in.Namespace+"/"+in.name(componentDatabase)+" CA", postgresCAValidity)
+	if err != nil {
+		return nil, err
+	}
+	s := &corev1.Secret{
+		ObjectMeta: in.secretMeta(componentDatabase, in.postgresCASecretName()),
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{caCertKey: certPEM, caKeyKey: keyPEM},
+	}
+	s.Annotations = map[string]string{generatedAnnotation: "true"}
+	return s, nil
+}
+
+// postgresTLSSecret is a new certificate for the managed database, issued
+// by the CA in ca (a generatedPostgresCASecret). The operator renews it
+// before it expires.
+func (in install) postgresTLSSecret(ca *corev1.Secret) (*corev1.Secret, error) {
+	certPEM, keyPEM, err := tlscert.Signed(in.postgresCertHosts(), selfSignedValidity, ca.Data[caCertKey], ca.Data[caKeyKey])
+	if err != nil {
+		return nil, fmt.Errorf("secret %s: %w", ca.Name, err)
+	}
+	s := &corev1.Secret{
+		ObjectMeta: in.secretMeta(componentDatabase, in.postgresTLSSecretName()),
+		Type:       corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			corev1.TLSCertKey:       certPEM,
+			corev1.TLSPrivateKeyKey: keyPEM,
+			"ca.crt":                ca.Data[caCertKey],
+		},
+	}
+	s.Annotations = map[string]string{generatedAnnotation: "true"}
+	return s, nil
+}
+
+// issuedBy reports whether the certificate in a TLS Secret was signed by
+// the CA certificate caPEM.
+func issuedBy(s *corev1.Secret, caPEM []byte) bool {
+	cert, err := tlscert.ParseCertificate(s.Data[corev1.TLSCertKey])
+	if err != nil {
+		return false
+	}
+	ca, err := tlscert.ParseCertificate(caPEM)
+	if err != nil {
+		return false
+	}
+	return cert.CheckSignatureFrom(ca) == nil
 }
 
 // postgresCertHosts are the names the managed database's certificate is
@@ -202,10 +316,48 @@ func (in install) postgresCertHosts() []string {
 		svc + "." + in.Namespace + ".svc.cluster.local", "localhost", "127.0.0.1"}
 }
 
+// secretMeta is the metadata of a Secret the operator generates: labeled
+// with the installation's UID (ownerLabel), which is how it knows the
+// Secret is this installation's (see Reconciler.checkGeneratedSecrets).
+// generatedAnnotation alone proves nothing: anyone who can create a Secret
+// can set it.
+func (in install) secretMeta(component, name string) metav1.ObjectMeta {
+	m := in.meta(component, name)
+	m.Labels[ownerLabel] = string(in.UID)
+	return m
+}
+
+// generatedSecretNames are the Secrets the operator generates for in's
+// spec: on a first install, the admin password's too.
+func (in install) generatedSecretNames() []string {
+	var names []string
+	if in.Spec.EncryptionKeySecret == nil {
+		names = append(names, in.encryptionKeySecretName())
+	}
+	if in.Spec.Admin.PasswordSecret == nil {
+		names = append(names, in.adminPasswordSecret().Name)
+	}
+	if in.Spec.Database.Managed != nil {
+		names = append(names, in.name(componentDatabase), in.postgresCASecretName(), in.postgresTLSSecretName())
+	}
+	if in.tlsEnabled() && in.Spec.API.TLS.SecretName == "" {
+		names = append(names, in.apiTLSSecretName())
+	}
+	return names
+}
+
+// keptSecretNames are every Secret the operator generates for a
+// DispatchOps of in's name, whatever its spec: those a deleted one may
+// have left (see Reconciler.adoptKeptSecrets).
+func (in install) keptSecretNames() []string {
+	return []string{in.name("encryption-key"), in.name("admin-password"), in.name(componentDatabase),
+		in.postgresCASecretName(), in.postgresTLSSecretName(), in.name(componentAPI) + "-tls"}
+}
+
 // generatedSecret is a Secret the operator creates once and never changes
 // or deletes: losing one would lose data or access.
 func (in install) generatedSecret(component, name string, data map[string]string) *corev1.Secret {
-	s := &corev1.Secret{ObjectMeta: in.meta(component, name), Type: corev1.SecretTypeOpaque, StringData: data}
+	s := &corev1.Secret{ObjectMeta: in.secretMeta(component, name), Type: corev1.SecretTypeOpaque, StringData: data}
 	s.Annotations = map[string]string{generatedAnnotation: "true"}
 	return s
 }
@@ -272,7 +424,7 @@ func (in install) selfSignedSecret(component, name string, hosts []string) (*cor
 		return nil, err
 	}
 	s := &corev1.Secret{
-		ObjectMeta: in.meta(component, name),
+		ObjectMeta: in.secretMeta(component, name),
 		Type:       corev1.SecretTypeTLS,
 		Data: map[string][]byte{
 			corev1.TLSCertKey:       certPEM,
@@ -324,8 +476,10 @@ func certNeedsRenewal(s *corev1.Secret, hosts []string, now time.Time) bool {
 }
 
 // certHash identifies a certificate Secret's certificate.
-func certHash(s *corev1.Secret) string {
-	sum := sha256.Sum256(s.Data[corev1.TLSCertKey])
+func certHash(s *corev1.Secret) string { return hash16(s.Data[corev1.TLSCertKey]) }
+
+func hash16(b []byte) string {
+	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])[:16]
 }
 
@@ -440,6 +594,35 @@ func (in install) serverPod(component string, containers []corev1.Container, ini
 	}
 }
 
+// withDatabaseCA mounts the managed database's CA certificate (never its
+// key) into every container of a server pod, so its URL can verify the
+// database (postgresSSLMode). With restart, the pods are also restarted
+// when the CA changes: the servers read it only when they start. Renewing
+// the database's own certificate doesn't change the CA.
+func (in install) withDatabaseCA(pod *corev1.PodTemplateSpec, restart bool) {
+	if in.Spec.Database.Managed == nil {
+		return
+	}
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: "postgres-ca", VolumeSource: corev1.VolumeSource{
+		Secret: &corev1.SecretVolumeSource{
+			SecretName: in.postgresCASecretName(),
+			Items:      []corev1.KeyToPath{{Key: caCertKey, Path: "ca.crt"}},
+		},
+	}})
+	mount := corev1.VolumeMount{Name: "postgres-ca", MountPath: postgresCAPath, ReadOnly: true}
+	for _, list := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+		for i := range list {
+			list[i].VolumeMounts = append(list[i].VolumeMounts, mount)
+		}
+	}
+	if restart && in.postgresCAHash != "" {
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[postgresCAAnnotation] = in.postgresCAHash
+	}
+}
+
 // --- Migrations ----------------------------------------------------------------
 
 // migrationJobName is unique per image, so each upgrade runs its own Job.
@@ -473,6 +656,7 @@ func (in install) migrationJob(image string) *batchv1.Job {
 		}}}}
 	}
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	in.withDatabaseCA(&pod, false)
 	job := &batchv1.Job{
 		ObjectMeta: in.meta(componentMigrate, in.migrationJobName(image)),
 		Spec: batchv1.JobSpec{
@@ -563,6 +747,7 @@ func (in install) apiDeployment() *appsv1.Deployment {
 	if in.tlsEnabled() {
 		pod.Spec.Volumes = []corev1.Volume{in.apiTLSVolume("tls")}
 	}
+	in.withDatabaseCA(&pod, true)
 	in.withMetrics(&pod)
 	return &appsv1.Deployment{
 		ObjectMeta: in.meta(componentAPI, in.name(componentAPI)),
@@ -646,18 +831,27 @@ func (in install) taskManagerServiceAccount() *corev1.ServiceAccount {
 }
 
 // taskManagerRole is what the task manager does in the job namespace: run
-// Kubernetes Jobs with their token and pull Secrets, watch their pods, and
-// hold the leader Lease.
+// Kubernetes Jobs (create them suspended, then start them: patch) with
+// their token and pull Secrets, watch their pods, and hold its leader
+// Lease. On Secrets it may only create: each job's Secrets are owned by
+// its Job, so deleting the Job deletes them. With no get, list, watch,
+// patch, update or delete, the API gives it no other Secret in the
+// namespace (with the default job namespace, the installation's own: the
+// encryption key among them), and it can't delete one. Its pods can still
+// mount any Secret there; see docs/administration.md. Creating a Lease
+// can't be limited to a name.
 func (in install) taskManagerRole() *rbacv1.Role {
 	m := in.meta(componentTaskManager, in.jobRBACName())
 	m.Namespace = in.jobNamespace()
 	return &rbacv1.Role{
 		ObjectMeta: m,
 		Rules: []rbacv1.PolicyRule{
-			{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get", "list", "watch", "create", "delete"}},
+			{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get", "list", "watch", "create", "patch", "delete"}},
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch"}},
-			{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "create", "delete", "patch"}},
-			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "create", "update"}},
+			{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"create"}},
+			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "update"},
+				ResourceNames: []string{joblabels.LeaseName(in.installation())}},
+			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"create"}},
 		},
 	}
 }
@@ -679,6 +873,7 @@ func (in install) taskManagerDeployment() *appsv1.Deployment {
 	env := append(in.commonEnv(),
 		corev1.EnvVar{Name: "DISPATCH_RUNNER_API_URL", Value: in.apiURL()},
 		corev1.EnvVar{Name: "DISPATCH_JOB_NAMESPACE", Value: in.jobNamespace()},
+		corev1.EnvVar{Name: installationEnv, Value: in.installation()},
 		corev1.EnvVar{Name: "DISPATCH_LEADER_ELECTION", Value: "true"},
 	)
 	if tm.MaxConcurrentJobs != nil {
@@ -732,6 +927,7 @@ func (in install) taskManagerDeployment() *appsv1.Deployment {
 	if in.tlsEnabled() {
 		pod.Spec.Volumes = []corev1.Volume{in.apiTrustVolume("api-tls")}
 	}
+	in.withDatabaseCA(&pod, true)
 	in.withMetrics(&pod)
 	pod.Spec.ServiceAccountName = in.name(componentTaskManager)
 	pod.Spec.AutomountServiceAccountToken = new(true)
@@ -948,19 +1144,80 @@ func (in install) serverNetworkPolicy(component string) *networkingv1.NetworkPol
 	}
 }
 
-// Addresses job pods may never reach: link-local, where cloud metadata
-// services are (169.254.169.254, fd00:ec2::254).
+// Addresses job pods may never reach: cloud metadata and credential
+// services. Link-local (169.254.169.254 on most clouds, and EKS Pod
+// Identity's 169.254.170.23), Alibaba Cloud's 100.100.100.200, Azure's
+// WireServer 168.63.129.16, AWS's IPv6 fd00:ec2::254 and EKS Pod
+// Identity's fd00:ec2::23, and Google Cloud's IPv6 fd20:ce::254.
 var (
-	jobEgressExceptV4 = []string{"169.254.0.0/16"}
-	jobEgressExceptV6 = []string{"fe80::/10", "fd00:ec2::254/128"}
+	jobEgressExceptV4 = []string{"169.254.0.0/16", "100.100.100.200/32", "168.63.129.16/32"}
+	jobEgressExceptV6 = []string{"fe80::/10", "fd00:ec2::254/128", "fd00:ec2::23/128", "fd20:ce::254/128"}
 )
 
+// JobDNS is where job pods may send DNS queries (port 53): to the pods
+// NamespaceSelector and PodSelector select, and to CIDRs. With neither
+// selector nor CIDRs, anywhere.
+type JobDNS struct {
+	// NamespaceSelector selects the DNS pods' namespaces. Nil with a
+	// PodSelector means every namespace (not, as in a NetworkPolicy, only
+	// the job namespace).
+	NamespaceSelector *metav1.LabelSelector
+	// PodSelector selects the DNS pods. Nil with a NamespaceSelector means
+	// every pod in those namespaces. Port 5353 is allowed to them as well
+	// as 53: a NetworkPolicy sees the pod's port, and OpenShift's DNS pods
+	// listen on 5353 behind the Service's 53.
+	PodSelector *metav1.LabelSelector
+	// CIDRs are resolvers outside pods, e.g. NodeLocal DNSCache's
+	// link-local address (169.254.20.10/32).
+	CIDRs []string
+}
+
+// DefaultJobDNS is the cluster DNS of most distributions: CoreDNS (or
+// kube-dns) pods labeled k8s-app=kube-dns in kube-system.
+func DefaultJobDNS() *JobDNS {
+	return &JobDNS{
+		NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: "kube-system"}},
+		PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
+	}
+}
+
+func (d *JobDNS) peers() ([]networkingv1.NetworkPolicyPeer, error) {
+	var to []networkingv1.NetworkPolicyPeer
+	if d.NamespaceSelector != nil || d.PodSelector != nil {
+		nsSel := d.NamespaceSelector
+		if nsSel == nil {
+			nsSel = &metav1.LabelSelector{} // every namespace
+		}
+		to = append(to, networkingv1.NetworkPolicyPeer{NamespaceSelector: nsSel, PodSelector: d.PodSelector})
+	}
+	for _, c := range d.CIDRs {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			return nil, fmt.Errorf("job DNS CIDR: %w", err)
+		}
+		to = append(to, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: p.Masked().String()}})
+	}
+	return to, nil
+}
+
+// jobPodLabels are the labels the task manager gives every job pod, Job
+// and Secret (see internal/taskmanager/joblabels), whatever its
+// installation.
+func jobPodLabels() map[string]string {
+	return map[string]string{"app.kubernetes.io/managed-by": jobPodManagedBy, "app.kubernetes.io/component": jobPodComponent}
+}
+
+// jobPodSelector selects every job pod in the job namespace, not only
+// those labeled with this installation: the namespace serves only it (see
+// claim.go), so any job pod there is its own, or one
+// left from before (an older task manager's without the label, or its
+// DispatchOps's before it was created again with a new UID).
+func (in install) jobPodSelector() map[string]string { return jobPodLabels() }
+
 // jobNetworkPolicy, in the job namespace, lets job pods connect only to
-// the API server, DNS, and addresses outside the excepted ranges; nothing
-// may connect to them. It selects every job pod in the namespace, so
-// installations sharing it allow each other's job pods their API servers
-// too.
-func (in install) jobNetworkPolicy() (*networkingv1.NetworkPolicy, error) {
+// this installation's API server, DNS (see JobDNS), and addresses outside
+// the excepted ranges; nothing may connect to them.
+func (in install) jobNetworkPolicy(dns *JobDNS) (*networkingv1.NetworkPolicy, error) {
 	v4, v6 := jobEgressExceptV4, jobEgressExceptV6
 	for _, s := range in.Spec.NetworkPolicy.JobEgressExcept {
 		p, err := netip.ParsePrefix(s)
@@ -973,15 +1230,24 @@ func (in install) jobNetworkPolicy() (*networkingv1.NetworkPolicy, error) {
 			v6 = append(v6, p.Masked().String())
 		}
 	}
+	if dns == nil {
+		dns = DefaultJobDNS()
+	}
+	dnsPeers, err := dns.peers()
+	if err != nil {
+		return nil, err
+	}
 	udp := corev1.ProtocolUDP
+	dnsPorts := []networkingv1.NetworkPolicyPort{{Protocol: &udp, Port: new(intstr.FromInt32(53))}, tcpPort(53)}
+	if dns.PodSelector != nil {
+		dnsPorts = append(dnsPorts, networkingv1.NetworkPolicyPort{Protocol: &udp, Port: new(intstr.FromInt32(5353))}, tcpPort(5353))
+	}
 	m := in.meta(componentJobs, in.jobObjectName(componentJobs))
 	m.Namespace = in.jobNamespace()
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: m,
 		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{
-				"app.kubernetes.io/managed-by": jobPodManagedBy, "app.kubernetes.io/component": jobPodComponent,
-			}},
+			PodSelector: metav1.LabelSelector{MatchLabels: in.jobPodSelector()},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
 			Egress: []networkingv1.NetworkPolicyEgressRule{
 				{
@@ -991,11 +1257,9 @@ func (in install) jobNetworkPolicy() (*networkingv1.NetworkPolicy, error) {
 					}},
 					Ports: []networkingv1.NetworkPolicyPort{tcpPort(in.apiPort())},
 				},
-				// DNS wherever the resolver is (CoreDNS, NodeLocal DNSCache
-				// on a link-local address, or outside the cluster).
-				{Ports: []networkingv1.NetworkPolicyPort{
-					{Protocol: &udp, Port: new(intstr.FromInt32(53))}, tcpPort(53),
-				}},
+				// DNS, only to the resolver, so port 53 isn't a way around
+				// the excepted ranges.
+				{To: dnsPeers, Ports: dnsPorts},
 				{To: []networkingv1.NetworkPolicyPeer{
 					{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: v4}},
 					{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: v6}},

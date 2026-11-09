@@ -36,7 +36,8 @@ variable "SOURCE" {
   default    = "https://github.com/haught/dispatch-ops"
 }
 
-# Set in GitHub Actions to cache layers there, one cache scope per image.
+# Set in GitHub Actions (ci.yml) to cache layers there, one cache scope per
+# image. Release builds leave it unset, so they never restore a cache.
 variable "GHA_CACHE" {
   default    = ""
 }

@@ -1,0 +1,6 @@
+# The operator limited to some namespaces, each job namespace mapped to the
+# namespaces whose DispatchOps may use it, for `make helm-lint`.
+watchNamespaces: [team-a, team-b, team-c]
+allowedJobNamespaces:
+  jobs-a: [team-a]
+  jobs-b: [team-b, team-c]

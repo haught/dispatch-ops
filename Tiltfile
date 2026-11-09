@@ -55,7 +55,11 @@ go_build = 'CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=%s"
 # --- Namespaces ----------------------------------------------------------------
 
 def namespace(name):
-    return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name}}
+    ns = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name}}
+    if name == JOB_NAMESPACE:
+        # The operator runs jobs only where Pod Security is enforced.
+        ns['metadata']['labels'] = {'pod-security.kubernetes.io/enforce': 'restricted'}
+    return ns
 
 k8s_yaml(encode_yaml_stream([namespace(n) for n in [OPERATOR_NAMESPACE, NAMESPACE, JOB_NAMESPACE]]))
 k8s_resource(
@@ -116,7 +120,7 @@ k8s_yaml(helm(CHART, name='dispatch-ops-operator', namespace=OPERATOR_NAMESPACE,
     'image.repository=dispatch-ops-operator',
     'serverImage.repository=dispatch-ops',
     # deploy/dev/dispatchops.yaml runs its jobs there.
-    'allowedJobNamespaces={%s}' % JOB_NAMESPACE,
+    'allowedJobNamespaces.%s={%s}' % (JOB_NAMESPACE, NAMESPACE),
 ]))
 k8s_resource(
     'dispatch-ops-operator',

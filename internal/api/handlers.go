@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -91,26 +92,37 @@ func (h *Handlers) Login(ctx context.Context, req apigen.LoginRequestObject) (ap
 	}
 
 	clientIP := auth.ClientIPFromContext(ctx)
-	limited := h.LoginLimits.Enabled()
-	if limited {
-		wait, err := h.Store.LoginRetryAfter(ctx, req.Body.Username, clientIP, h.LoginLimits)
+	// The attempt is counted as a failure before the password is checked,
+	// so concurrent attempts can't all get past the limit; it is forgotten
+	// if the password turns out right, or is never checked.
+	var attempt int64
+	if h.LoginLimits.Enabled() {
+		a, err := h.Store.ReserveLoginAttempt(ctx, req.Body.Username, clientIP, h.LoginLimits)
+		if errors.Is(err, store.ErrLoginBusy) {
+			h.Log.WarnContext(ctx, "sign-in turned away: too many concurrent attempts", "client_ip", clientIP)
+			return loginRefused{http.StatusServiceUnavailable, "Too many sign-ins in progress; try again shortly", 5 * time.Second}, nil
+		}
 		if err != nil {
 			return nil, err
 		}
-		if wait > 0 {
+		if a.RetryAfter > 0 {
 			// Not the username: it is unverified and may be a mistyped password.
 			h.Log.WarnContext(ctx, "sign-in throttled", "client_ip", clientIP)
-			return loginRefused{http.StatusTooManyRequests, "Too many failed sign-in attempts; try again later", wait}, nil
+			if len(a.Tripped) > 0 {
+				h.auditLoginThrottled(ctx, req.Body.Username, clientIP, a)
+			}
+			return loginRefused{http.StatusTooManyRequests, "Too many failed sign-in attempts; try again later", a.RetryAfter}, nil
 		}
+		attempt = a.ID
 	}
-	failed := func() (apigen.LoginResponseObject, error) {
-		if limited {
-			if err := h.Store.RecordLoginFailure(ctx, req.Body.Username, clientIP); err != nil {
-				return nil, err
+	checked := false
+	defer func() {
+		if attempt != 0 && !checked {
+			if err := h.Store.ReleaseLoginAttempt(context.WithoutCancel(ctx), attempt); err != nil {
+				h.Log.ErrorContext(ctx, "could not release sign-in attempt", "err", err)
 			}
 		}
-		return invalid, nil
-	}
+	}()
 
 	// Hashing is bounded server-wide; wait a little for a slot, then turn
 	// the attempt away rather than queue without end.
@@ -122,22 +134,23 @@ func (h *Handlers) Login(ctx context.Context, req apigen.LoginRequestObject) (ap
 		}
 		return nil, err
 	}
+	burn := func() (apigen.LoginResponseObject, error) {
+		if err := auth.BurnPasswordCheckContext(hashCtx, req.Body.Password); err != nil {
+			return busy(err)
+		}
+		checked = true
+		return invalid, nil
+	}
 
 	user, err := h.Store.GetUserByUsername(ctx, req.Body.Username)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		if err := auth.BurnPasswordCheckContext(hashCtx, req.Body.Password); err != nil {
-			return busy(err)
-		}
-		return failed()
+		return burn()
 	case err != nil:
 		return nil, err
 	}
 	if !user.IsActive || user.AuthSource != "local" || user.PasswordHash == nil {
-		if err := auth.BurnPasswordCheckContext(hashCtx, req.Body.Password); err != nil {
-			return busy(err)
-		}
-		return failed()
+		return burn()
 	}
 	ok, err := auth.VerifyPasswordContext(hashCtx, req.Body.Password, *user.PasswordHash)
 	if err != nil {
@@ -146,12 +159,13 @@ func (h *Handlers) Login(ctx context.Context, req apigen.LoginRequestObject) (ap
 		}
 		return busy(err)
 	}
+	checked = true
 	if !ok {
 		h.Log.InfoContext(ctx, "sign-in failed", "username", user.Username, "client_ip", clientIP)
-		return failed()
+		return invalid, nil
 	}
-	if limited {
-		if err := h.Store.ClearLoginFailures(ctx, req.Body.Username); err != nil {
+	if attempt != 0 {
+		if err := h.Store.LoginSucceeded(ctx, attempt, req.Body.Username, clientIP); err != nil {
 			return nil, err
 		}
 	}
@@ -175,6 +189,28 @@ func (h *Handlers) Login(ctx context.Context, req apigen.LoginRequestObject) (ap
 		Body:    toAPIUser(user),
 		Headers: apigen.Login200ResponseHeaders{SetCookie: &c},
 	}, nil
+}
+
+// auditLoginThrottled records that sign-ins started being refused by the
+// limits in a.Tripped. Only the first refusal by a limit in a window gets
+// here, so a flood of attempts doesn't flood the log. The username is named
+// only if it is an account's: otherwise it may be a mistyped password.
+func (h *Handlers) auditLoginThrottled(ctx context.Context, username, clientIP string, a store.LoginAttempt) {
+	r := auditRecord{Action: apigen.LoginThrottled, ResourceType: apigen.AuditResourceTypeUser}
+	tripped := make([]string, len(a.Tripped))
+	for i, l := range a.Tripped {
+		tripped[i] = string(l)
+	}
+	after := map[string]any{
+		"limits": tripped, "clientIp": clientIP, "retryAfterSeconds": int(math.Ceil(a.RetryAfter.Seconds())),
+	}
+	if !slices.Equal(a.Tripped, []store.LoginLimit{store.LoginLimitIP}) {
+		if user, err := h.Store.GetUserByUsername(ctx, username); err == nil {
+			r.ResourceID, r.ResourceName = user.ID, user.Username
+		}
+	}
+	r.After = after
+	h.auditAs(ctx, uuid.Nil, "", "password", r)
 }
 
 // loginRefused turns a sign-in away without checking the password: 429 when

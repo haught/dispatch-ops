@@ -1,4 +1,7 @@
 # Every installation.* setting, for `make helm-lint`. Not a real installation.
+# Its job namespace, opted in for its namespace.
+allowedJobNamespaces:
+  dispatch-jobs: [dispatch-ops]
 installation:
   enabled: true
   name: dispatch-ops

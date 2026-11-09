@@ -14,6 +14,7 @@ import (
 
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/auth"
+	"dispatch-ops/internal/extravars"
 	"dispatch-ops/internal/hostpattern"
 	"dispatch-ops/internal/metrics"
 	"dispatch-ops/internal/rbac"
@@ -372,6 +373,14 @@ func (h *Handlers) relaunchConfig(ctx context.Context, j store.Job) (store.JobCo
 	if j.TemplateID == nil {
 		if !p.IsAdmin {
 			return store.JobConfig{}, nil, forbidden("The job's template was deleted; only system administrators can relaunch it")
+		}
+		// The stored overrides still pass the launch checks (no Jinja,
+		// ansible_* or __ansible_* extra vars), as they were kept from
+		// before some of those checks existed.
+		if j.Overrides != nil {
+			if err := extravars.Check(j.Overrides.ExtraVars); err != nil {
+				return store.JobConfig{}, nil, badRequest("the job can't be relaunched as it was launched: %s", err)
+			}
 		}
 		return j.Config, j.Overrides, nil
 	}

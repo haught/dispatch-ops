@@ -220,14 +220,14 @@ func TestOIDCSignIn(t *testing.T) {
 
 	// A username that belongs to a local account is refused.
 	resp = idp.signIn(srv.URL, map[string]any{"sub": unique("sub"), "preferred_username": username})
-	if loc := resp.Header.Get("Location"); !strings.HasPrefix(loc, "/login?error=") || !strings.Contains(loc, "another+account") {
+	if loc := resp.Header.Get("Location"); loc != "/login?error=username_taken" {
 		t.Errorf("conflicting username redirects to %q", loc)
 	}
 
 	// Deactivated users can't sign in.
 	admin.mustDo("PATCH", "/api/v1/users/"+me["id"].(string), map[string]any{"isActive": false}, 200)
 	resp = idp.signIn(srv.URL, claims)
-	if loc := resp.Header.Get("Location"); !strings.Contains(loc, "deactivated") {
+	if loc := resp.Header.Get("Location"); loc != "/login?error=deactivated" {
 		t.Errorf("deactivated user redirects to %q", loc)
 	}
 
@@ -238,8 +238,20 @@ func TestOIDCSignIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if loc := resp.Header.Get("Location"); resp.StatusCode != 302 || !strings.Contains(loc, "expired") {
+	if loc := resp.Header.Get("Location"); resp.StatusCode != 302 || loc != "/login?error=expired" {
 		t.Errorf("forged callback = %d %q", resp.StatusCode, loc)
+	}
+
+	// The provider's error text isn't passed on to the sign-in page; only a
+	// fixed code is.
+	resp, err = noRedirect.Get(srv.URL + "/api/v1/auth/oidc/callback?error=access_denied&error_description=" +
+		url.QueryEscape("Your account is suspended, call +1-555-0100"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if loc := resp.Header.Get("Location"); loc != "/login?error=provider_refused" {
+		t.Errorf("provider error redirects to %q", loc)
 	}
 
 	// Sign-ins are in the audit log.

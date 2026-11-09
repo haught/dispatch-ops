@@ -292,12 +292,33 @@ func runSchedule(ctx context.Context, tx pgx.Tx, id uuid.UUID) (ScheduleRun, err
 	if err != nil {
 		return ScheduleRun{}, err
 	}
+	// A schedule that turns itself off for a problem (its owner lost
+	// access, or its expression no longer parses) is audited as an update
+	// by no one, like an admin turning it off would be.
+	if run.Err != nil && next == nil && sc.Enabled {
+		if err := auditScheduleDisabled(ctx, tx, sc, lastError); err != nil {
+			return ScheduleRun{}, err
+		}
+	}
 	sc.NextRunAt, sc.Enabled, sc.LastRunAt, sc.LastError = next, next != nil, &now, lastError
 	if run.JobID != nil {
 		sc.LastJobID = run.JobID
 	}
 	run.Schedule = sc
 	return run, nil
+}
+
+// auditScheduleDisabled records in the audit log that the server turned
+// schedule sc off because of reason. The before and after values are the
+// API's field names, as the API's own audit entries use.
+func auditScheduleDisabled(ctx context.Context, tx pgx.Tx, sc Schedule, reason string) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO audit_log (actor_name, auth_method, action, resource_type, resource_id, resource_name, before, after)
+		VALUES ('', 'system', 'update', 'schedule', $1, $2, $3, $4)`,
+		sc.ID, sc.Name,
+		map[string]any{"enabled": true, "lastError": sc.LastError},
+		map[string]any{"enabled": false, "lastError": reason})
+	return err
 }
 
 // checkScheduleOwner returns a LaunchError if the schedule's owner may no

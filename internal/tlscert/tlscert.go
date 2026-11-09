@@ -32,22 +32,86 @@ import (
 // addresses) for the given duration. The first host is the subject's
 // common name.
 func SelfSigned(hosts []string, validity time.Duration) (certPEM, keyPEM []byte, err error) {
-	hosts = uniqueHosts(hosts)
-	if len(hosts) == 0 {
-		return nil, nil, errors.New("tlscert: at least one host is required")
-	}
-	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	tmpl, err := serverTemplate(hosts, validity)
 	if err != nil {
 		return nil, nil, err
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl.Subject.Organization = []string{"Dispatch Ops (self-signed)"}
+	return issue(tmpl, nil, nil)
+}
+
+// CA returns a new self-signed CA certificate and its ECDSA P-384 private
+// key, both PEM-encoded, valid for the given duration, for Signed to issue
+// server certificates with.
+func CA(commonName string, validity time.Duration) (certPEM, keyPEM []byte, err error) {
+	serial, err := newSerial()
 	if err != nil {
 		return nil, nil, err
 	}
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: hosts[0], Organization: []string{"Dispatch Ops (self-signed)"}},
+		Subject:               pkix.Name{CommonName: commonName, Organization: []string{"Dispatch Ops"}},
+		NotBefore:             now.Add(-time.Hour), // tolerate clock skew
+		NotAfter:              now.Add(validity),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLenZero:        true,
+	}
+	return issue(tmpl, nil, nil)
+}
+
+// Signed returns a new server certificate for hosts, valid for the given
+// duration, and its ECDSA P-384 private key, both PEM-encoded, issued by the
+// CA whose PEM certificate and key (from CA) are given.
+func Signed(hosts []string, validity time.Duration, caCertPEM, caKeyPEM []byte) (certPEM, keyPEM []byte, err error) {
+	ca, err := ParseCertificate(caCertPEM)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tlscert: CA certificate: %w", err)
+	}
+	block, _ := pem.Decode(caKeyPEM)
+	if block == nil {
+		return nil, nil, errors.New("tlscert: CA key: no PEM block")
+	}
+	caKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tlscert: CA key: %w", err)
+	}
+	tmpl, err := serverTemplate(hosts, validity)
+	if err != nil {
+		return nil, nil, err
+	}
+	return issue(tmpl, ca, caKey)
+}
+
+// ParseCertificate parses the first certificate in PEM data.
+func ParseCertificate(certPEM []byte) (*x509.Certificate, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("no PEM certificate")
+	}
+	return x509.ParseCertificate(block.Bytes)
+}
+
+func newSerial() (*big.Int, error) {
+	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+}
+
+// serverTemplate is a server certificate for hosts, valid from now.
+func serverTemplate(hosts []string, validity time.Duration) (*x509.Certificate, error) {
+	hosts = uniqueHosts(hosts)
+	if len(hosts) == 0 {
+		return nil, errors.New("tlscert: at least one host is required")
+	}
+	serial, err := newSerial()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: hosts[0]},
 		NotBefore:             now.Add(-time.Hour), // tolerate clock skew
 		NotAfter:              now.Add(validity),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
@@ -61,7 +125,20 @@ func SelfSigned(hosts []string, validity time.Duration) (certPEM, keyPEM []byte,
 			tmpl.DNSNames = append(tmpl.DNSNames, h)
 		}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	return tmpl, nil
+}
+
+// issue makes a new ECDSA P-384 key and a certificate for it from tmpl,
+// signed by parent's key, or self-signed if parent is nil.
+func issue(tmpl, parent *x509.Certificate, parentKey any) (certPEM, keyPEM []byte, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	if parent == nil {
+		parent, parentKey = tmpl, key
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
 	if err != nil {
 		return nil, nil, err
 	}

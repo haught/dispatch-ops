@@ -1,6 +1,13 @@
 The Dispatch Ops operator is running in {{ .Release.Namespace }}. It runs
 {{ .Values.serverImage.repository }}:{{ .Values.serverImage.tag | default .Chart.AppVersion }} for DispatchOps resources that don't name an image.
 {{- $ns := include "dispatch-ops-operator.installationNamespace" . }}
+{{- if not .Values.allowJobNamespacesWithoutPodSecurity }}
+
+Job namespaces (by default each DispatchOps's own namespace) must enforce Pod
+Security, or the operator won't run the task manager there:
+
+  kubectl label namespace <namespace> pod-security.kubernetes.io/enforce=restricted
+{{- end }}
 {{- if .Values.installation.enabled }}
 {{- if .Capabilities.APIVersions.Has "dispatch-ops.io/v1alpha1/DispatchOps" }}
 

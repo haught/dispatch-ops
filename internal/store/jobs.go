@@ -494,9 +494,12 @@ type JobEvent struct {
 }
 
 // recapAllowance is how far past the output cap a job's Ansible recap
-// (playbook_stats events) may still be stored, so its per-host results
-// survive a truncated log without letting a job bypass the cap.
-const recapAllowance = 16 << 20
+// (playbook_stats events) may still be stored, in all, so its per-host
+// results survive a truncated log without letting a job bypass the cap:
+// the runner could send any number of such events. The recap comes in
+// events of 50 hosts (a few KiB each), so 1 MiB keeps it for several thousand
+// hosts.
+const recapAllowance = 1 << 20
 
 // AppendJobEvents stores events for a running job, skipping any whose seq is
 // already stored, and notifies stream listeners. It also counts as a

@@ -559,9 +559,12 @@ export interface paths {
          *     credentials like any job: generic credentials' inputs as
          *     environment variables, which inventory plugins commonly read. Needs
          *     the admin role on the inventory and the use role on the project and
-         *     each credential it adds. Changing the project, source path or
-         *     execution environment of a source that keeps credentials needs the
-         *     use role on all of them, since the sync runs that code with them.
+         *     each credential it adds. Changing the project, source path,
+         *     execution environment or credentials of a source needs the use role
+         *     on all the credentials it will have, since the sync runs that code
+         *     with them, and one credential's variables can decide where
+         *     another's secrets go. Generic credentials that set the same
+         *     variable are refused.
          */
         put: operations["setInventorySource"];
         post?: never;
@@ -871,9 +874,12 @@ export interface paths {
          *     project, inventory or credential it starts to reference. A change
          *     to what its jobs run or where (`command`, `entrypoint`,
          *     `arguments`, `extraVars`, `executionEnvironmentId`, `projectId`,
-         *     `inventoryId`, or allowing `command`, `extraVars` or `inventory` to
-         *     be overridden) also needs the use role on all the template's
-         *     credentials, since such a change could make a job hand them over.
+         *     `inventoryId`, `verbosity`, `tags`, `skipTags`, `limit`, adding or
+         *     removing any of `credentialIds`, or allowing `command`,
+         *     `extraVars`, `inventory`, `tags`, `skipTags` or `limit` to be
+         *     overridden) also needs the use role on all the credentials the
+         *     template will have, since such a change could make a job hand them
+         *     over. Generic credentials that set the same variable are refused.
          */
         patch: operations["updateJobTemplate"];
         trace?: never;
@@ -1687,7 +1693,7 @@ export interface components {
             total: number;
         };
         /** @enum {string} */
-        AuditAction: "create" | "update" | "delete" | "launch" | "cancel" | "login" | "grant" | "revoke" | "add_member" | "remove_member";
+        AuditAction: "create" | "update" | "delete" | "launch" | "cancel" | "login" | "login_throttled" | "grant" | "revoke" | "add_member" | "remove_member";
         /** @enum {string} */
         AuditResourceType: "inventory" | "host" | "group" | "credential" | "execution_environment" | "project" | "job_template" | "job" | "user" | "team" | "api_token" | "schedule" | "notification_target";
         AuditEntry: {
@@ -1701,8 +1707,10 @@ export interface components {
             actorName: string;
             /**
              * @description How the actor authenticated: `session`, `api_token`, `password`
-             *     or `oidc` (sign-ins), or `cli` (`dispatch-ops user create` and
-             *     `user grant-admin`)
+             *     or `oidc` (sign-ins), `cli` (`dispatch-ops user create` and
+             *     `user grant-admin`), or `system` for changes the server makes
+             *     itself, with no actor (such as disabling a schedule whose
+             *     template can no longer launch)
              */
             authMethod: string;
             action: components["schemas"]["AuditAction"];
@@ -2573,6 +2581,8 @@ export interface components {
             jobType: components["schemas"]["JobType"];
             command: string[];
             extraVars: components["schemas"]["Variables"];
+            /** @description The launcher's extra vars: a subset of extraVars, which already includes them. Runners pass them to Ansible marked unsafe, so they are never templated. */
+            overrideVars?: components["schemas"]["Variables"];
             limit: string;
             timeoutSeconds: number;
             project: components["schemas"]["RunnerProject"] | null;

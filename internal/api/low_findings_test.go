@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -142,6 +143,18 @@ func TestScheduleOwnerAccessIsChecked(t *testing.T) {
 			sc := admin.mustDo("GET", "/api/v1/schedules/"+scID, nil, 200)
 			if sc["enabled"] != false || !strings.Contains(sc["lastError"].(string), "set it up") {
 				t.Errorf("schedule = %v", sc)
+			}
+			// Turning itself off is in the audit log.
+			log := admin.mustDo("GET", "/api/v1/audit-log?resourceType=schedule&action=update&resourceId="+scID, nil, 200)
+			items := log["items"].([]any)
+			if len(items) != 1 {
+				t.Fatalf("schedule audit entries = %v", items)
+			}
+			e := items[0].(map[string]any)
+			after, _ := e["after"].(map[string]any)
+			if e["actor"] != nil || e["authMethod"] != "system" || after["enabled"] != false ||
+				!strings.Contains(fmt.Sprint(after["lastError"]), "set it up") {
+				t.Errorf("audit entry = %v", e)
 			}
 
 			// An admin turning it back on becomes its owner, and it runs.

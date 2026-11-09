@@ -69,10 +69,12 @@ func checkTemplate(f store.JobTemplateFields) error {
 }
 
 // checkTemplateCredentials checks the credentials a template of jobType
-// uses. A playbook runs with at most one machine credential (ssh or
-// username_password) and one vault password per vault ID.
+// uses. No two generic credentials may set the same environment variable
+// (the runner refuses such jobs too). A playbook runs with at most one
+// machine credential (ssh or username_password) and one vault password per
+// vault ID.
 func (h *Handlers) checkTemplateCredentials(ctx context.Context, jobType string, ids []uuid.UUID) error {
-	if jobType != string(apigen.Ansible) || len(ids) == 0 {
+	if len(ids) == 0 {
 		return nil
 	}
 	creds, err := h.Store.GetCredentials(ctx, ids)
@@ -81,6 +83,12 @@ func (h *Handlers) checkTemplateCredentials(ctx context.Context, jobType string,
 	}
 	if err != nil {
 		return err
+	}
+	if err := checkGenericEnvConflicts(creds); err != nil {
+		return err
+	}
+	if jobType != string(apigen.Ansible) {
+		return nil
 	}
 	var machine []string
 	vaultIDs := map[string]string{}
@@ -107,12 +115,37 @@ func (h *Handlers) checkTemplateCredentials(ctx context.Context, jobType string,
 	return nil
 }
 
+// checkGenericEnvConflicts refuses generic credentials that set the same
+// environment variable, which the runner refuses too: one would silently
+// override the other, deciding where its secrets go. Names are compared
+// ignoring case, like the runner does, since some tools read either case.
+func checkGenericEnvConflicts(creds []store.Credential) error {
+	setBy := map[string]store.Credential{}
+	for _, c := range creds {
+		if c.Kind != "generic" {
+			continue
+		}
+		names := slices.Concat(c.SecretFields, slices.Collect(maps.Keys(c.PublicInputs)))
+		slices.Sort(names)
+		for _, name := range names {
+			key := strings.ToUpper(name)
+			if other, ok := setBy[key]; ok && other.ID != c.ID {
+				return badRequest("credentials %q and %q both set %s; a job's credentials can't set the same environment variable",
+					other.Name, c.Name, name)
+			}
+			setBy[key] = c
+		}
+	}
+	return nil
+}
+
 // checkTemplateRefs checks that the caller may use the project, inventory
 // and credentials a template references. With old set, only references
 // that change are checked, so a template's admin can edit it without being
 // able to use everything it already references, except that a change to
-// what the job runs, or where, needs use on all its credentials (see
-// changesWhatRuns).
+// what the job runs, or where, or with which credentials, needs use on all
+// the credentials it will have (see changesWhatRuns). Credentials it stops
+// referencing need nothing: the job no longer gets them.
 func (h *Handlers) checkTemplateRefs(ctx context.Context, old *store.JobTemplate, f store.JobTemplateFields) error {
 	if old != nil {
 		if what := changesWhatRuns(*old, f); what != "" {
@@ -149,9 +182,11 @@ func (h *Handlers) checkTemplateRefs(ctx context.Context, old *store.JobTemplate
 
 // credentialOverrides are the launch overrides that let a launcher change
 // what a job runs or where, and so reach its credentials (a launch-time
-// inventory brings its own host vars, for one).
+// inventory brings its own host vars, for one, and tags or a limit can skip
+// a playbook's guards), matching the fields changesWhatRuns gates.
 var credentialOverrides = []string{
 	string(apigen.OverridableFieldCommand), string(apigen.OverridableFieldExtraVars), string(apigen.OverridableFieldInventory),
+	string(apigen.OverridableFieldTags), string(apigen.OverridableFieldSkipTags), string(apigen.OverridableFieldLimit),
 }
 
 // changesWhatRuns names a field whose change from old to f changes the
@@ -175,6 +210,28 @@ func changesWhatRuns(old store.JobTemplate, f store.JobTemplateFields) string {
 		return "project"
 	case !ptrEq(old.InventoryID, f.InventoryID):
 		return "inventory"
+	case old.Verbosity != f.Verbosity:
+		// High verbosity prints module arguments and results, which may
+		// hold the credentials' secrets.
+		return "verbosity"
+	case old.Tags != f.Tags:
+		// Running only some tasks can skip the checks a playbook guards
+		// its credentials with, like skipping tags.
+		return "tags"
+	case old.SkipTags != f.SkipTags:
+		// Skipping tasks can skip the checks a playbook guards its
+		// credentials with.
+		return "skip tags"
+	case old.Limit != f.Limit:
+		// A limit can skip whole plays, like a first play that checks, on
+		// localhost, what a later one does on the hosts.
+		return "limit"
+	case !sameIDs(old.CredentialIDs, f.CredentialIDs):
+		// Credentials share the job's environment: one's inputs can decide
+		// where another's secrets go (VAULT_ADDR beside VAULT_TOKEN), and one
+		// can hold settings a playbook guards another with, so adding or
+		// removing one changes what the others do.
+		return "credentials"
 	}
 	for _, o := range credentialOverrides {
 		if slices.Contains(f.AllowOverrides, o) && !slices.Contains(old.AllowOverrides, o) {
@@ -182,6 +239,21 @@ func changesWhatRuns(old store.JobTemplate, f store.JobTemplateFields) string {
 		}
 	}
 	return ""
+}
+
+// sameIDs reports whether a and b hold the same IDs, in any order.
+func sameIDs(a, b []uuid.UUID) bool {
+	for _, id := range a {
+		if !slices.Contains(b, id) {
+			return false
+		}
+	}
+	for _, id := range b {
+		if !slices.Contains(a, id) {
+			return false
+		}
+	}
+	return true
 }
 
 func overridesToStrings(o *[]apigen.OverridableField) []string {

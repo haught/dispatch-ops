@@ -158,3 +158,41 @@ func TestFingerprint(t *testing.T) {
 		t.Errorf("fingerprint %q", fp)
 	}
 }
+
+func TestSignedByCA(t *testing.T) {
+	caPEM, caKey, err := CA("test CA", 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := ParseCertificate(caPEM)
+	if err != nil || !ca.IsCA {
+		t.Fatalf("CA = %+v, %v", ca, err)
+	}
+	certPEM, keyPEM, err := Signed([]string{"db.ns.svc", "127.0.0.1"}, time.Hour, caPEM, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := ParseCertificate(certPEM)
+	if err != nil || leaf.IsCA {
+		t.Fatalf("leaf = %+v, %v", leaf, err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: "db.ns.svc", Roots: roots}); err != nil {
+		t.Errorf("leaf doesn't verify against its CA: %v", err)
+	}
+	// Another CA doesn't vouch for it.
+	otherPEM, _, _ := CA("other", time.Hour)
+	other, _ := ParseCertificate(otherPEM)
+	roots = x509.NewCertPool()
+	roots.AddCert(other)
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: "db.ns.svc", Roots: roots}); err == nil {
+		t.Error("leaf verifies against an unrelated CA")
+	}
+	if _, _, err := Signed([]string{"x"}, time.Hour, caPEM, []byte("junk")); err == nil {
+		t.Error("signed with a bad CA key")
+	}
+}

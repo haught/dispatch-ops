@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -64,8 +66,9 @@ func Askpass(dir string, args []string, out io.Writer) int {
 	if start < 0 || end <= start {
 		return 1
 	}
-	asked, err := url.Parse(prompt[start+1 : end])
-	if err != nil || urlOrigin(asked) != string(want) {
+	raw := prompt[start+1 : end]
+	asked, err := url.Parse(raw)
+	if err != nil || !plainPromptURL(raw, asked) || urlOrigin(asked) != string(want) {
 		fmt.Fprintf(os.Stderr, "dispatch-runner: not sending the project's credential to %s, which is not the project's server\n",
 			redactURL(prompt[start+1:end]))
 		return 1
@@ -76,6 +79,30 @@ func Askpass(dir string, args []string, out io.Writer) int {
 	}
 	fmt.Fprintln(out, string(b))
 	return 0
+}
+
+// plainPromptURL reports whether raw, which parses as u, looks like a URL
+// git names in a credential prompt (scheme://[user@]host[:port], see
+// gitEnv's credential.useHttpPath=false), with nothing in it that could
+// make Go and git disagree about the host: more than one literal @ in the
+// authority, or a path, query or fragment. Without
+// credential.sanitizePrompt, git would show http://victim%2F@evil/ as
+// http://victim/@evil, which Go reads as host victim. Encoded characters
+// in the user name (me%40corp.com, victim%2F) are fine: they can't move
+// the host, which is compared to the project's afterwards.
+func plainPromptURL(raw string, u *url.URL) bool {
+	if u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return false
+	}
+	_, rest, ok := strings.Cut(raw, "://")
+	if !ok {
+		return false
+	}
+	authority, tail := rest, ""
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		authority, tail = rest[:i], rest[i:]
+	}
+	return strings.Count(authority, "@") <= 1 && (tail == "" || tail == "/")
 }
 
 // checkout clones the project into ws.projectDir at its ref and returns the
@@ -134,14 +161,83 @@ var commitID = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 func isCommitID(ref string) bool { return commitID.MatchString(ref) }
 
 // urlOrigin is where git sends a credential for u: its scheme, host and
-// port, with the scheme's default port filled in.
+// port, with the scheme's default port filled in. It is "" if the host
+// isn't ASCII once percent-decoded (see asciiHost), so that a look-alike
+// host never matches.
 func urlOrigin(u *url.URL) string {
+	host, ok := asciiHost(u.Hostname())
+	if !ok || host == "" {
+		return ""
+	}
 	scheme := strings.ToLower(u.Scheme)
 	port := u.Port()
 	if port == "" {
 		port = map[string]string{"https": "443", "http": "80"}[scheme]
 	}
-	return scheme + "://" + strings.ToLower(u.Hostname()) + ":" + port
+	return scheme + "://" + host + ":" + port
+}
+
+// asciiHost returns host percent-decoded (repeatedly, as git or a server
+// might decode it) and lower-cased. ok is false if the result isn't
+// printable ASCII, or doesn't decode. Go lower-cases the look-alike
+// gİthub.com to github.com, while git connects to xn--github-qyd.com.
+func asciiHost(host string) (string, bool) {
+	for i := 0; ; i++ {
+		d, err := url.PathUnescape(host)
+		if err != nil || i == 4 {
+			return "", false
+		}
+		if d == host {
+			break
+		}
+		host = d
+	}
+	for i := 0; i < len(host); i++ {
+		if host[i] <= 0x20 || host[i] >= 0x7f {
+			return "", false
+		}
+	}
+	return strings.ToLower(host), true
+}
+
+// gitConfig is configuration every git the runner starts runs with, git's
+// own and ansible-galaxy's: prompts name the server without a path and
+// with URL-encoded user names, so Askpass reads the host git means.
+var gitConfig = [][2]string{
+	{"credential.sanitizePrompt", "true"},
+	{"credential.useHttpPath", "false"},
+}
+
+// withGitConfig adds config to env through GIT_CONFIG_COUNT,
+// GIT_CONFIG_KEY_<n> and GIT_CONFIG_VALUE_<n>, after any entries env
+// already has, and in place of a malformed count. Such configuration
+// overrides the system, user and repository files.
+func withGitConfig(env []string, config [][2]string) []string {
+	n := 0
+	out := make([]string, 0, len(env)+2*len(config)+1)
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "GIT_CONFIG_COUNT="); ok {
+			if c, err := strconv.Atoi(v); err == nil && c >= 0 && c < 1000 {
+				n = c
+			}
+			continue
+		}
+		out = append(out, kv)
+	}
+	// Entries past the count would be ignored, but drop any that ours
+	// would duplicate.
+	out = slices.DeleteFunc(out, func(kv string) bool {
+		for i := n; i < n+len(config); i++ {
+			if strings.HasPrefix(kv, fmt.Sprintf("GIT_CONFIG_KEY_%d=", i)) || strings.HasPrefix(kv, fmt.Sprintf("GIT_CONFIG_VALUE_%d=", i)) {
+				return true
+			}
+		}
+		return false
+	})
+	for i, c := range config {
+		out = append(out, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", n+i, c[0]), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", n+i, c[1]))
+	}
+	return append(out, fmt.Sprintf("GIT_CONFIG_COUNT=%d", n+len(config)))
 }
 
 // gitEnv returns git's environment, with the credential of the project p
@@ -157,7 +253,7 @@ func gitEnv(cfg Config, ws *workspace, p *runnerapi.RunnerProject) (env []string
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, cleanup, err
 	}
-	env = append(baseEnv(),
+	env = append(withGitConfig(baseEnv(), gitConfig),
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ALLOW_PROTOCOL="+gitProtocols,
 	)

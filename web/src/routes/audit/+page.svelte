@@ -16,6 +16,7 @@
 		'launch',
 		'cancel',
 		'login',
+		'login_throttled',
 		'grant',
 		'revoke',
 		'add_member',

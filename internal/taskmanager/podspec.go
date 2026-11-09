@@ -11,16 +11,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"dispatch-ops/internal/store"
+	"dispatch-ops/internal/taskmanager/joblabels"
 )
 
-// Labels and annotations on the Kubernetes objects the task manager creates.
+// Labels and annotations on the Kubernetes objects the task manager
+// creates. The operator selects job pods by the same labels (see joblabels).
 const (
-	LabelManagedBy  = "app.kubernetes.io/managed-by"
-	LabelComponent  = "app.kubernetes.io/component"
-	LabelJobID      = "dispatch-ops/job-id"
-	AnnotationName  = "dispatch-ops/job-name"
-	managedByValue  = "dispatch-ops"
-	componentJobPod = "job"
+	LabelManagedBy    = joblabels.ManagedBy
+	LabelComponent    = joblabels.Component
+	LabelJobID        = joblabels.JobID
+	LabelInstallation = joblabels.Installation
+	AnnotationName    = "dispatch-ops/job-name"
+	managedByValue    = joblabels.ManagedByValue
+	componentJobPod   = joblabels.ComponentValue
 )
 
 // Paths inside job pods. The runner reads these from its environment.
@@ -32,7 +35,8 @@ const (
 	containerApp = "runner"
 )
 
-// managedSelector selects every object the task manager created.
+// managedSelector selects the objects every task manager created, whatever
+// its installation (see Manager.isOurs).
 var managedSelector = LabelManagedBy + "=" + managedByValue + "," + LabelComponent + "=" + componentJobPod
 
 // k8sJobName is the name of the Kubernetes Job (and the prefix of its
@@ -42,33 +46,39 @@ func k8sJobName(id string) string { return "dispatch-job-" + id }
 func tokenSecretName(id string) string { return k8sJobName(id) + "-token" }
 func pullSecretName(id string) string  { return k8sJobName(id) + "-pull" }
 
-func labelsFor(job store.Job) map[string]string {
-	return map[string]string{
+// labelsFor labels a job's objects, with the installation when there is
+// one.
+func labelsFor(job store.Job, installation string) map[string]string {
+	l := map[string]string{
 		LabelManagedBy: managedByValue,
 		LabelComponent: componentJobPod,
 		LabelJobID:     job.ID.String(),
 	}
+	if installation != "" {
+		l[LabelInstallation] = installation
+	}
+	return l
 }
 
 // buildTokenSecret holds the job's one-time runner token and, if not empty,
 // the certificates the runner trusts to reach the API (ca.crt).
-func buildTokenSecret(job store.Job, namespace, token string, ca []byte) *corev1.Secret {
+func buildTokenSecret(job store.Job, cfg Config, token string, ca []byte) *corev1.Secret {
 	data := map[string][]byte{"token": []byte(token)}
 	if len(ca) > 0 {
 		data["ca.crt"] = ca
 	}
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: tokenSecretName(job.ID.String()), Namespace: namespace, Labels: labelsFor(job)},
+		ObjectMeta: metav1.ObjectMeta{Name: tokenSecretName(job.ID.String()), Namespace: cfg.Namespace, Labels: labelsFor(job, cfg.Installation)},
 		Type:       corev1.SecretTypeOpaque,
 		Data:       data,
 	}
 }
 
 // buildPullSecret turns a registry credential into an image pull secret.
-func buildPullSecret(job store.Job, namespace string, inputs map[string]string) (*corev1.Secret, error) {
+func buildPullSecret(job store.Job, cfg Config, inputs map[string]string) (*corev1.Secret, error) {
 	server := inputs["server"]
 	auth := base64.StdEncoding.EncodeToString([]byte(inputs["username"] + ":" + inputs["password"]))
-	cfg, err := json.Marshal(map[string]any{
+	dockerCfg, err := json.Marshal(map[string]any{
 		"auths": map[string]any{server: map[string]string{
 			"username": inputs["username"], "password": inputs["password"], "auth": auth,
 		}},
@@ -77,22 +87,25 @@ func buildPullSecret(job store.Job, namespace string, inputs map[string]string) 
 		return nil, err
 	}
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: pullSecretName(job.ID.String()), Namespace: namespace, Labels: labelsFor(job)},
+		ObjectMeta: metav1.ObjectMeta{Name: pullSecretName(job.ID.String()), Namespace: cfg.Namespace, Labels: labelsFor(job, cfg.Installation)},
 		Type:       corev1.SecretTypeDockerConfigJson,
-		Data:       map[string][]byte{corev1.DockerConfigJsonKey: cfg},
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: dockerCfg},
 	}, nil
 }
 
 // buildJob returns the Kubernetes Job that runs a dispatch-ops job: one pod,
 // never retried, running the execution environment image, whose entrypoint
-// is the runner. withCA means the token Secret holds ca.crt.
+// is the runner. withCA means the token Secret holds ca.crt. It is created
+// suspended, so its Secrets can be created with it as their owner before its
+// pod needs them (see Manager.launch).
 func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.Job {
 	id := job.ID.String()
 	ee := job.Config.ExecutionEnvironment
-	labels := labelsFor(job)
+	labels := labelsFor(job, cfg.Installation)
 
 	// A backstop in case both the runner's own timeout and the task
-	// manager's reconcile loop fail to stop the job.
+	// manager's reconcile loop fail to stop the job. It counts from when the
+	// Job is unsuspended, not created.
 	deadline := int64(job.Config.TimeoutSeconds) + int64(cfg.StartTimeout.Seconds()) + 300
 	ttl := int32(cfg.JobTTL.Seconds())
 	caMode := int32(0o444) // the image's (non-root) user must be able to read it
@@ -175,6 +188,7 @@ func buildJob(job store.Job, cfg Config, withPullSecret, withCA bool) *batchv1.J
 			Annotations: map[string]string{AnnotationName: truncate(job.Name, 253)},
 		},
 		Spec: batchv1.JobSpec{
+			Suspend:                 new(true),
 			BackoffLimit:            new(int32(0)),
 			ActiveDeadlineSeconds:   &deadline,
 			TTLSecondsAfterFinished: &ttl,

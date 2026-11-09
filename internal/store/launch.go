@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/google/uuid"
 
+	"dispatch-ops/internal/extravars"
 	"dispatch-ops/internal/hostpattern"
 )
 
@@ -58,63 +58,24 @@ func (o LaunchOverrides) CheckAllowed(t JobTemplate) error {
 //
 //   - a limit that names a file (@path), which Ansible reads and echoes
 //     into the job output;
-//   - extra vars named ansible_*, which set how Ansible connects and
-//     becomes (ansible_ssh_common_args can run a command, for one);
-//   - extra vars with Jinja ({{, {% or {#) in a key or string value, which
-//     Ansible evaluates as trusted templates, so lookup('file', …) or
-//     pipe(…) could read the credential files.
+//   - extra vars that set how or where Ansible connects (ansible_*,
+//     inventory_hostname and other magic variables), or that hold Jinja or
+//     a #jinja2: header, which Ansible would evaluate (see extravars.Check).
 //
 // Extra vars the template itself sets aren't checked: changing those needs
-// the use role on the template's credentials.
+// the use role on the template's credentials. The runner passes the
+// launcher's extra vars to Ansible marked unsafe as well, so they aren't
+// templated even if a check here misses something.
 func (o LaunchOverrides) CheckValues() error {
 	if o.Limit != nil {
 		if err := hostpattern.CheckLimit(*o.Limit); err != nil {
 			return &LaunchError{err.Error()}
 		}
 	}
-	for _, k := range slices.Sorted(maps.Keys(o.ExtraVars)) {
-		if strings.HasPrefix(strings.ToLower(k), "ansible_") {
-			return &LaunchError{fmt.Sprintf("extra var %q can't be overridden at launch: ansible_* variables control how Ansible connects to hosts", k)}
-		}
-		if path, bad := findJinja(k, o.ExtraVars[k]); bad {
-			return &LaunchError{fmt.Sprintf("extra var %q can't be set to a Jinja template ({{, {%% or {#) at launch", path)}
-		}
+	if err := extravars.Check(o.ExtraVars); err != nil {
+		return &LaunchError{err.Error()}
 	}
 	return nil
-}
-
-// hasJinja reports whether s contains the start of a Jinja expression,
-// statement or comment.
-func hasJinja(s string) bool {
-	return strings.Contains(s, "{{") || strings.Contains(s, "{%") || strings.Contains(s, "{#")
-}
-
-// findJinja looks for Jinja in the key at path and in the strings of v,
-// keys included, and returns where it is.
-func findJinja(path string, v any) (string, bool) {
-	if hasJinja(path) {
-		return path, true
-	}
-	switch v := v.(type) {
-	case string:
-		return path, hasJinja(v)
-	case map[string]any:
-		for _, k := range slices.Sorted(maps.Keys(v)) {
-			if hasJinja(k) {
-				return path + "." + k, true
-			}
-			if p, bad := findJinja(path+"."+k, v[k]); bad {
-				return p, true
-			}
-		}
-	case []any:
-		for i, x := range v {
-			if p, bad := findJinja(fmt.Sprintf("%s[%d]", path, i), x); bad {
-				return p, true
-			}
-		}
-	}
-	return "", false
 }
 
 // ResolveJobConfig returns the configuration a job launched from t with o

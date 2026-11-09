@@ -50,6 +50,15 @@ func newEnv(t *testing.T, cr *v1alpha1.DispatchOps, objs ...client.Object) *env 
 		t.Fatal(err)
 	}
 	cr.Name, cr.Namespace, cr.UID = "dops", ns, "uid-1"
+	haveNS := false
+	for _, o := range objs {
+		if n, ok := o.(*corev1.Namespace); ok && n.Name == ns {
+			haveNS = true
+		}
+	}
+	if !haveNS {
+		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns, Labels: restricted()}})
+	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.DispatchOps{}, &appsv1.Deployment{}, &appsv1.StatefulSet{}, &batchv1.Job{}).
 		WithObjects(append(objs, cr)...).Build()
@@ -465,7 +474,7 @@ func TestAPIServesTLS(t *testing.T) {
 	if g := c.ReadinessProbe.HTTPGet; g.Scheme != corev1.URISchemeHTTPS || g.Port.StrVal != "https" {
 		t.Errorf("readiness probe = %+v", g)
 	}
-	if vols := api.Spec.Template.Spec.Volumes; len(vols) != 1 || vols[0].Secret.SecretName != "dops-api-tls" || len(c.VolumeMounts) != 1 {
+	if vols := withoutVolume(api.Spec.Template.Spec.Volumes, "postgres-ca"); len(vols) != 1 || vols[0].Secret.SecretName != "dops-api-tls" || len(c.VolumeMounts) != 2 {
 		t.Errorf("API volumes = %+v, mounts %+v", vols, c.VolumeMounts)
 	}
 
@@ -511,6 +520,7 @@ func TestAPIServesTLS(t *testing.T) {
 // a public CA may have none), and no tls.key.
 func checkTrustVolume(t *testing.T, vols []corev1.Volume, secret string) {
 	t.Helper()
+	vols = withoutVolume(vols, "postgres-ca") // the database's CA, not the API's
 	if len(vols) != 1 || vols[0].Projected == nil || vols[0].Secret != nil {
 		t.Fatalf("task manager volumes = %+v, want one projected volume", vols)
 	}
@@ -540,8 +550,8 @@ func TestGeneratedCertificatesRenew(t *testing.T) {
 	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{ExternalURL: "https://dispatch.example.com"}})
 	e.deploy()
 	e.deploymentsAvailable()
-	if res, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err != nil || res.RequeueAfter != certRecheck {
-		t.Errorf("ready reconcile = %+v, %v; want a requeue after %s for renewal", res, err, certRecheck)
+	if res, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err != nil || res.RequeueAfter != readyRecheck {
+		t.Errorf("ready reconcile = %+v, %v; want a requeue after %s for renewal", res, err, readyRecheck)
 	}
 
 	certOf := func(name string) (*x509.Certificate, corev1.Secret) {
@@ -659,7 +669,7 @@ func TestAdminPasswordSecretMayBeDeleted(t *testing.T) {
 		t.Fatal("no migration job for the upgrade")
 	}
 	pod := job.Spec.Template.Spec
-	if len(pod.InitContainers) != 0 || len(pod.Containers) != 1 || pod.Containers[0].Name != "migrate" || len(pod.Volumes) != 0 {
+	if len(pod.InitContainers) != 0 || len(pod.Containers) != 1 || pod.Containers[0].Name != "migrate" || len(withoutVolume(pod.Volumes, "postgres-ca")) != 0 {
 		t.Errorf("upgrade migration without the admin Secret = init %+v, containers %+v, volumes %+v",
 			pod.InitContainers, pod.Containers, pod.Volumes)
 	}
@@ -687,8 +697,8 @@ func TestAPIWithoutTLS(t *testing.T) {
 	if p, _ := portNamed(c, "http"); p != 8080 || c.ReadinessProbe.HTTPGet.Scheme != corev1.URISchemeHTTP {
 		t.Errorf("http port %d, probe %+v", p, c.ReadinessProbe.HTTPGet)
 	}
-	if len(api.Spec.Template.Spec.Volumes) != 0 {
-		t.Errorf("volumes = %+v", api.Spec.Template.Spec.Volumes)
+	if vols := withoutVolume(api.Spec.Template.Spec.Volumes, "postgres-ca"); len(vols) != 0 {
+		t.Errorf("volumes = %+v", vols)
 	}
 	e.get("dops-task-manager", &tm)
 	if v, _ := envValue(tm.Spec.Template.Spec.Containers[0], "DISPATCH_RUNNER_API_URL"); v.Value != "http://dops-api.ops.svc:8080" {
@@ -701,10 +711,32 @@ func TestAPIWithoutTLS(t *testing.T) {
 	}
 }
 
+// foreignName is what the operator names a component's object in another
+// job namespace, for the test DispatchOps.
+func foreignName(component string) string {
+	return install{DispatchOps: &v1alpha1.DispatchOps{ObjectMeta: metav1.ObjectMeta{Name: "dops", Namespace: ns}}}.
+		foreignJobObjectName(component)
+}
+
+// withoutVolume drops the named volume.
+func withoutVolume(vols []corev1.Volume, name string) []corev1.Volume {
+	var out []corev1.Volume
+	for _, v := range vols {
+		if v.Name != name {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// restricted are the labels of a namespace that enforces the restricted
+// Pod Security Standard.
+func restricted() map[string]string { return map[string]string{podSecurityEnforce: "restricted"} }
+
 func jobsNamespace(allowFrom string) *corev1.Namespace {
-	n := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "jobs"}}
+	n := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "jobs", Labels: restricted()}}
 	if allowFrom != "" {
-		n.Labels = map[string]string{AllowJobsFromLabel: allowFrom}
+		n.Labels[AllowJobsFromLabel] = allowFrom
 	}
 	return n
 }
@@ -715,7 +747,7 @@ func (e *env) setNamespaceLabel(value string) {
 	if err := e.c.Get(e.ctx, types.NamespacedName{Name: "jobs"}, &n); err != nil {
 		e.t.Fatal(err)
 	}
-	n.Labels = map[string]string{AllowJobsFromLabel: value}
+	n.Labels[AllowJobsFromLabel] = value
 	if err := e.c.Update(e.ctx, &n); err != nil {
 		e.t.Fatal(err)
 	}
@@ -734,15 +766,19 @@ func TestJobNamespaceMustOptIn(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		label     string
-		allowed   []string
+		allowed   map[string][]string
 		scoped    bool
 		wantAllow bool
 	}{
 		{name: "unlabeled", wantAllow: false},
 		{name: "labeled for another namespace", label: "team-b", wantAllow: false},
 		{name: "labeled", label: ns, wantAllow: true},
-		{name: "allowed by the operator", allowed: []string{"jobs"}, wantAllow: true},
-		{name: "allowed by the operator, scoped", allowed: []string{"jobs"}, scoped: true, wantAllow: true},
+		{name: "allowed by the operator", allowed: map[string][]string{"jobs": {ns}}, wantAllow: true},
+		{name: "allowed by the operator, scoped", allowed: map[string][]string{"jobs": {"team-b", ns}}, scoped: true, wantAllow: true},
+		// R2-H2 F5: the allow-list names who may use each job namespace.
+		{name: "allowed for another namespace", allowed: map[string][]string{"jobs": {"team-b"}}, wantAllow: false},
+		{name: "allowed for another namespace, scoped", allowed: map[string][]string{"jobs": {"team-b"}}, scoped: true, wantAllow: false},
+		{name: "another job namespace allowed", allowed: map[string][]string{"other-jobs": {ns}}, scoped: true, wantAllow: false},
 		// A scoped operator has no access to other namespaces, so it can't
 		// honor the label.
 		{name: "labeled, scoped", label: ns, scoped: true, wantAllow: false},
@@ -760,8 +796,8 @@ func TestJobNamespaceMustOptIn(t *testing.T) {
 			var role rbacv1.Role
 			var binding rbacv1.RoleBinding
 			var tm appsv1.Deployment
-			gotRole := e.exists("jobs", "ops-dops-task-manager", &role)
-			gotBinding := e.exists("jobs", "ops-dops-task-manager", &binding)
+			gotRole := e.exists("jobs", foreignName(componentTaskManager), &role)
+			gotBinding := e.exists("jobs", foreignName(componentTaskManager), &binding)
 			gotTM := e.get("dops-task-manager", &tm)
 			if gotRole != tc.wantAllow || gotBinding != tc.wantAllow || gotTM != tc.wantAllow {
 				t.Errorf("role %t binding %t task manager %t, want %t", gotRole, gotBinding, gotTM, tc.wantAllow)
@@ -784,14 +820,14 @@ func TestJobNamespaceOptOutRemovesRBAC(t *testing.T) {
 	e.deploy()
 	var role rbacv1.Role
 	var np networkingv1.NetworkPolicy
-	if !e.exists("jobs", "ops-dops-task-manager", &role) || !e.exists("jobs", "ops-dops-jobs", &np) {
+	if !e.exists("jobs", foreignName(componentTaskManager), &role) || !e.exists("jobs", foreignName(componentJobs), &np) {
 		t.Fatal("no Role or NetworkPolicy in the opted-in job namespace")
 	}
 	e.setNamespaceLabel("someone-else")
 	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err != nil {
 		t.Fatal(err)
 	}
-	if e.exists("jobs", "ops-dops-task-manager", &role) || e.exists("jobs", "ops-dops-jobs", &np) {
+	if e.exists("jobs", foreignName(componentTaskManager), &role) || e.exists("jobs", foreignName(componentJobs), &np) {
 		t.Error("RBAC or NetworkPolicy survived the namespace opting out")
 	}
 	e.wantCondition(e.cr(), CondTaskManagerReady, metav1.ConditionFalse, "JobNamespaceNotAllowed")
@@ -800,7 +836,7 @@ func TestJobNamespaceOptOutRemovesRBAC(t *testing.T) {
 func TestRefusesToAdoptObjects(t *testing.T) {
 	foreign := func(obj client.Object, labels map[string]string) client.Object {
 		obj.SetNamespace("jobs")
-		obj.SetName("ops-dops-task-manager")
+		obj.SetName(foreignName(componentTaskManager))
 		obj.SetLabels(labels)
 		return obj
 	}
@@ -825,7 +861,7 @@ func TestRefusesToAdoptObjects(t *testing.T) {
 				t.Errorf("reconcile error = %v, want a refusal", err)
 			}
 			var role rbacv1.Role
-			if !e.exists("jobs", "ops-dops-task-manager", &role) || role.Rules[0].Resources[0] != "configmaps" {
+			if !e.exists("jobs", foreignName(componentTaskManager), &role) || role.Rules[0].Resources[0] != "configmaps" {
 				t.Errorf("the existing Role was changed: %+v", role.Rules)
 			}
 			e.wantCondition(e.cr(), CondReady, metav1.ConditionFalse, "Error")
@@ -837,7 +873,7 @@ func TestRefusesToAdoptObjects(t *testing.T) {
 			if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err != nil {
 				t.Fatal(err)
 			}
-			if !e.exists("jobs", "ops-dops-task-manager", &role) {
+			if !e.exists("jobs", foreignName(componentTaskManager), &role) {
 				t.Error("finalizing deleted a Role the operator didn't create")
 			}
 		})
@@ -857,22 +893,35 @@ func TestPruneOnlyDeletesItsOwnObjects(t *testing.T) {
 	// made, so it stays.
 	other := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "kube-admin", Namespace: "kube-system", Labels: ours}}
 	// What an earlier job namespace left behind: deleted.
-	stale := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "ops-dops-task-manager", Namespace: "old-jobs", Labels: ours}}
-	e := newEnv(t, &v1alpha1.DispatchOps{}, other, stale)
+	stale := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: foreignName(componentTaskManager), Namespace: "old-jobs", Labels: ours}}
+	// What an operator before the names' hash left behind: deleted too.
+	legacy := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "ops-dops-task-manager", Namespace: "older-jobs", Labels: ours}}
+	e := newEnv(t, &v1alpha1.DispatchOps{}, other, stale, legacy)
 	e.deploy()
 	var role rbacv1.Role
 	if !e.exists("kube-system", "kube-admin", &role) {
 		t.Error("pruned a Role the operator didn't name")
 	}
-	if e.exists("old-jobs", "ops-dops-task-manager", &role) {
+	if e.exists("old-jobs", foreignName(componentTaskManager), &role) {
 		t.Error("the old job namespace's Role survived")
+	}
+	if e.exists("older-jobs", "ops-dops-task-manager", &role) {
+		t.Error("the Role with the name from before the hash survived")
 	}
 }
 
 func TestNetworkPolicies(t *testing.T) {
+	// What an older operator made for job pods without an installation
+	// label.
+	old := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: "dops-jobs-unlabeled", Namespace: ns,
+		Labels: map[string]string{"app.kubernetes.io/managed-by": ManagedBy, "app.kubernetes.io/component": componentUnlabeledJobs},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "DispatchOps",
+			Name: "dops", UID: "uid-1", Controller: new(true)}},
+	}}
 	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
 		NetworkPolicy: v1alpha1.NetworkPolicySpec{JobEgressExcept: []string{"10.96.0.0/12", "fd00:10:96::/112"}},
-	}})
+	}}, old)
 	e.deploy()
 
 	var pg networkingv1.NetworkPolicy
@@ -909,20 +958,32 @@ func TestNetworkPolicies(t *testing.T) {
 	if !e.get("dops-jobs", &jobs) {
 		t.Fatal("no job pod NetworkPolicy")
 	}
+	// R2-L4 recheck: every job pod in the job namespace, whatever its
+	// installation label (the namespace is this installation's alone), so
+	// one policy does; the second an older operator made is deleted.
+	var unlabeled networkingv1.NetworkPolicy
+	if e.get("dops-jobs-unlabeled", &unlabeled) {
+		t.Error("the NetworkPolicy for unlabeled job pods survived")
+	}
 	s := jobs.Spec
-	if s.PodSelector.MatchLabels["app.kubernetes.io/component"] != "job" || len(s.Ingress) != 0 || len(s.PolicyTypes) != 2 {
+	if sel := s.PodSelector; len(sel.MatchLabels) != 2 || sel.MatchLabels["app.kubernetes.io/component"] != "job" ||
+		sel.MatchLabels["app.kubernetes.io/managed-by"] != "dispatch-ops" || len(sel.MatchExpressions) != 0 ||
+		len(s.Ingress) != 0 || len(s.PolicyTypes) != 2 {
 		t.Errorf("job policy = %+v", s)
 	}
 	if to := s.Egress[0].To[0]; to.NamespaceSelector.MatchLabels[corev1.LabelMetadataName] != ns ||
 		to.PodSelector.MatchLabels["app.kubernetes.io/component"] != "api" || s.Egress[0].Ports[0].Port.IntVal != 8443 {
 		t.Errorf("job egress to the API = %+v", s.Egress[0])
 	}
-	if s.Egress[1].To != nil || s.Egress[1].Ports[0].Port.IntVal != 53 {
+	// R2-L5: DNS only to the cluster's DNS pods.
+	if dns := s.Egress[1]; len(dns.To) != 1 || dns.Ports[0].Port.IntVal != 53 ||
+		dns.To[0].NamespaceSelector.MatchLabels[corev1.LabelMetadataName] != "kube-system" ||
+		dns.To[0].PodSelector.MatchLabels["k8s-app"] != "kube-dns" || dns.To[0].IPBlock != nil {
 		t.Errorf("job DNS egress = %+v", s.Egress[1])
 	}
 	v4, v6 := s.Egress[2].To[0].IPBlock, s.Egress[2].To[1].IPBlock
-	if v4.CIDR != "0.0.0.0/0" || strings.Join(v4.Except, ",") != "169.254.0.0/16,10.96.0.0/12" ||
-		v6.CIDR != "::/0" || strings.Join(v6.Except, ",") != "fe80::/10,fd00:ec2::254/128,fd00:10:96::/112" {
+	if v4.CIDR != "0.0.0.0/0" || strings.Join(v4.Except, ",") != "169.254.0.0/16,100.100.100.200/32,168.63.129.16/32,10.96.0.0/12" ||
+		v6.CIDR != "::/0" || strings.Join(v6.Except, ",") != "fe80::/10,fd00:ec2::254/128,fd00:ec2::23/128,fd20:ce::254/128,fd00:10:96::/112" {
 		t.Errorf("job egress = %+v / %+v", v4, v6)
 	}
 
@@ -943,7 +1004,7 @@ func TestNetworkPolicies(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.reconcile()
-	for _, name := range []string{"dops-postgres", "dops-api", "dops-task-manager", "dops-jobs"} {
+	for _, name := range []string{"dops-postgres", "dops-api", "dops-task-manager", "dops-jobs", "dops-jobs-unlabeled"} {
 		var np networkingv1.NetworkPolicy
 		if e.get(name, &np) {
 			t.Errorf("NetworkPolicy %s survived being turned off", name)
@@ -957,7 +1018,7 @@ func TestManagedDatabaseIsHardened(t *testing.T) {
 
 	var pg corev1.Secret
 	e.get("dops-postgres", &pg)
-	if !strings.HasSuffix(pg.StringData["url"], "?sslmode=require") {
+	if !strings.HasSuffix(pg.StringData["url"], "?sslmode=verify-full&sslrootcert=%2Fvar%2Frun%2Fdispatch-ops%2Fpostgres-ca%2Fca.crt") {
 		t.Errorf("database url = %q", pg.StringData["url"])
 	}
 	var tlsSecret corev1.Secret
@@ -1020,16 +1081,30 @@ func TestManagedDatabaseIsHardened(t *testing.T) {
 }
 
 func TestDatabaseURLMovesToTLS(t *testing.T) {
-	// What an older operator generated.
+	// What an older operator generated, without the owner label, for an
+	// installation it migrated.
+	generated := map[string]string{"dispatch-ops.io/generated": "true"}
 	old := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "dops-postgres", Namespace: ns, Annotations: map[string]string{"dispatch-ops.io/generated": "true"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "dops-postgres", Namespace: ns, Annotations: generated},
 		Data: map[string][]byte{
 			"password": []byte("pw"),
 			"url":      []byte("postgres://dispatch:pw@dops-postgres.ops.svc:5432/dispatch?sslmode=disable"),
 		},
 	}
-	e := newEnv(t, &v1alpha1.DispatchOps{}, old)
-	e.deploy()
+	oldKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "dops-encryption-key", Namespace: ns, Annotations: generated},
+		Data: map[string][]byte{"key": []byte("k")}}
+	e := newEnv(t, &v1alpha1.DispatchOps{Status: v1alpha1.DispatchOpsStatus{Image: "dispatch-ops:1.0", EncryptionKeyGenerated: true}},
+		old, oldKey)
+	e.reconcile()
+	e.databaseReady()
+	e.reconcile()
+	// Labeled as the installation's now.
+	for _, name := range []string{"dops-postgres", "dops-encryption-key"} {
+		var s corev1.Secret
+		if e.get(name, &s); s.Labels[ownerLabel] != "uid-1" {
+			t.Errorf("secret %s labels = %v", name, s.Labels)
+		}
+	}
 	var api appsv1.Deployment
 	e.get("dops-api", &api)
 	if got := api.Spec.Template.Annotations[dbSSLModeAnnotation]; got != "disable" {
@@ -1047,11 +1122,12 @@ func TestDatabaseURLMovesToTLS(t *testing.T) {
 	e.reconcile()
 	var s corev1.Secret
 	e.get("dops-postgres", &s)
-	if got := string(s.Data["url"]); got != "postgres://dispatch:pw@dops-postgres.ops.svc:5432/dispatch?sslmode=require" {
+	if got := string(s.Data["url"]); got != "postgres://dispatch:pw@dops-postgres.ops.svc:5432/dispatch?"+
+		"sslmode=verify-full&sslrootcert=%2Fvar%2Frun%2Fdispatch-ops%2Fpostgres-ca%2Fca.crt" {
 		t.Errorf("url = %q", got)
 	}
 	e.get("dops-api", &api)
-	if got := api.Spec.Template.Annotations[dbSSLModeAnnotation]; got != "require" {
+	if got := api.Spec.Template.Annotations[dbSSLModeAnnotation]; got != "verify-full" {
 		t.Errorf("after: annotation %q", got)
 	}
 	if api.Spec.Template.Annotations["prometheus.io/scrape"] != "true" {
@@ -1140,7 +1216,7 @@ func TestJobNamespaceRBACIsCleanedUp(t *testing.T) {
 	cr = e.reconcile()
 
 	var role rbacv1.Role
-	key := types.NamespacedName{Namespace: "jobs", Name: "ops-dops-task-manager"}
+	key := types.NamespacedName{Namespace: "jobs", Name: foreignName(componentTaskManager)}
 	if err := e.c.Get(e.ctx, key, &role); err != nil {
 		t.Fatalf("no Role in the job namespace: %v", err)
 	}
@@ -1148,7 +1224,7 @@ func TestJobNamespaceRBACIsCleanedUp(t *testing.T) {
 		t.Errorf("role labels %v owners %v", role.Labels, role.OwnerReferences)
 	}
 	var np networkingv1.NetworkPolicy
-	if !e.exists("jobs", "ops-dops-jobs", &np) || np.Labels[ownerLabel] != "uid-1" {
+	if !e.exists("jobs", foreignName(componentJobs), &np) || np.Labels[ownerLabel] != "uid-1" {
 		t.Errorf("job NetworkPolicy in the job namespace: %+v", np.ObjectMeta)
 	}
 	var tm appsv1.Deployment
@@ -1171,7 +1247,170 @@ func TestJobNamespaceRBACIsCleanedUp(t *testing.T) {
 	if err := e.c.Get(e.ctx, key, &binding); err == nil {
 		t.Error("the job namespace RoleBinding survived")
 	}
-	if e.exists("jobs", "ops-dops-jobs", &np) {
+	if e.exists("jobs", foreignName(componentJobs), &np) {
 		t.Error("the job namespace NetworkPolicy survived")
 	}
+}
+
+// R2 Low: the managed database's certificate comes from a long-lived CA,
+// which is all the servers trust: renewing the certificate keeps the CA, so
+// the servers (which read it only at start) keep reaching the database.
+func TestPostgresCAStaysAcrossRenewal(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{})
+	e.deploy()
+	secret := func(name string) corev1.Secret {
+		t.Helper()
+		var s corev1.Secret
+		if !e.get(name, &s) {
+			t.Fatalf("no Secret %s", name)
+		}
+		return s
+	}
+	serial := func(s corev1.Secret) string {
+		t.Helper()
+		c, err := tlscert.ParseCertificate(s.Data["tls.crt"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.SerialNumber.String()
+	}
+	annotations := func() (api, db string) {
+		var d appsv1.Deployment
+		var sts appsv1.StatefulSet
+		e.get("dops-api", &d)
+		e.get("dops-postgres", &sts)
+		return d.Spec.Template.Annotations[postgresCAAnnotation], sts.Spec.Template.Annotations[postgresCertAnnotation]
+	}
+
+	ca := secret("dops-postgres-ca")
+	caCert, err := tlscert.ParseCertificate(ca.Data["ca.crt"])
+	if err != nil || !caCert.IsCA || time.Until(caCert.NotAfter) < 9*365*24*time.Hour || len(ca.OwnerReferences) != 0 {
+		t.Fatalf("CA = %+v, %v", caCert, err)
+	}
+	leaf := secret("dops-postgres-tls")
+	if !issuedBy(&leaf, ca.Data["ca.crt"]) || string(leaf.Data["ca.crt"]) != string(ca.Data["ca.crt"]) {
+		t.Error("the database's certificate isn't from the CA")
+	}
+	// The servers mount only the CA's certificate, never its key.
+	var api appsv1.Deployment
+	e.get("dops-api", &api)
+	for _, v := range api.Spec.Template.Spec.Volumes {
+		if v.Name == "postgres-ca" && (v.Secret == nil || v.Secret.SecretName != "dops-postgres-ca" ||
+			len(v.Secret.Items) != 1 || v.Secret.Items[0].Key != "ca.crt") {
+			t.Errorf("postgres-ca volume = %+v", v.VolumeSource)
+		}
+	}
+	apiBefore, dbBefore := annotations()
+	if apiBefore != hash16(ca.Data["ca.crt"]) || dbBefore != certHash(&leaf) {
+		t.Errorf("annotations = %q, %q", apiBefore, dbBefore)
+	}
+
+	// The certificate nears expiry: renewed from the same CA. The database
+	// restarts; the servers don't.
+	certPEM, keyPEM, err := tlscert.Signed(install{DispatchOps: e.cr()}.postgresCertHosts(), renewBefore-time.Hour, ca.Data["ca.crt"], ca.Data["ca.key"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf.Data["tls.crt"], leaf.Data["tls.key"] = certPEM, keyPEM
+	if err := e.c.Update(e.ctx, &leaf); err != nil {
+		t.Fatal(err)
+	}
+	expiring := serial(leaf)
+	e.reconcile()
+	renewed := secret("dops-postgres-tls")
+	if serial(renewed) == expiring || !issuedBy(&renewed, ca.Data["ca.crt"]) {
+		t.Error("the certificate wasn't renewed from the CA")
+	}
+	if after := secret("dops-postgres-ca"); string(after.Data["ca.crt"]) != string(ca.Data["ca.crt"]) {
+		t.Error("renewing the certificate changed the CA")
+	}
+	if apiAfter, dbAfter := annotations(); apiAfter != apiBefore || dbAfter != certHash(&renewed) {
+		t.Errorf("after renewal: API %q (want %q, unchanged), database %q", apiAfter, apiBefore, dbAfter)
+	}
+
+	// A self-signed certificate from an older operator is replaced by one
+	// from the CA.
+	selfPEM, selfKey, err := tlscert.SelfSigned(install{DispatchOps: e.cr()}.postgresCertHosts(), selfSignedValidity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewed.Data = map[string][]byte{"tls.crt": selfPEM, "tls.key": selfKey, "ca.crt": selfPEM}
+	if err := e.c.Update(e.ctx, &renewed); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	if s := secret("dops-postgres-tls"); !issuedBy(&s, ca.Data["ca.crt"]) {
+		t.Error("the self-signed certificate wasn't replaced")
+	}
+
+	// Only near its own expiry is the CA renewed, and the servers restart.
+	oldPEM, oldKey, err := tlscert.CA("old", postgresCARenewBefore-time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca.Data = map[string][]byte{"ca.crt": oldPEM, "ca.key": oldKey}
+	if err := e.c.Update(e.ctx, &ca); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	newCA := secret("dops-postgres-ca")
+	if string(newCA.Data["ca.crt"]) == string(oldPEM) {
+		t.Fatal("the expiring CA wasn't renewed")
+	}
+	if s := secret("dops-postgres-tls"); !issuedBy(&s, newCA.Data["ca.crt"]) {
+		t.Error("the certificate wasn't reissued from the new CA")
+	}
+	if apiAfter, _ := annotations(); apiAfter != hash16(newCA.Data["ca.crt"]) {
+		t.Errorf("servers' CA annotation = %q after the CA changed", apiAfter)
+	}
+}
+
+// R2 Low: a generated encryption key that goes missing is never generated
+// again: the installation reports Degraded until it is restored.
+func TestEncryptionKeyIsNeverRegenerated(t *testing.T) {
+	e := newEnv(t, &v1alpha1.DispatchOps{})
+	e.reconcile()
+	if !e.cr().Status.EncryptionKeyGenerated {
+		t.Fatal("status.encryptionKeyGenerated isn't set")
+	}
+	var key corev1.Secret
+	if !e.get("dops-encryption-key", &key) {
+		t.Fatal("no encryption key")
+	}
+	if err := e.c.Delete(e.ctx, &key); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key})
+	if err != nil || res.RequeueAfter != pollInterval {
+		t.Errorf("reconcile = %+v, %v", res, err)
+	}
+	var again corev1.Secret
+	if e.get("dops-encryption-key", &again) {
+		t.Fatal("a new encryption key was generated")
+	}
+	cr := e.cr()
+	e.wantCondition(cr, CondDegraded, metav1.ConditionTrue, ReasonEncryptionKeyMissing)
+	e.wantCondition(cr, CondReady, metav1.ConditionFalse, ReasonEncryptionKeyMissing)
+	if c := e.condition(cr, CondDegraded); !strings.Contains(c.Message, "restore") {
+		t.Errorf("message = %q", c.Message)
+	}
+
+	// Restored: back to normal.
+	key.ResourceVersion = ""
+	if err := e.c.Create(e.ctx, &key); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	if c := meta.FindStatusCondition(e.cr().Status.Conditions, CondDegraded); c != nil {
+		t.Errorf("still %+v", c)
+	}
+
+	// An installation from before the status field: a migrated database
+	// is enough to refuse.
+	e = newEnv(t, &v1alpha1.DispatchOps{Status: v1alpha1.DispatchOpsStatus{Image: "dispatch-ops:0.9"}})
+	e.reconcile()
+	if e.get("dops-encryption-key", &again) {
+		t.Error("a key was generated for a migrated installation")
+	}
+	e.wantCondition(e.cr(), CondDegraded, metav1.ConditionTrue, ReasonEncryptionKeyMissing)
 }

@@ -4,6 +4,7 @@ package secrets
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -38,11 +39,13 @@ func CheckCurrentKey(key string) error {
 type Keyring struct {
 	currentID string
 	aeads     map[string]cipher.AEAD
+	// keys are the raw keys by ID, for Derive.
+	keys map[string][]byte
 }
 
 // NewKeyring builds a keyring from base64-encoded 32-byte keys.
 func NewKeyring(current string, old ...string) (*Keyring, error) {
-	k := &Keyring{aeads: map[string]cipher.AEAD{}}
+	k := &Keyring{aeads: map[string]cipher.AEAD{}, keys: map[string][]byte{}}
 	id, err := k.add(current)
 	if err != nil {
 		return nil, fmt.Errorf("encryption key: %w", err)
@@ -67,6 +70,10 @@ func (k *Keyring) add(encoded string) (string, error) {
 	if len(key) != KeySize {
 		return "", fmt.Errorf("must be %d bytes, got %d", KeySize, len(key))
 	}
+	return k.addRaw(key)
+}
+
+func (k *Keyring) addRaw(key []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -77,7 +84,30 @@ func (k *Keyring) add(encoded string) (string, error) {
 	}
 	id := KeyID(key)
 	k.aeads[id] = aead
+	k.keys[id] = key
 	return id, nil
+}
+
+// Derive returns a keyring of keys derived from each of k's with
+// HKDF-SHA256 and info, which names their one purpose. Encrypting with it
+// gives no one a way to make ciphertexts under k's own keys, and old keys
+// still decrypt, so rotation keeps working.
+func (k *Keyring) Derive(info string) (*Keyring, error) {
+	d := &Keyring{aeads: map[string]cipher.AEAD{}, keys: map[string][]byte{}}
+	for id, key := range k.keys {
+		dk, err := hkdf.Key(sha256.New, key, nil, info, KeySize)
+		if err != nil {
+			return nil, err
+		}
+		did, err := d.addRaw(dk)
+		if err != nil {
+			return nil, err
+		}
+		if id == k.currentID {
+			d.currentID = did
+		}
+	}
+	return d, nil
 }
 
 // KeyID derives a short, non-secret identifier for a key.

@@ -9,10 +9,12 @@
 # checkout overrides both (IMAGE_REPO=dispatch-ops, IMAGE_TAG=dev) when this
 # directory is linked into images/local.
 ARG IMAGE_REPO=ghcr.io/haught/dispatch-ops
-# Renovate bumps the tag below; keep depName in step with IMAGE_REPO and the
-# starter EE named in FROM.
+# A release's version (images are tagged X.Y.Z, without the v), never
+# latest, so a rebuild gives the same image. Renovate bumps it (see
+# renovate.json); keep depName in step with IMAGE_REPO and the starter EE
+# named in FROM.
 # renovate: datasource=docker depName=ghcr.io/haught/dispatch-ops/ee-ansible
-ARG IMAGE_TAG=latest
+ARG IMAGE_TAG=0.1.0
 FROM ${IMAGE_REPO}/ee-ansible:${IMAGE_TAG}
 
 USER root

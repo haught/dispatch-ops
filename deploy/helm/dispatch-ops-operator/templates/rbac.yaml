@@ -6,8 +6,11 @@ secrets, leases), since Kubernetes only lets it grant those.
 With watchNamespaces empty, that is a ClusterRole for every namespace:
 effectively cluster-admin over Secrets and workloads (see
 docs/administration.md, "Operator permissions"). With watchNamespaces set,
-it is a Role in each watched namespace and each of allowedJobNamespaces,
-and nothing cluster-wide.
+it is a Role in each watched namespace and each job namespace in
+allowedJobNamespaces, and cluster-wide only `get` on those very namespaces
+(their Pod Security label), by name.
+Either way, its own leader election Lease is in a Role in the release
+namespace.
 */ -}}
 {{- define "dispatch-ops-operator.rules" -}}
 - apiGroups: [dispatch-ops.io]
@@ -22,19 +25,23 @@ and nothing cluster-wide.
 - apiGroups: [apps]
   resources: [deployments, statefulsets]
   verbs: [get, list, watch, create, update, patch]
-# Migrations; the task manager also deletes job pods' Jobs.
+# Migrations. The task manager creates job pods' Jobs suspended, starts
+# them (patch) and deletes them; the operator deletes an installation's
+# when it leaves a job namespace.
 - apiGroups: [batch]
   resources: [jobs]
-  verbs: [get, list, watch, create, delete]
+  verbs: [get, list, watch, create, patch, delete]
 - apiGroups: [""]
   resources: [services, serviceaccounts]
   verbs: [get, list, watch, create, update, patch]
-# The operator reads, generates and (once, for TLS to the managed database)
-# updates Secrets; the task manager also lists, patches and deletes its job
-# Secrets.
+# The operator reads, generates and updates (renewed certificates, TLS to
+# the managed database) Secrets; the task manager only creates its job
+# Secrets, owned by their Jobs. Neither lists, patches or deletes them.
 - apiGroups: [""]
   resources: [secrets]
-  verbs: [get, list, create, update, patch, delete]
+  verbs: [get, create, update]
+# The task manager watches job pods; the operator waits for an
+# installation's to stop before it removes their NetworkPolicy.
 - apiGroups: [""]
   resources: [pods]
   verbs: [get, list, watch]
@@ -44,17 +51,33 @@ and nothing cluster-wide.
 - apiGroups: [rbac.authorization.k8s.io]
   resources: [roles, rolebindings]
   verbs: [get, list, watch, create, update, patch, delete]
-# The task manager's leader election.
+# The task manager's leader election, in its job namespace. The operator
+# can only grant what it holds, and the Lease's name is per installation
+# (the task manager's Role limits get and update to it), so these can't
+# be limited by name here.
 - apiGroups: [coordination.k8s.io]
   resources: [leases]
   verbs: [get, create, update]
 - apiGroups: ["", events.k8s.io]
   resources: [events]
   verbs: [create, patch]
+# Claims: the dispatch-ops-claim ConfigMap by which an installation holds
+# its namespace and its job namespace (see docs/administration.md, "One
+# installation per namespace"). The operator never deletes one: a released
+# claim stays as a tombstone, for an administrator to delete ("Released
+# namespaces"). Kubernetes can't limit create by name.
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [dispatch-ops-claim]
+  verbs: [get, update]
 {{- end }}
 {{- $fullname := include "dispatch-ops-operator.fullname" . }}
 {{- $labels := include "dispatch-ops-operator.labels" . }}
 {{- $sa := include "dispatch-ops-operator.serviceAccountName" . }}
+{{- $_ := include "dispatch-ops-operator.allowedJobNamespaces" . }}
 {{- if not .Values.watchNamespaces }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -64,14 +87,11 @@ metadata:
     {{- $labels | nindent 4 }}
 rules:
   {{- include "dispatch-ops-operator.rules" . | nindent 2 }}
-  # The dispatch-ops.io/allow-jobs-from label on job namespaces.
+  # The dispatch-ops.io/allow-jobs-from and Pod Security labels on job
+  # namespaces.
   - apiGroups: [""]
     resources: [namespaces]
     verbs: [get]
-  # The operator's own leader election.
-  - apiGroups: [coordination.k8s.io]
-    resources: [leases]
-    verbs: [get, list, watch, create, update, patch, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -88,7 +108,8 @@ subjects:
     name: {{ $sa }}
     namespace: {{ .Release.Namespace }}
 {{- else }}
-{{- range $ns := uniq (concat .Values.watchNamespaces .Values.allowedJobNamespaces) }}
+{{- $namespaces := include "dispatch-ops-operator.accessibleNamespaces" . | fromJsonArray }}
+{{- range $ns := $namespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -115,6 +136,39 @@ subjects:
   - kind: ServiceAccount
     name: {{ $sa }}
     namespace: {{ $.Release.Namespace }}
+{{- end }}
+---
+# The Pod Security label of the namespaces it runs jobs in (by default a
+# DispatchOps's own), and only those.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-namespaces
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]
+    resourceNames:
+      {{- range $namespaces }}
+      - {{ . | quote }}
+      {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-namespaces
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-namespaces
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
 {{- end }}
 ---
 # The operator's own leader election, in its namespace.
@@ -148,4 +202,3 @@ subjects:
   - kind: ServiceAccount
     name: {{ $sa }}
     namespace: {{ .Release.Namespace }}
-{{- end }}

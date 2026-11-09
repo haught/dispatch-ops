@@ -115,6 +115,11 @@ func (h *Handlers) buildRunnerSpec(ctx context.Context, job store.Job) (apigen.R
 		Credentials: []apigen.RunnerCredential{}, Entrypoint: c.Entrypoint, Arguments: nonNilSlice(c.Arguments),
 		Tags: c.Tags, SkipTags: c.SkipTags, Verbosity: c.Verbosity,
 	}
+	// The launcher's extra vars, so the runner can pass them untemplated.
+	if o := job.Overrides; o != nil && len(o.ExtraVars) > 0 {
+		v := apigen.Variables(o.ExtraVars)
+		spec.OverrideVars = &v
+	}
 	if p := c.Project; p != nil {
 		spec.Project = &apigen.RunnerProject{Url: p.ScmURL, Ref: p.ScmRef}
 		if p.CredentialID != nil {

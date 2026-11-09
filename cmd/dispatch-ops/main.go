@@ -168,7 +168,8 @@ func serve() error {
 		Notifier:      &notify.Sender{ExternalURL: cfg.ExternalURL, Version: version},
 		MaxJobOutput:  cfg.JobMaxOutput,
 		LoginLimits: store.LoginLimits{
-			Window: cfg.Login.Window, MaxPerUsername: cfg.Login.MaxPerUsername, MaxPerIP: cfg.Login.MaxPerIP,
+			Window: cfg.Login.Window, MaxPerUsernameIP: cfg.Login.MaxPerUsernameIP,
+			MaxPerUsername: cfg.Login.MaxPerUsername, MaxPerIP: cfg.Login.MaxPerIP,
 		},
 	})
 	if err != nil {
@@ -308,6 +309,7 @@ func runTaskManager() error {
 		NotifyVault: notify.Vault{Keys: keys},
 		Config: taskmanager.Config{
 			Namespace:         tm.Namespace,
+			Installation:      tm.Installation,
 			RunnerAPIURL:      tm.RunnerAPIURL,
 			RunnerAPITLSDir:   tm.RunnerAPITLSDir,
 			MaxConcurrentJobs: tm.MaxConcurrentJobs,

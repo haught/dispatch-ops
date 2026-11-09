@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +13,7 @@ import (
 
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/oidc"
+	"dispatch-ops/internal/secrets"
 	"dispatch-ops/internal/store"
 )
 
@@ -21,8 +21,9 @@ import (
 // provider and the callback; secureOIDCCookieName is its name with secure
 // cookies. The __Host- prefix makes browsers refuse the cookie unless this
 // host set it over HTTPS with Path=/, so a sibling subdomain or a plain
-// HTTP response can't plant one. The state is also encrypted with the
-// server's keyring, so it can't be forged or read.
+// HTTP response can't plant one. The state is also encrypted, with keys
+// derived from the server's keyring (see oidcStateKeys), so it can't be
+// forged or read.
 const (
 	oidcCookieName       = "dispatch_oidc"
 	secureOIDCCookieName = "__Host-" + oidcCookieName
@@ -31,6 +32,19 @@ const (
 // oidcStateAAD binds encrypted OIDC state to its purpose, so no other
 // ciphertext made with the keyring is accepted as one.
 var oidcStateAAD = []byte("dispatch-ops oidc login state")
+
+// oidcStateKeyInfo derives the keys the state is sealed with from the
+// credential keys. Anyone can have the server seal state, so sealing it
+// with the credential keys themselves would give anonymous users an
+// encryption oracle under them.
+const oidcStateKeyInfo = "dispatch-ops oidc-state v1"
+
+// oidcStateKeys returns the keyring OIDC state is sealed with: keys derived
+// from each configured credential key, so state sealed before a key
+// rotation still opens.
+func (h *Handlers) oidcStateKeys() (*secrets.Keyring, error) {
+	return h.Vault.Keys.Derive(oidcStateKeyInfo)
+}
 
 type oidcStateKey struct{}
 
@@ -69,7 +83,11 @@ func (h *Handlers) sealOIDCState(login oidcLogin) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ct, keyID, err := h.Vault.Keys.Encrypt(b, oidcStateAAD)
+	keys, err := h.oidcStateKeys()
+	if err != nil {
+		return "", err
+	}
+	ct, keyID, err := keys.Encrypt(b, oidcStateAAD)
 	if err != nil {
 		return "", err
 	}
@@ -88,7 +106,11 @@ func (h *Handlers) openOIDCState(value string) (oidcLogin, bool) {
 	if err != nil {
 		return login, false
 	}
-	b, err := h.Vault.Keys.Decrypt(ct, keyID, oidcStateAAD)
+	keys, err := h.oidcStateKeys()
+	if err != nil {
+		return login, false
+	}
+	b, err := keys.Decrypt(ct, keyID, oidcStateAAD)
 	if err != nil || json.Unmarshal(b, &login) != nil || login.State == "" ||
 		time.Now().Unix() > login.Expires {
 		return oidcLogin{}, false
@@ -175,7 +197,7 @@ func (h *Handlers) OidcLogin(ctx context.Context, req apigen.OidcLoginRequestObj
 	authURL, login, err := h.OIDC.Start()
 	if err != nil {
 		h.Log.ErrorContext(ctx, "OIDC sign-in could not start", "err", err)
-		return redirect{location: loginError("The sign-on provider is unavailable. Try again later.")}, nil
+		return redirect{location: loginError(loginErrProviderUnavailable)}, nil
 	}
 	state, err := h.sealOIDCState(oidcLogin{
 		Login: login, Next: safeNext(deref(req.Params.Next)), Expires: time.Now().Add(oidcLoginTTL).Unix(),
@@ -187,9 +209,25 @@ func (h *Handlers) OidcLogin(ctx context.Context, req apigen.OidcLoginRequestObj
 	return redirect{location: authURL, cookies: []*http.Cookie{cookie}}, nil
 }
 
-// loginError is the UI's sign-in page showing msg.
-func loginError(msg string) string {
-	return "/login?error=" + url.QueryEscape(msg)
+// loginErrorCode is why single sign-on failed, as the UI's sign-in page is
+// told with ?error=. The page shows a fixed message for each code (see
+// web/src/routes/login/+page.svelte), never text from the URL, so a link
+// can't put words in the server's mouth; details go to the server log.
+type loginErrorCode string
+
+const (
+	loginErrProviderUnavailable loginErrorCode = "provider_unavailable"
+	loginErrProviderRefused     loginErrorCode = "provider_refused"
+	loginErrExpired             loginErrorCode = "expired"
+	loginErrNoCode              loginErrorCode = "no_code"
+	loginErrFailed              loginErrorCode = "failed"
+	loginErrUsernameTaken       loginErrorCode = "username_taken"
+	loginErrDeactivated         loginErrorCode = "deactivated"
+)
+
+// loginError is the UI's sign-in page reporting code.
+func loginError(code loginErrorCode) string {
+	return "/login?error=" + url.QueryEscape(string(code))
 }
 
 func (h *Handlers) OidcCallback(ctx context.Context, req apigen.OidcCallbackRequestObject) (apigen.OidcCallbackResponseObject, error) {
@@ -198,35 +236,32 @@ func (h *Handlers) OidcCallback(ctx context.Context, req apigen.OidcCallbackRequ
 	}
 	p := req.Params
 	clear := h.oidcCookie("", -1)
-	fail := func(msg string) (apigen.OidcCallbackResponseObject, error) {
-		return redirect{location: loginError(msg), cookies: []*http.Cookie{clear}}, nil
+	fail := func(code loginErrorCode) (apigen.OidcCallbackResponseObject, error) {
+		return redirect{location: loginError(code), cookies: []*http.Cookie{clear}}, nil
 	}
 
 	if p.Error != nil {
+		// Logged only: anyone can send a browser here with any text.
 		h.Log.InfoContext(ctx, "OIDC provider returned an error", "error", *p.Error, "description", deref(p.ErrorDescription))
-		msg := "Sign-in was refused by the provider: " + *p.Error
-		if d := deref(p.ErrorDescription); d != "" {
-			msg += " (" + d + ")"
-		}
-		return fail(msg)
+		return fail(loginErrProviderRefused)
 	}
 	raw, _ := ctx.Value(oidcStateKey{}).(string)
 	login, ok := h.openOIDCState(raw)
 	if !ok || subtle.ConstantTimeCompare([]byte(login.State), []byte(deref(p.State))) != 1 {
-		return fail("Your sign-in expired or was started in another browser. Try again.")
+		return fail(loginErrExpired)
 	}
 	if deref(p.Code) == "" {
-		return fail("The provider did not return an authorization code.")
+		return fail(loginErrNoCode)
 	}
 
 	id, err := h.OIDC.Finish(ctx, login.Login, *p.Code)
 	if errors.Is(err, oidc.ErrLogin) {
 		h.Log.WarnContext(ctx, "OIDC sign-in rejected", "err", err)
-		return fail("Sign-in failed. Try again.")
+		return fail(loginErrFailed)
 	}
 	if err != nil {
 		h.Log.ErrorContext(ctx, "OIDC sign-in failed", "err", err)
-		return fail("The sign-on provider is unavailable. Try again later.")
+		return fail(loginErrProviderUnavailable)
 	}
 
 	user, err := h.Store.SignInOIDCUser(ctx, store.OIDCIdentity{
@@ -235,14 +270,14 @@ func (h *Handlers) OidcCallback(ctx context.Context, req apigen.OidcCallbackRequ
 	})
 	if errors.Is(err, store.ErrConflict) {
 		h.Log.WarnContext(ctx, "OIDC username taken", "username", id.Username, "subject", id.Subject)
-		return fail(fmt.Sprintf("The username %q belongs to another account. Ask an administrator to rename it.", id.Username))
+		return fail(loginErrUsernameTaken)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if !user.IsActive {
 		h.Log.InfoContext(ctx, "OIDC sign-in by deactivated user", "username", user.Username)
-		return fail("Your account is deactivated.")
+		return fail(loginErrDeactivated)
 	}
 
 	session, err := h.startSession(ctx, user)

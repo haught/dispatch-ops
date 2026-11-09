@@ -189,8 +189,11 @@ type RunnerJobSpec struct {
 	// `script` runs a script from a project. `container` runs a command in
 	// the execution environment, without a project. `inventory_sync` syncs
 	// an inventory from its source; job templates can't have it.
-	JobType        JobType        `json:"jobType"`
-	Limit          string         `json:"limit"`
+	JobType JobType `json:"jobType"`
+	Limit   string  `json:"limit"`
+
+	// OverrideVars The launcher's extra vars: a subset of extraVars, which already includes them. Runners pass them to Ansible marked unsafe, so they are never templated.
+	OverrideVars   *Variables     `json:"overrideVars,omitempty"`
 	Project        *RunnerProject `json:"project"`
 	SkipTags       string         `json:"skipTags"`
 	Tags           string         `json:"tags"`

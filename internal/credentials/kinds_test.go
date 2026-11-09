@@ -36,6 +36,34 @@ func TestCheckDestinationChange(t *testing.T) {
 	}
 }
 
+// R2-L3: on a generic credential any input can redirect the others, so
+// adding or changing one needs all the values it keeps given again.
+func TestCheckDestinationChangeGeneric(t *testing.T) {
+	generic, _ := Lookup("generic")
+	held := []string{"GH_TOKEN", "VAULT_TOKEN"}
+	for _, tc := range []struct {
+		changes map[string]string
+		ok      bool
+	}{
+		{map[string]string{}, true},
+		// Removing a value redirects nothing.
+		{map[string]string{"VAULT_TOKEN": ""}, true},
+		{map[string]string{"GH_HOST": "evil.example"}, false},
+		{map[string]string{"VAULT_ADDR": "https://evil.example", "VAULT_TOKEN": "t"}, false},
+		{map[string]string{"GH_TOKEN": "rotated"}, false},
+		{map[string]string{"GH_TOKEN": "", "VAULT_ADDR": "https://evil.example"}, false},
+		{map[string]string{"GH_HOST": "ghe.example", "GH_TOKEN": "t", "VAULT_TOKEN": "v"}, true},
+		{map[string]string{"GH_TOKEN": "rotated", "VAULT_TOKEN": "v"}, true},
+		// Removing one and re-entering the rest.
+		{map[string]string{"GH_TOKEN": "", "VAULT_TOKEN": "v", "VAULT_ADDR": "https://vault.example"}, true},
+	} {
+		err := generic.CheckDestinationChange(map[string]string{}, held, tc.changes)
+		if (err == nil) != tc.ok {
+			t.Errorf("%v: err = %v", tc.changes, err)
+		}
+	}
+}
+
 func TestSplit(t *testing.T) {
 	ssh, _ := Lookup("ssh")
 	public, secret, err := ssh.Split(map[string]string{"username": "deploy", "private_key": "KEY", "passphrase": ""})

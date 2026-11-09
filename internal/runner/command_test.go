@@ -287,3 +287,59 @@ func TestAnsibleCommandLimit(t *testing.T) {
 		}
 	}
 }
+
+// A repository's symbolic links can't take the entrypoint outside the
+// project, to the job's secrets for one.
+func TestProjectPathSymlinks(t *testing.T) {
+	ws := testWorkspace(t)
+	ws.projectDir = filepath.Join(ws.dir, "project")
+	writeProjectFile(t, ws.projectDir, "site.yml", "- hosts: all\n")
+	writeProjectFile(t, ws.projectDir, "inv/hosts.yml", "all: {}\n")
+	outside := filepath.Join(ws.secrets, "credentials.json")
+	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for link, target := range map[string]string{
+		"evil.yml":   outside,
+		"rel.yml":    "../secrets/credentials.json",
+		"secretsdir": ws.secrets,
+		"inside.yml": "site.yml",
+		"invlink":    "inv",
+	} {
+		if err := os.Symlink(target, filepath.Join(ws.projectDir, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec := &runnerapi.RunnerJobSpec{JobType: runnerapi.Ansible}
+	for _, e := range []string{"evil.yml", "rel.yml", "secretsdir/credentials.json"} {
+		spec.Entrypoint = e
+		if _, err := projectFile(spec, ws, "playbook"); err == nil || !strings.Contains(err.Error(), "outside the project") {
+			t.Errorf("%s: err = %v, want refused", e, err)
+		}
+	}
+	spec.Entrypoint = "secretsdir"
+	if _, err := projectPath(spec, ws, "inventory source", true); err == nil {
+		t.Error("a directory link to outside the project was accepted")
+	}
+	for e, dirOK := range map[string]bool{"inside.yml": false, "site.yml": false, "invlink": true, "invlink/hosts.yml": false} {
+		spec.Entrypoint = e
+		if p, err := projectPath(spec, ws, "entrypoint", dirOK); err != nil || p != filepath.Join(ws.projectDir, e) {
+			t.Errorf("%s: %q, %v", e, p, err)
+		}
+	}
+
+	// The project directory may itself be reached through a link.
+	alias := filepath.Join(ws.dir, "alias")
+	if err := os.Symlink(ws.projectDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	ws.projectDir = alias
+	spec.Entrypoint = "inside.yml"
+	if _, err := projectFile(spec, ws, "playbook"); err != nil {
+		t.Errorf("project behind a link: %v", err)
+	}
+	spec.Entrypoint = "evil.yml"
+	if _, err := projectFile(spec, ws, "playbook"); err == nil {
+		t.Error("project behind a link: a link outside was accepted")
+	}
+}

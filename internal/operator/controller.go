@@ -22,18 +22,23 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"dispatch-ops/internal/operator/api/v1alpha1"
+	"dispatch-ops/internal/tlscert"
 )
 
 // Condition types reported in status.
@@ -43,6 +48,42 @@ const (
 	CondAPIReady         = "APIReady"
 	CondTaskManagerReady = "TaskManagerReady"
 	CondReady            = "Ready"
+	// CondDegraded is set (True) only while something needs an
+	// administrator: the generated encryption key has gone missing.
+	CondDegraded = "Degraded"
+)
+
+// Reasons the task manager isn't deployed for, besides rolling out.
+const (
+	// ReasonNamespaceInUse: another installation holds the DispatchOps's
+	// namespace (see claim.go): a namespace hosts one installation. The
+	// whole installation is refused.
+	ReasonNamespaceInUse = "NamespaceInUse"
+	// ReasonJobNamespaceInUse: the job namespace is another installation's
+	// (see Reconciler.holdJobNamespace). The whole installation is refused.
+	ReasonJobNamespaceInUse = "JobNamespaceInUse"
+	// ReasonJobNamespaceNotAllowed: the job namespace isn't opted in.
+	ReasonJobNamespaceNotAllowed = "JobNamespaceNotAllowed"
+	// ReasonJobNamespacePodSecurity: the job namespace doesn't enforce the
+	// restricted (or baseline) Pod Security Standard.
+	ReasonJobNamespacePodSecurity = "JobNamespacePodSecurity"
+	// ReasonEncryptionKeyMissing: the encryption key Secret the operator
+	// generated is gone, and it won't make another (see
+	// ensureEncryptionKey).
+	ReasonEncryptionKeyMissing = "EncryptionKeyMissing"
+	// ReasonNamespaceReleased: the DispatchOps's namespace was another
+	// installation's job namespace (a tombstone; see claim.go). The whole
+	// installation is refused.
+	ReasonNamespaceReleased = "NamespaceReleased"
+	// ReasonJobNamespaceReleased: the job namespace was another
+	// installation's job namespace, or a deleted installation's own
+	// namespace (a tombstone; see claim.go). The whole installation is
+	// refused.
+	ReasonJobNamespaceReleased = "JobNamespaceReleased"
+	// ReasonForeignSecret: on a first install, a Secret the operator would
+	// generate already exists, and it didn't generate it for this
+	// installation (see checkGeneratedSecrets).
+	ReasonForeignSecret = "ForeignSecret"
 )
 
 const (
@@ -56,6 +97,9 @@ const (
 	// pollInterval re-checks an installation that isn't ready, for changes
 	// the operator doesn't watch (such as Secrets it doesn't own).
 	pollInterval = 30 * time.Second
+	// cleanupPoll re-checks sooner while an installation's job pods are
+	// still stopping in a namespace it is leaving (see leaveJobNamespaces).
+	cleanupPoll = 5 * time.Second
 )
 
 // Reconciler reconciles DispatchOps resources.
@@ -68,9 +112,19 @@ type Reconciler struct {
 	// DefaultImage is the server image used when a DispatchOps names none:
 	// the one this operator was released with.
 	DefaultImage string
-	// AllowedJobNamespaces are namespaces any DispatchOps may run jobs in,
-	// besides its own.
-	AllowedJobNamespaces []string
+	// AllowedJobNamespaces maps each namespace a DispatchOps may run jobs
+	// in, besides its own, to the namespaces whose DispatchOps may. Each
+	// serves one installation at a time: the one holding its claim (see
+	// claim.go).
+	AllowedJobNamespaces map[string][]string
+	// AllowJobNamespacesWithoutPodSecurity runs jobs in namespaces that
+	// don't enforce the restricted or baseline Pod Security Standard. By
+	// default the operator refuses them: whoever can create a DispatchOps
+	// chooses the task manager's image, which can create any pod there.
+	AllowJobNamespacesWithoutPodSecurity bool
+	// JobDNS is where job pods may send DNS queries; nil means
+	// DefaultJobDNS.
+	JobDNS *JobDNS
 	// Namespaces are the only namespaces the operator may read and write
 	// (the ones it watches, and AllowedJobNamespaces). Empty means it has
 	// access to every namespace; only then does it look for
@@ -78,19 +132,47 @@ type Reconciler struct {
 	Namespaces []string
 }
 
-// jobNamespaceRecheck is how often a ready installation whose jobs run in
-// another namespace re-checks that the namespace still allows it.
-const jobNamespaceRecheck = 5 * time.Minute
-
-// certRecheck is how often a ready installation is reconciled anyway, so
-// generated certificates are renewed (well within renewBefore of expiry)
-// even when nothing else changes.
-const certRecheck = 12 * time.Hour
+// readyRecheck is how often a ready installation is reconciled anyway: the
+// operator doesn't watch namespaces, so this is how soon it notices that a
+// job namespace no longer allows it (its opt-in label or its Pod Security
+// label removed), and when generated certificates get renewed (well within
+// renewBefore of expiry). A reconcile that changes nothing costs a few
+// reads, mostly from the cache.
+const readyRecheck = 5 * time.Minute
 
 // SetupWithManager registers the reconciler and what it watches.
+//
+// It reconciles one DispatchOps at a time (MaxConcurrentReconciles: 1, the
+// default, set explicitly because the operator relies on it). Which
+// installation holds a namespace is decided by the create-only claims,
+// which hold whatever the concurrency, between operator releases too. But
+// the checks before a claim and a grant (no DispatchOps in the job
+// namespace, no other installation's job objects there) are
+// check-then-act: with one reconcile at a time, no other reconcile of
+// this operator grants anything in between. Raise it only after making those atomic.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DispatchOps{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
+		// Another DispatchOps moving into, out of or away from a job
+		// namespace, or created in one: reconcile at once every one that
+		// runs its jobs there, so one waiting for it tries again, and one
+		// whose job namespace now hosts a DispatchOps leaves it.
+		Watches(&v1alpha1.DispatchOps{}, handler.Funcs{
+			CreateFunc: func(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+				r.enqueueJobNamespaceUsers(ctx, q, e.Object)
+			},
+			UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+				o, n := e.ObjectOld.(*v1alpha1.DispatchOps), e.ObjectNew.(*v1alpha1.DispatchOps)
+				if (install{DispatchOps: o}).jobNamespace() != (install{DispatchOps: n}).jobNamespace() ||
+					o.DeletionTimestamp.IsZero() != n.DeletionTimestamp.IsZero() {
+					r.enqueueJobNamespaceUsers(ctx, q, o, n)
+				}
+			},
+			DeleteFunc: func(ctx context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+				r.enqueueJobNamespaceUsers(ctx, q, e.Object)
+			},
+		}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&batchv1.Job{}).
@@ -137,7 +219,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !cr.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, r.finalize(ctx, &cr)
+		return r.finalize(ctx, &cr)
 	}
 	if controllerutil.AddFinalizer(&cr, finalizer) {
 		if err := r.Update(ctx, &cr); err != nil {
@@ -158,10 +240,49 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		})
 	}
 
-	err := r.reconcile(ctx, &cr, in, status, set)
+	// A namespace hosts one installation: claim it before making anything
+	// in it, the encryption key and database included.
+	reason, refusal, err := r.claimOwnNamespace(ctx, &cr, in)
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if refusal != "" {
+		return r.refuse(ctx, &cr, in, status, set, reason, refusal)
+	}
+
+	// A job namespace serves one installation: the task manager can create
+	// pods there, and a pod can mount any Secret in its namespace. Claim it
+	// before granting anything there: reconcileServers grants only in
+	// in.heldJobNamespace. (One it may not use is refused there.)
+	ok, _, err := r.mayUseJobNamespace(ctx, in)
+	if err == nil && ok {
+		reason, refusal, err = r.holdJobNamespace(ctx, &cr, in)
+		if err == nil && refusal == "" {
+			in.heldJobNamespace = in.jobNamespace()
+		}
+		if errors.Is(err, errNoNamespace) {
+			err = nil // refused in reconcileServers
+		}
+	}
+	if err == nil && refusal != "" {
+		return r.refuse(ctx, &cr, in, status, set, reason, refusal)
+	}
+	var pending bool
+	if err == nil {
+		pending, err = r.reconcile(ctx, &cr, in, status, set)
+	}
+	keyErr, foreignErr := (*encryptionKeyMissingError)(nil), (*foreignSecretError)(nil)
+	if errors.As(err, &keyErr) {
+		set(CondDegraded, true, ReasonEncryptionKeyMissing, keyErr.Error())
+		set(CondReady, false, ReasonEncryptionKeyMissing, keyErr.Error())
+		err = nil
+	} else if errors.As(err, &foreignErr) {
+		set(CondReady, false, ReasonForeignSecret, foreignErr.Error())
+		err = nil
+	} else if err != nil {
 		set(CondReady, false, "Error", err.Error())
 	} else {
+		meta.RemoveStatusCondition(&status.Conditions, CondDegraded)
 		ready := true
 		for _, t := range []string{CondDatabaseReady, CondMigrated, CondAPIReady, CondTaskManagerReady} {
 			if !meta.IsStatusConditionTrue(status.Conditions, t) {
@@ -176,39 +297,63 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// The claims keep cr.Status.JobNamespaces up to date as they go.
+	status.JobNamespaces = cr.Status.JobNamespaces
 	if !reflect.DeepEqual(status, &cr.Status) {
 		cr.Status = *status
 		if uerr := r.Status().Update(ctx, &cr); uerr != nil {
 			return ctrl.Result{}, errors.Join(err, uerr)
 		}
 	}
-	if err != nil {
+	switch {
+	case err != nil:
 		return ctrl.Result{}, err
-	}
-	if !meta.IsStatusConditionTrue(status.Conditions, CondReady) {
+	case pending:
+		return ctrl.Result{RequeueAfter: cleanupPoll}, nil
+	case !meta.IsStatusConditionTrue(status.Conditions, CondReady):
 		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
-	if in.jobNamespace() != cr.Namespace {
-		// The operator doesn't watch namespaces, so it would otherwise not
-		// notice a namespace's opt-in label being removed.
-		return ctrl.Result{RequeueAfter: jobNamespaceRecheck}, nil
-	}
-	// Nothing else may happen to a ready installation for months; this is
-	// when its generated certificates get renewed.
-	return ctrl.Result{RequeueAfter: certRecheck}, nil
+	return ctrl.Result{RequeueAfter: readyRecheck}, nil
 }
 
 type setCondition func(t string, ok bool, reason, msg string)
 
+// refuse refuses cr's installation outright, for reason: it takes away its
+// task manager and whatever it has in job namespaces (see
+// revokeJobAccess), and reports why in status.
+func (r *Reconciler) refuse(ctx context.Context, cr *v1alpha1.DispatchOps, in install, status *v1alpha1.DispatchOpsStatus,
+	set setCondition, reason, msg string) (ctrl.Result, error) {
+	pending, err := r.revokeJobAccess(ctx, cr, in)
+	set(CondTaskManagerReady, false, reason, msg)
+	set(CondReady, false, reason, msg)
+	status.JobNamespaces = cr.Status.JobNamespaces
+	if !reflect.DeepEqual(status, &cr.Status) {
+		cr.Status = *status
+		if uerr := r.Status().Update(ctx, cr); uerr != nil {
+			return ctrl.Result{}, errors.Join(err, uerr)
+		}
+	}
+	if pending {
+		return ctrl.Result{RequeueAfter: cleanupPoll}, err
+	}
+	return ctrl.Result{RequeueAfter: pollInterval}, err
+}
+
+// reconcile does the work of Reconcile for an installation that may have
+// its job namespace. pending reports that its job pods are still stopping
+// in a namespace it left (see leaveJobNamespaces).
 func (r *Reconciler) reconcile(ctx context.Context, cr *v1alpha1.DispatchOps, in install,
-	status *v1alpha1.DispatchOpsStatus, set setCondition) error {
+	status *v1alpha1.DispatchOpsStatus, set setCondition) (pending bool, err error) {
 	if err := r.ensureSecrets(ctx, in); err != nil {
-		return err
+		return false, err
+	}
+	if in.Spec.EncryptionKeySecret == nil {
+		status.EncryptionKeyGenerated = true
 	}
 
 	dbReady, err := r.reconcileDatabase(ctx, cr, &in, set)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	want := in.Spec.Image
@@ -218,7 +363,7 @@ func (r *Reconciler) reconcile(ctx context.Context, cr *v1alpha1.DispatchOps, in
 	if status.Image != want {
 		done, err := r.migrate(ctx, cr, in, want, dbReady, set)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if done {
 			status.Image = want
@@ -231,7 +376,7 @@ func (r *Reconciler) reconcile(ctx context.Context, cr *v1alpha1.DispatchOps, in
 	if in.image == "" {
 		set(CondAPIReady, false, "WaitingForMigration", "Waiting for the first database migration")
 		set(CondTaskManagerReady, false, "WaitingForMigration", "Waiting for the first database migration")
-		return nil
+		return false, nil
 	}
 	return r.reconcileServers(ctx, cr, in, set)
 }
@@ -249,13 +394,15 @@ func randomString(n int) string {
 // exist, and renews the certificates among them. They have no owner, so
 // deleting the DispatchOps keeps them.
 func (r *Reconciler) ensureSecrets(ctx context.Context, in install) error {
-	var want []*corev1.Secret
-	if in.Spec.EncryptionKeySecret == nil {
-		key := make([]byte, 32)
-		_, _ = rand.Read(key)
-		want = append(want, in.generatedSecret("encryption-key", in.encryptionKeySecretName(),
-			map[string]string{"key": base64.StdEncoding.EncodeToString(key)}))
+	if err := r.checkGeneratedSecrets(ctx, in); err != nil {
+		return err
 	}
+	if in.Spec.EncryptionKeySecret == nil {
+		if err := r.ensureEncryptionKey(ctx, in); err != nil {
+			return err
+		}
+	}
+	var want []*corev1.Secret
 	// The administrator's initial password is only needed until the first
 	// migration has created them; after that the Secret may be deleted (as
 	// the README recommends) and isn't made again.
@@ -276,16 +423,176 @@ func (r *Reconciler) ensureSecrets(ctx context.Context, in install) error {
 	}
 	// Making a certificate costs more than the others, so only when needed.
 	if in.tlsEnabled() && in.Spec.API.TLS.SecretName == "" {
-		if err := r.ensureCert(ctx, in.apiTLSSecretName(), in.Namespace, in.apiCertHosts(), in.generatedTLSSecret); err != nil {
+		if err := r.ensureCert(ctx, in.apiTLSSecretName(), in.Namespace, in.apiCertHosts(), in.generatedTLSSecret, nil); err != nil {
 			return err
 		}
 	}
 	if in.Spec.Database.Managed != nil {
-		if err := r.ensureCert(ctx, in.postgresTLSSecretName(), in.Namespace, in.postgresCertHosts(), in.generatedPostgresTLSSecret); err != nil {
+		if err := r.ensurePostgresTLS(ctx, in); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// foreignSecretError reports a Secret that a first install would use as
+// one the operator generated, but that it didn't generate for this
+// installation.
+type foreignSecretError struct {
+	name string
+	uid  types.UID
+}
+
+func (e *foreignSecretError) Error() string {
+	return fmt.Sprintf("Secret %s already exists, but the operator didn't generate it for this DispatchOps (it isn't "+
+		"labeled %s=%s). Anyone who could create Secrets in this namespace (a task manager whose job namespace it "+
+		"was, say) could have left it, with values they know, so the operator won't use it. Delete it, and the "+
+		"operator generates a new one; or, if you made it for this installation, label it %s=%s",
+		e.name, ownerLabel, e.uid, ownerLabel, e.uid)
+}
+
+// checkGeneratedSecrets makes sure the Secrets the operator generates for
+// in, where they exist already, are its own: labeled with its UID. On a
+// first install (it has no status.encryptionKeyGenerated or status.image
+// yet) another is a foreignSecretError: the operator would otherwise take
+// it as the one it generated, and use a key, password or certificate that
+// someone else knows. (A kept Secret of a deleted DispatchOps of the same
+// name was relabeled when its namespace was claimed; see
+// adoptKeptSecrets.) Once installed, an installation uses the Secrets it
+// has; one generated by an operator from before the label (with
+// generatedAnnotation but no ownerLabel) gets it.
+func (r *Reconciler) checkGeneratedSecrets(ctx context.Context, in install) error {
+	established := in.Status.EncryptionKeyGenerated || in.Status.Image != ""
+	for _, name := range in.generatedSecretNames() {
+		var s corev1.Secret
+		err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: in.Namespace, Name: name}, &s)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("secret %s: %w", name, err)
+		}
+		owner, has := s.Labels[ownerLabel]
+		switch {
+		case owner == string(in.UID):
+		case !established:
+			log.FromContext(ctx).Info("refusing a Secret the operator didn't generate for this installation", "secret", name,
+				"ownerUID", owner)
+			return &foreignSecretError{name: name, uid: in.UID}
+		case !has && s.Annotations[generatedAnnotation] == "true":
+			if err := r.relabelSecret(ctx, &s, in.UID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// adoptKeptSecrets takes over, for in, the Secrets that the deleted
+// installation formerUID, a DispatchOps of the same name in the same
+// namespace, generated and left there (see claimOwnNamespace): those of
+// its generated names labeled with formerUID get in's UID instead. Others
+// stay as they are (and are refused by checkGeneratedSecrets).
+func (r *Reconciler) adoptKeptSecrets(ctx context.Context, in install, formerUID types.UID) error {
+	for _, name := range in.keptSecretNames() {
+		var s corev1.Secret
+		err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: in.Namespace, Name: name}, &s)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("secret %s: %w", name, err)
+		}
+		if s.Labels[ownerLabel] != string(formerUID) {
+			continue
+		}
+		log.FromContext(ctx).Info("taking over a kept Secret of the deleted installation", "secret", name, "formerUID", formerUID)
+		if err := r.relabelSecret(ctx, &s, in.UID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// relabelSecret labels s with uid (ownerLabel).
+func (r *Reconciler) relabelSecret(ctx context.Context, s *corev1.Secret, uid types.UID) error {
+	s.Labels = maps.Clone(s.Labels)
+	if s.Labels == nil {
+		s.Labels = map[string]string{}
+	}
+	s.Labels[ownerLabel] = string(uid)
+	if err := r.Update(ctx, s); err != nil {
+		return fmt.Errorf("secret %s: %w", s.Name, err)
+	}
+	return nil
+}
+
+// encryptionKeyMissingError reports a generated encryption key Secret that
+// has gone missing.
+type encryptionKeyMissingError struct{ name string }
+
+func (e *encryptionKeyMissingError) Error() string {
+	return fmt.Sprintf("The encryption key Secret %s, which the operator generated, is missing. The database may hold "+
+		"credentials encrypted with that key, so the operator won't generate a new one, which would leave them unreadable: "+
+		"restore the Secret from your backup. To start over without the stored credentials, create the Secret "+
+		"yourself, with a new key (dispatch-ops gen-key) as \"key\"", e.name)
+}
+
+// ensureEncryptionKey generates the encryption key Secret, the first time
+// only. Once the installation has had one (status.encryptionKeyGenerated,
+// or for one from before that field, a migrated database), a missing
+// Secret is an encryptionKeyMissingError instead: a new key would make the
+// stored credentials unreadable, whoever deleted the old one.
+func (r *Reconciler) ensureEncryptionKey(ctx context.Context, in install) error {
+	name := in.encryptionKeySecretName()
+	var existing corev1.Secret
+	err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: in.Namespace, Name: name}, &existing)
+	switch {
+	case err == nil:
+		return nil
+	case !apierrors.IsNotFound(err):
+		return fmt.Errorf("secret %s: %w", name, err)
+	case in.Status.EncryptionKeyGenerated || in.Status.Image != "":
+		return &encryptionKeyMissingError{name: name}
+	}
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
+	s := in.generatedSecret("encryption-key", name, map[string]string{"key": base64.StdEncoding.EncodeToString(key)})
+	return r.ensureSecret(ctx, name, in.Namespace, func() (*corev1.Secret, error) { return s, nil })
+}
+
+// ensurePostgresTLS creates the managed database's CA and the certificate
+// it serves, issued by that CA, and renews them: the certificate as any
+// other (see ensureCert), and when the CA isn't its issuer (a new CA, or a
+// self-signed one from an older operator); the CA only near its expiry,
+// years from now. The servers trust the CA, so they keep reaching the
+// database when its certificate is renewed.
+func (r *Reconciler) ensurePostgresTLS(ctx context.Context, in install) error {
+	name := in.postgresCASecretName()
+	if err := r.ensureSecret(ctx, name, in.Namespace, in.generatedPostgresCASecret); err != nil {
+		return err
+	}
+	var ca corev1.Secret
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: in.Namespace, Name: name}, &ca); err != nil {
+		return fmt.Errorf("secret %s: %w", name, err)
+	}
+	if ca.Annotations[generatedAnnotation] == "true" {
+		cert, err := tlscert.ParseCertificate(ca.Data[caCertKey])
+		if err != nil || len(ca.Data[caKeyKey]) == 0 || time.Until(cert.NotAfter) < postgresCARenewBefore {
+			fresh, err := in.generatedPostgresCASecret()
+			if err != nil {
+				return err
+			}
+			log.FromContext(ctx).Info("renewing generated CA", "secret", name)
+			ca.Data = fresh.Data
+			if err := r.Update(ctx, &ca); err != nil {
+				return fmt.Errorf("secret %s: %w", name, err)
+			}
+		}
+	}
+	return r.ensureCert(ctx, in.postgresTLSSecretName(), in.Namespace, in.postgresCertHosts(),
+		func() (*corev1.Secret, error) { return in.postgresTLSSecret(&ca) },
+		func(s *corev1.Secret) bool { return !issuedBy(s, ca.Data[caCertKey]) })
 }
 
 // ensureCert creates a generated certificate Secret, or renews it when it
@@ -293,7 +600,9 @@ func (r *Reconciler) ensureSecrets(ctx context.Context, in install) error {
 // server reloads its certificate files when they change, and the task
 // manager reads the API's for each job; the managed database's pod is
 // restarted through its certificate annotation.
-func (r *Reconciler) ensureCert(ctx context.Context, name, namespace string, hosts []string, generate func() (*corev1.Secret, error)) error {
+// stale, if not nil, also renews the certificate when it returns true.
+func (r *Reconciler) ensureCert(ctx context.Context, name, namespace string, hosts []string,
+	generate func() (*corev1.Secret, error), stale func(*corev1.Secret) bool) error {
 	var existing corev1.Secret
 	err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &existing)
 	if apierrors.IsNotFound(err) {
@@ -302,7 +611,8 @@ func (r *Reconciler) ensureCert(ctx context.Context, name, namespace string, hos
 	if err != nil {
 		return fmt.Errorf("secret %s: %w", name, err)
 	}
-	if !certNeedsRenewal(&existing, hosts, time.Now()) {
+	if !certNeedsRenewal(&existing, hosts, time.Now()) &&
+		(stale == nil || existing.Annotations[generatedAnnotation] != "true" || !stale(&existing)) {
 		return nil
 	}
 	fresh, err := generate()
@@ -364,6 +674,11 @@ func (r *Reconciler) reconcileDatabase(ctx context.Context, cr *v1alpha1.Dispatc
 		return false, fmt.Errorf("secret %s: %w", in.postgresTLSSecretName(), err)
 	}
 	in.postgresCertHash = certHash(&cert)
+	var ca corev1.Secret
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: in.Namespace, Name: in.postgresCASecretName()}, &ca); err != nil {
+		return false, fmt.Errorf("secret %s: %w", in.postgresCASecretName(), err)
+	}
+	in.postgresCAHash = hash16(ca.Data[caCertKey])
 	if err := r.apply(ctx, cr, in.postgresService()); err != nil {
 		return false, err
 	}
@@ -385,8 +700,10 @@ func (r *Reconciler) reconcileDatabase(ctx context.Context, cr *v1alpha1.Dispatc
 }
 
 // requireDatabaseTLS switches the managed database's URL, which older
-// operators generated with sslmode=disable, to sslmode=require once
-// PostgreSQL has rolled out serving TLS. It returns the URL's sslmode.
+// operators generated with sslmode=disable or require, to postgresSSLMode
+// (verify-full, with the CA the server pods mount): from disable once
+// PostgreSQL has rolled out serving TLS. It returns the URL's sslmode,
+// which restarts the server pods when it changes (dbSSLModeAnnotation).
 func (r *Reconciler) requireDatabaseTLS(ctx context.Context, in install, sts *appsv1.StatefulSet) (string, error) {
 	var s corev1.Secret
 	name := in.name(componentDatabase)
@@ -402,17 +719,20 @@ func (r *Reconciler) requireDatabaseTLS(ctx context.Context, in install, sts *ap
 	st := sts.Status
 	rolledOut := st.ObservedGeneration >= sts.Generation && st.UpdatedReplicas >= 1 && st.ReadyReplicas >= 1 &&
 		(st.UpdateRevision == "" || st.UpdateRevision == st.CurrentRevision)
-	if mode != "disable" || s.Annotations["dispatch-ops.io/generated"] != "true" || !rolledOut {
+	if s.Annotations[generatedAnnotation] != "true" || (mode != "disable" && mode != "require") ||
+		(mode == "disable" && !rolledOut) {
 		return mode, nil
 	}
-	q.Set("sslmode", "require")
+	for k, v := range postgresTLSQuery() {
+		q[k] = v
+	}
 	u.RawQuery = q.Encode()
 	s.Data["url"] = []byte(u.String())
-	log.FromContext(ctx).Info("requiring TLS to the managed database", "secret", name)
+	log.FromContext(ctx).Info("verifying TLS to the managed database", "secret", name, "sslmode", postgresSSLMode)
 	if err := r.Update(ctx, &s); err != nil {
 		return "", fmt.Errorf("secret %s: %w", name, err)
 	}
-	return "require", nil
+	return postgresSSLMode, nil
 }
 
 // applyNetworkPolicy applies np in the DispatchOps namespace, or deletes it
@@ -488,61 +808,67 @@ func (r *Reconciler) migrate(ctx context.Context, cr *v1alpha1.DispatchOps, in i
 
 // --- API server and task manager ---------------------------------------------------
 
-func (r *Reconciler) reconcileServers(ctx context.Context, cr *v1alpha1.DispatchOps, in install, set setCondition) error {
+func (r *Reconciler) reconcileServers(ctx context.Context, cr *v1alpha1.DispatchOps, in install, set setCondition) (bool, error) {
 	// Caught here rather than by an API server that won't start.
 	for _, p := range in.Spec.API.TrustedProxies {
 		if _, err := netip.ParsePrefix(p); err != nil {
 			if _, err := netip.ParseAddr(p); err != nil {
-				return fmt.Errorf("api.trustedProxies: %q is not an address or CIDR", p)
+				return false, fmt.Errorf("api.trustedProxies: %q is not an address or CIDR", p)
 			}
 		}
 	}
 	for _, c := range []string{componentAPI, componentTaskManager} {
 		if err := r.applyNetworkPolicy(ctx, cr, in, in.serverNetworkPolicy(c)); err != nil {
-			return err
+			return false, err
 		}
 	}
 	for _, o := range []client.Object{in.apiService(), in.taskManagerServiceAccount()} {
 		if err := r.apply(ctx, cr, o); err != nil {
-			return err
+			return false, err
 		}
 	}
 
-	allowed, why, err := r.jobNamespaceAllowed(ctx, in)
+	refusal, why, err := r.jobNamespaceAllowed(ctx, in)
 	if err != nil {
-		return err
+		return false, err
 	}
+	if refusal == "" && in.heldJobNamespace != in.jobNamespace() {
+		// Never granted without the claim; it isn't held only when the
+		// namespace is missing.
+		refusal, why = ReasonJobNamespaceNotAllowed, fmt.Sprintf("Job namespace %s does not exist", in.jobNamespace())
+	}
+	allowed := refusal == ""
 	var keep []client.Object
+	keepNS := ""
 	if allowed {
-		keep = []client.Object{in.taskManagerRole(), in.taskManagerRoleBinding()}
+		keepNS = in.jobNamespace()
+		// The NetworkPolicy first, so no job pod starts without it.
 		if in.networkPoliciesEnabled() {
-			np, err := in.jobNetworkPolicy()
+			np, err := in.jobNetworkPolicy(r.JobDNS)
 			if err != nil {
-				return err
+				return false, err
 			}
 			keep = append(keep, np)
-		} else if in.jobNamespace() == in.Namespace {
-			np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: in.jobObjectName(componentJobs), Namespace: in.Namespace}}
-			if err := r.deleteIfOwned(ctx, cr, np); err != nil {
-				return err
-			}
 		}
+		keep = append(keep, in.taskManagerRole(), in.taskManagerRoleBinding())
 		for _, o := range keep {
 			if err := r.apply(ctx, cr, o); err != nil {
-				return err
+				return false, err
 			}
 		}
 	}
-	if err := r.pruneJobNamespace(ctx, cr, in, keep); err != nil {
-		return err
+	// Everything elsewhere, and if not allowed, there too.
+	pending, err := r.leaveJobNamespaces(ctx, cr, in, keepNS, in.heldJobNamespace, keep)
+	if err != nil {
+		return false, err
 	}
 
 	if in.Spec.API.Ingress != nil {
 		if err := r.apply(ctx, cr, in.ingress()); err != nil {
-			return err
+			return false, err
 		}
 	} else if err := r.deleteIfOwned(ctx, cr, &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: in.Name, Namespace: in.Namespace}}); err != nil {
-		return err
+		return false, err
 	}
 
 	deps := []struct {
@@ -557,11 +883,11 @@ func (r *Reconciler) reconcileServers(ctx context.Context, cr *v1alpha1.Dispatch
 	} else {
 		// Without its Role there, the task manager couldn't run jobs; an
 		// existing one is left as it is, and can't either.
-		set(CondTaskManagerReady, false, "JobNamespaceNotAllowed", why)
+		set(CondTaskManagerReady, false, refusal, why)
 	}
 	for _, d := range deps {
 		if err := r.apply(ctx, cr, d.dep); err != nil {
-			return err
+			return false, err
 		}
 		ok, msg := deploymentReady(d.dep)
 		reason := "Available"
@@ -570,7 +896,7 @@ func (r *Reconciler) reconcileServers(ctx context.Context, cr *v1alpha1.Dispatch
 		}
 		set(d.cond, ok, reason, msg)
 	}
-	return nil
+	return pending, nil
 }
 
 func deploymentReady(d *appsv1.Deployment) (bool, string) {
@@ -677,18 +1003,68 @@ func notOurs(obj client.Object, cr *v1alpha1.DispatchOps) error {
 }
 
 // jobNamespaceAllowed reports whether in may run jobs in its job
-// namespace, and if not, why. Its own namespace always may; another only
-// if the operator was started allowing it, or (when the operator has
-// access to every namespace) the namespace's AllowJobsFromLabel names
-// in's namespace. Without this, anyone who may create a DispatchOps could
-// have the task manager granted Secrets and Jobs in any namespace.
-func (r *Reconciler) jobNamespaceAllowed(ctx context.Context, in install) (bool, string, error) {
+// namespace: "" if so, and otherwise a condition reason and why. The
+// namespace must be opted in (mayUseJobNamespace), and enforce the
+// restricted or baseline Pod Security Standard, unless the operator was
+// started allowing namespaces without one.
+func (r *Reconciler) jobNamespaceAllowed(ctx context.Context, in install) (string, string, error) {
 	ns := in.jobNamespace()
-	if ns == in.Namespace || slices.Contains(r.AllowedJobNamespaces, ns) {
+	ok, why, err := r.mayUseJobNamespace(ctx, in)
+	if err != nil || !ok {
+		return ReasonJobNamespaceNotAllowed, why, err
+	}
+	if r.AllowJobNamespacesWithoutPodSecurity {
+		return "", "", nil
+	}
+	var n corev1.Namespace
+	err = r.APIReader.Get(ctx, types.NamespacedName{Name: ns}, &n)
+	switch {
+	case apierrors.IsNotFound(err):
+		return ReasonJobNamespaceNotAllowed, fmt.Sprintf("Job namespace %s does not exist", ns), nil
+	case apierrors.IsForbidden(err):
+		return ReasonJobNamespacePodSecurity, fmt.Sprintf("The operator may not read namespace %s to check its Pod Security "+
+			"label: grant it get on that namespace (the chart does), or start it with --allow-job-namespaces-without-pod-security", ns), nil
+	case err != nil:
+		return "", "", fmt.Errorf("namespace %s: %w", ns, err)
+	}
+	if !enforcesPodSecurity(&n) {
+		return ReasonJobNamespacePodSecurity, fmt.Sprintf("Job namespace %s must enforce Pod Security, since the task manager "+
+			"creates pods there: label it %s=restricted (job pods comply), or start the operator with "+
+			"--allow-job-namespaces-without-pod-security", ns, podSecurityEnforce), nil
+	}
+	return "", "", nil
+}
+
+// enforcesPodSecurity reports whether n enforces the restricted or baseline
+// Pod Security Standard, either of which keeps pods from mounting the
+// node's filesystem or running privileged.
+func enforcesPodSecurity(n *corev1.Namespace) bool {
+	switch n.Labels[podSecurityEnforce] {
+	case "restricted", "baseline":
+		return true
+	}
+	return false
+}
+
+// mayUseJobNamespace reports whether in's job namespace is opted in for
+// it, and if not, why. Its own namespace always is; another only if the
+// operator was started allowing it for in's namespace, or (when the
+// operator has access to every namespace) the namespace's
+// AllowJobsFromLabel names in's namespace. Without this, anyone who may
+// create a DispatchOps could have the task manager granted Secrets and Jobs
+// in any namespace.
+func (r *Reconciler) mayUseJobNamespace(ctx context.Context, in install) (bool, string, error) {
+	ns := in.jobNamespace()
+	sources, listed := r.AllowedJobNamespaces[ns]
+	if ns == in.Namespace || slices.Contains(sources, in.Namespace) {
 		return true, "", nil
 	}
+	notAllowed := fmt.Sprintf("Job namespace %s is not in the operator's allowed job namespaces", ns)
+	if listed {
+		notAllowed = fmt.Sprintf("The operator's allowed job namespaces don't allow job namespace %s for namespace %s", ns, in.Namespace)
+	}
 	if len(r.Namespaces) > 0 {
-		return false, fmt.Sprintf("Job namespace %s is not in the operator's allowed job namespaces", ns), nil
+		return false, notAllowed, nil
 	}
 	var n corev1.Namespace
 	err := r.APIReader.Get(ctx, types.NamespacedName{Name: ns}, &n)
@@ -699,8 +1075,7 @@ func (r *Reconciler) jobNamespaceAllowed(ctx context.Context, in install) (bool,
 		return false, "", fmt.Errorf("namespace %s: %w", ns, err)
 	}
 	if n.Labels[AllowJobsFromLabel] != in.Namespace {
-		return false, fmt.Sprintf("Job namespace %s is not in the operator's allowed job namespaces, and is not labeled %s=%s",
-			ns, AllowJobsFromLabel, in.Namespace), nil
+		return false, fmt.Sprintf("%s, and it is not labeled %s=%s", notAllowed, AllowJobsFromLabel, in.Namespace), nil
 	}
 	return true, "", nil
 }
@@ -714,75 +1089,4 @@ func (r *Reconciler) deleteIfOwned(ctx context.Context, cr *v1alpha1.DispatchOps
 		return nil
 	}
 	return client.IgnoreNotFound(r.Delete(ctx, obj))
-}
-
-// pruneJobNamespace deletes what the operator made for cr in namespaces
-// other than cr's (the task manager's Role and RoleBinding, and the job
-// pods' NetworkPolicy) except keep: what is left behind when the job
-// namespace changes or stops allowing cr, or cr is deleted. It deletes
-// only objects with the names the operator gives them, its managed-by
-// label and cr's ownerLabel.
-func (r *Reconciler) pruneJobNamespace(ctx context.Context, cr *v1alpha1.DispatchOps, in install, keep []client.Object) error {
-	sel := client.MatchingLabels{ownerLabel: string(cr.UID), "app.kubernetes.io/managed-by": ManagedBy}
-	namespaces := r.Namespaces
-	if len(namespaces) == 0 {
-		namespaces = []string{""} // all
-	}
-	type kind struct {
-		list func() client.ObjectList
-		name string
-	}
-	kinds := []kind{
-		{func() client.ObjectList { return &rbacv1.RoleList{} }, in.foreignJobObjectName(componentTaskManager)},
-		{func() client.ObjectList { return &rbacv1.RoleBindingList{} }, in.foreignJobObjectName(componentTaskManager)},
-		{func() client.ObjectList { return &networkingv1.NetworkPolicyList{} }, in.foreignJobObjectName(componentJobs)},
-	}
-	kept := func(o client.Object) bool {
-		for _, k := range keep {
-			if reflect.TypeOf(k) == reflect.TypeOf(o) && k.GetNamespace() == o.GetNamespace() && k.GetName() == o.GetName() {
-				return true
-			}
-		}
-		return false
-	}
-	for _, k := range kinds {
-		for _, ns := range namespaces {
-			if ns == cr.Namespace {
-				continue // owned by cr, so garbage collected
-			}
-			list := k.list()
-			if err := r.APIReader.List(ctx, list, sel, client.InNamespace(ns)); err != nil {
-				return err
-			}
-			objs, err := meta.ExtractList(list)
-			if err != nil {
-				return err
-			}
-			for _, ro := range objs {
-				o := ro.(client.Object)
-				if o.GetNamespace() == cr.Namespace || o.GetName() != k.name || kept(o) {
-					continue
-				}
-				log.FromContext(ctx).Info("deleting", "kind", reflect.TypeOf(o).Elem().Name(), "namespace", o.GetNamespace(), "name", o.GetName())
-				if err := r.Delete(ctx, o); client.IgnoreNotFound(err) != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// finalize cleans up what owner references can't: RBAC and the job
-// NetworkPolicy in another job namespace. Owned objects are garbage
-// collected; generated Secrets and the database volume are kept.
-func (r *Reconciler) finalize(ctx context.Context, cr *v1alpha1.DispatchOps) error {
-	if !controllerutil.ContainsFinalizer(cr, finalizer) {
-		return nil
-	}
-	if err := r.pruneJobNamespace(ctx, cr, install{DispatchOps: withDefaults(cr)}, nil); err != nil {
-		return err
-	}
-	controllerutil.RemoveFinalizer(cr, finalizer)
-	return r.Update(ctx, cr)
 }

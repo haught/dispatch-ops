@@ -26,9 +26,12 @@ func checkScmURL(u string) error {
 	if strings.Contains(u, "::") {
 		return badRequest("scmUrl: git remote helpers (<transport>::<address>) are not allowed")
 	}
-	if scheme, _, ok := strings.Cut(u, "://"); ok {
+	if scheme, rest, ok := strings.Cut(u, "://"); ok {
 		for _, s := range scmSchemes {
 			if strings.EqualFold(scheme, s) {
+				if err := checkScmHost(rest); err != nil {
+					return err
+				}
 				return checkScmUserinfo(u)
 			}
 		}
@@ -40,6 +43,48 @@ func checkScmURL(u string) error {
 	}
 	return badRequest("scmUrl: %q is not a git URL; use %s://…, or scp-like git@host:path",
 		u, strings.Join(scmSchemes, "://…, "))
+}
+
+// checkScmHost refuses a URL whose host (in rest, the URL after "://") is
+// not ASCII, or is percent-encoded non-ASCII. Such a host can look like
+// another: Go lower-cases gİthub.com to github.com, so it would get
+// github.com's origin and keep its credential, while git connects to
+// xn--github-qyd.com. Internationalized names can be given in their xn--
+// form.
+func checkScmHost(rest string) error {
+	authority := rest
+	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
+		authority = authority[:i]
+	}
+	if i := strings.LastIndex(authority, "@"); i >= 0 {
+		authority = authority[i+1:]
+	}
+	if _, ok := asciiHost(authority); !ok {
+		return badRequest("scmUrl: the host name must be ASCII; give an internationalized domain name in its xn-- form")
+	}
+	return nil
+}
+
+// asciiHost returns host percent-decoded (repeatedly, as git or a server
+// might decode it) and lower-cased. ok is false if the result isn't
+// printable ASCII, or doesn't decode.
+func asciiHost(host string) (string, bool) {
+	for i := 0; ; i++ {
+		d, err := url.PathUnescape(host)
+		if err != nil || i == 4 {
+			return "", false
+		}
+		if d == host {
+			break
+		}
+		host = d
+	}
+	for i := 0; i < len(host); i++ {
+		if host[i] <= 0x20 || host[i] >= 0x7f {
+			return "", false
+		}
+	}
+	return strings.ToLower(host), true
 }
 
 // checkScmUserinfo refuses a secret in a repository URL, where everyone who
@@ -85,7 +130,8 @@ func redactScmURL(raw string) string {
 
 // scmOrigin is where git sends a credential for the repository URL u: its
 // scheme, host and port, like a web origin. scp-like URLs are ssh. A URL
-// that doesn't parse is its own origin, so any change to it counts.
+// that doesn't parse, or whose host isn't ASCII (see checkScmHost), is its
+// own origin, so any change to it counts.
 func scmOrigin(u string) string {
 	if !strings.Contains(u, "://") {
 		if m := scpLike.FindStringSubmatch(u); m != nil {
@@ -98,12 +144,16 @@ func scmOrigin(u string) string {
 	if err != nil {
 		return u
 	}
+	host, ok := asciiHost(parsed.Hostname())
+	if !ok {
+		return u
+	}
 	scheme := strings.ToLower(parsed.Scheme)
 	port := parsed.Port()
 	if port == "" {
 		port = map[string]string{"https": "443", "http": "80", "ssh": "22", "git": "9418"}[scheme]
 	}
-	return scheme + "://" + strings.ToLower(parsed.Hostname()) + ":" + port
+	return scheme + "://" + host + ":" + port
 }
 
 // checkScmCredential verifies that id names an scm credential the caller

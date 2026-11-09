@@ -124,7 +124,7 @@ func TestDelegatedAdminsNeedCredentialUse(t *testing.T) {
 	}, 201)
 	jtPath := "/api/v1/job-templates/" + jt["id"].(string)
 	grant(admin, map[string]any{"role": "admin", "resourceType": "job_template", "resourceId": jt["id"], "userId": bobID})
-	bob.mustDo("PATCH", jtPath, map[string]any{"description": "bob's", "limit": "web", "timeoutSeconds": 60}, 200)
+	bob.mustDo("PATCH", jtPath, map[string]any{"description": "bob's", "timeoutSeconds": 60}, 200)
 	bob.mustDo("PATCH", jtPath, map[string]any{"command": []string{"true"}}, 200) // unchanged
 	bob.mustDo("PATCH", jtPath, map[string]any{"command": []string{"sh", "-c", "cat $DISPATCH_CREDENTIALS"}}, 403)
 	bob.mustDo("PATCH", jtPath, map[string]any{"extraVars": map[string]any{"x": 1}}, 403)
@@ -164,4 +164,93 @@ func TestDelegatedAdminsNeedCredentialUse(t *testing.T) {
 	bob.mustDo("PATCH", regPath, map[string]any{"inputs": map[string]string{"username": "other"}}, 200)
 	bob.mustDo("PATCH", regPath, map[string]any{"inputs": map[string]string{"server": "evil.example"}}, 400)
 	bob.mustDo("PATCH", regPath, map[string]any{"inputs": map[string]string{"server": "evil.example", "password": "new"}}, 200)
+}
+
+// A template's verbosity, tags and skipped tags change what its jobs do
+// with their credentials (high verbosity prints module arguments, and
+// choosing or skipping tags can skip a playbook's guards), so changing them,
+// or letting launchers override the tags, needs use on the credentials too.
+func TestTemplateVerbosityAndSkipTagsNeedCredentialUse(t *testing.T) {
+	srv, username, password := testServer(t)
+	admin := login(t, srv.URL, username, password)
+	bob, bobID := newUser(t, srv, admin)
+	ee := admin.mustDo("POST", "/api/v1/execution-environments", map[string]any{"name": unique("ee"), "image": "local/test"}, 201)
+	proj := admin.mustDo("POST", "/api/v1/projects", map[string]any{"name": unique("p"), "scmUrl": "https://git.example.com/x.git"}, 201)
+	cred := admin.mustDo("POST", "/api/v1/credentials", map[string]any{
+		"name": unique("ssh"), "kind": "ssh", "inputs": map[string]string{"private_key": "k"},
+	}, 201)
+	jt := admin.mustDo("POST", "/api/v1/job-templates", map[string]any{
+		"name": unique("jt"), "jobType": "ansible", "executionEnvironmentId": ee["id"], "projectId": proj["id"],
+		"entrypoint": "site.yml", "credentialIds": []any{cred["id"]},
+	}, 201)
+	jtPath := "/api/v1/job-templates/" + jt["id"].(string)
+	grant(admin, map[string]any{"role": "admin", "resourceType": "job_template", "resourceId": jt["id"], "userId": bobID})
+
+	bob.mustDo("PATCH", jtPath, map[string]any{"description": "bob's"}, 200)
+	bob.mustDo("PATCH", jtPath, map[string]any{"verbosity": jt["verbosity"], "tags": jt["tags"], "limit": jt["limit"]}, 200) // unchanged
+	bob.mustDo("PATCH", jtPath, map[string]any{"verbosity": 4}, 403)
+	bob.mustDo("PATCH", jtPath, map[string]any{"limit": "prod"}, 403)
+	bob.mustDo("PATCH", jtPath, map[string]any{"allowOverrides": []string{"limit"}}, 403)
+	bob.mustDo("PATCH", jtPath, map[string]any{"tags": "deploy"}, 403)
+	bob.mustDo("PATCH", jtPath, map[string]any{"skipTags": "guard"}, 403)
+	bob.mustDo("PATCH", jtPath, map[string]any{"allowOverrides": []string{"tags"}}, 403)
+	bob.mustDo("PATCH", jtPath, map[string]any{"allowOverrides": []string{"skipTags"}}, 403)
+
+	grant(admin, map[string]any{"role": "use", "resourceType": "credential", "resourceId": cred["id"], "userId": bobID})
+	bob.mustDo("PATCH", jtPath, map[string]any{
+		"verbosity": 4, "tags": "deploy", "skipTags": "guard", "limit": "prod",
+		"allowOverrides": []string{"limit", "tags", "skipTags"},
+	}, 200)
+}
+
+// A template's credentials share the job's environment, where one's inputs
+// can decide where another's secrets go: a template admin's own VAULT_ADDR
+// beside the security team's VAULT_TOKEN sends the token to them. So any
+// change to the set of credentials needs use on all those the template
+// will have; those it drops need nothing.
+func TestTemplateCredentialChangesNeedUseOnAll(t *testing.T) {
+	srv, username, password := testServer(t)
+	admin := login(t, srv.URL, username, password)
+	bob, bobID := newUser(t, srv, admin)
+	ee := admin.mustDo("POST", "/api/v1/execution-environments", map[string]any{"name": unique("ee"), "image": "local/test"}, 201)
+	generic := func(inputs map[string]string) string {
+		c := admin.mustDo("POST", "/api/v1/credentials", map[string]any{"name": unique("cred"), "kind": "generic", "inputs": inputs}, 201)
+		return c["id"].(string)
+	}
+	token := generic(map[string]string{"VAULT_TOKEN": "s3cret"})
+	guard := generic(map[string]string{"VAULT_NAMESPACE": "prod"})
+	mine := generic(map[string]string{"VAULT_ADDR": "https://evil.example"})
+	grant(admin, map[string]any{"role": "use", "resourceType": "credential", "resourceId": mine, "userId": bobID})
+
+	jt := admin.mustDo("POST", "/api/v1/job-templates", map[string]any{
+		"name": unique("jt"), "jobType": "container", "executionEnvironmentId": ee["id"],
+		"command": []string{"vault", "kv", "get", "secret/x"}, "credentialIds": []string{token, guard},
+	}, 201)
+	jtPath := "/api/v1/job-templates/" + jt["id"].(string)
+	grant(admin, map[string]any{"role": "admin", "resourceType": "job_template", "resourceId": jt["id"], "userId": bobID})
+
+	bob.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{guard, token}}, 200) // reordered
+	bob.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{token, guard, mine}}, 403)
+	bob.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{token, mine}}, 403)
+	// Dropping one can change what the others do too (it may hold settings
+	// a playbook checks), so it needs use on those kept.
+	bob.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{token}}, 403)
+	// Dropping all those bob can't use needs nothing of them.
+	bob.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{mine}}, 200)
+	admin.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{token, guard}}, 200)
+
+	grant(admin, map[string]any{"role": "use", "resourceType": "credential", "resourceId": token, "userId": bobID})
+	bob.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{token, guard, mine}}, 403) // still not guard
+	grant(admin, map[string]any{"role": "use", "resourceType": "credential", "resourceId": guard, "userId": bobID})
+	bob.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{token, guard, mine}}, 200)
+
+	// Credentials that set the same variable are refused, in any case.
+	for _, inputs := range []map[string]string{{"VAULT_ADDR": "https://other.example"}, {"vault_addr": "https://other.example"}} {
+		dup := generic(inputs)
+		admin.mustDo("PATCH", jtPath, map[string]any{"credentialIds": []string{token, guard, mine, dup}}, 400)
+		admin.mustDo("POST", "/api/v1/job-templates", map[string]any{
+			"name": unique("jt"), "jobType": "container", "executionEnvironmentId": ee["id"],
+			"command": []string{"true"}, "credentialIds": []string{mine, dup},
+		}, 400)
+	}
 }

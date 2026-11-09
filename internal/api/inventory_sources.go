@@ -109,16 +109,19 @@ func (h *Handlers) SetInventorySource(ctx context.Context, req apigen.SetInvento
 		return nil, err
 	}
 	// The sync runs the source's code with the credentials, so changing
-	// that code needs use on the credentials it keeps too.
+	// that code needs use on the credentials it keeps too. So does changing
+	// the credentials: they share the sync's environment, where one's
+	// inputs can decide where another's secrets go (see changesWhatRuns).
 	if hadSource && (before.ProjectID != f.ProjectID || before.SourcePath != f.SourcePath ||
-		before.ExecutionEnvironmentID != f.ExecutionEnvironmentID) {
+		before.ExecutionEnvironmentID != f.ExecutionEnvironmentID || !sameIDs(before.CredentialIDs, f.CredentialIDs)) {
 		for _, id := range f.CredentialIDs {
 			if err := h.authorize(ctx, rbac.Credential, id, rbac.Use); err != nil {
 				if ae := (*apiError)(nil); !errors.As(err, &ae) {
 					return nil, err
 				}
-				return nil, forbidden("Changing the source's project, path or execution environment needs the use role on all its credentials, " +
-					"since the sync runs with them; ask a credential's admin, or remove the credentials you can't use")
+				return nil, forbidden("Changing the source's project, path, execution environment or credentials needs the use role " +
+					"on all the credentials it will have, since the sync runs with them; ask a credential's admin, " +
+					"or remove the credentials you can't use")
 			}
 		}
 	}
@@ -163,6 +166,9 @@ func (h *Handlers) checkSyncCredentials(ctx context.Context, old, ids []uuid.UUI
 		return badRequest("a credential in credentialIds does not exist")
 	}
 	if err != nil {
+		return err
+	}
+	if err := checkGenericEnvConflicts(creds); err != nil {
 		return err
 	}
 	vaultIDs := map[string]string{}

@@ -23,9 +23,10 @@ without the operator.
 | `DISPATCH_SESSION_TTL` | `12h` | Browser session lifetime |
 | `DISPATCH_JOB_MAX_OUTPUT` | `256Mi` | Output one job may store (its events' text and data). Past it, the job keeps running and a note says the output was cut; only its Ansible recap is still kept. `0` for no cap |
 | `DISPATCH_LOGIN_THROTTLE_WINDOW` | `15m` | Period over which failed password sign-ins are counted |
-| `DISPATCH_LOGIN_MAX_FAILURES_PER_USER` | `10` | Failed sign-ins a username may have in the window before further attempts get `429`; a success resets it. `0` turns this limit off |
-| `DISPATCH_LOGIN_MAX_FAILURES_PER_IP` | `100` | Failed sign-ins one client address may have in the window. `0` turns this limit off |
-| `DISPATCH_TRUSTED_PROXIES` | | Comma- or space-separated addresses or CIDRs of reverse proxies (ingress controller, load balancer) whose `X-Forwarded-For` is believed. Set it behind a proxy, or every client shares the proxy's address for sign-in throttling |
+| `DISPATCH_LOGIN_MAX_FAILURES_PER_USER` | `10` | Failed sign-ins a username may have from one client address in the window before further attempts for it from there get `429`; a success from that address resets it. Other addresses are unaffected, so a stranger can't lock the account's owner out this way. `0` turns this limit off |
+| `DISPATCH_LOGIN_MAX_FAILURES_PER_USER_TOTAL` | `100` | Failed sign-ins a username may have from all addresses together in the window before attempts for it get `429`, except from addresses it has signed in from with its password in the last 90 days. It is set high so that locking an account out takes many addresses. `0` turns this limit off |
+| `DISPATCH_LOGIN_MAX_FAILURES_PER_IP` | `100` | Failed sign-ins one client address may have in the window, for any usernames. IPv6 clients are counted by their /64. `0` turns this limit off |
+| `DISPATCH_TRUSTED_PROXIES` | | Comma- or space-separated addresses or CIDRs of reverse proxies (ingress controller, load balancer) whose `X-Forwarded-For` is believed. Set it behind a proxy, or every client shares the proxy's address for sign-in throttling (the server logs a warning at startup while it is empty). List only the proxies themselves, never a range that includes job pods; see [Network paths and isolation](administration.md#network-paths-and-isolation) for ranges that survive pod restarts |
 | `DISPATCH_AUTO_MIGRATE` | `false` | Apply migrations when `serve` starts |
 | `DISPATCH_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `DISPATCH_LOG_FORMAT` | `json` | `json` or `text` |
@@ -39,13 +40,37 @@ without the operator.
 | `DISPATCH_OIDC_GROUPS_CLAIM` | `groups` | Claim listing the user's groups, which teams map to |
 | `DISPATCH_OIDC_DISPLAY_NAME` | `Single sign-on` | Label of the sign-in button |
 
+### Sign-in throttling and account lockout
+
+The limit on a username's failures from all addresses
+(`DISPATCH_LOGIN_MAX_FAILURES_PER_USER_TOTAL`) stops a password being
+guessed from many addresses, but anyone with enough addresses could reach it
+by failing against the account. IPv6 makes that cheap: each /64 counts as
+one address, and a single /56 holds 256 of them. So the total doesn't apply
+to an address the username has signed in from with its password in the last
+90 days (an IPv4 address, or an IPv6 /64): the account's owner can still
+sign in from the addresses they use, while attempts from anywhere else are
+refused until the failures age out of the window. The per-address limits
+(`DISPATCH_LOGIN_MAX_FAILURES_PER_USER` and
+`DISPATCH_LOGIN_MAX_FAILURES_PER_IP`) still apply to known addresses.
+
+The owner is still locked out of password sign-in from a new address, such
+as a first sign-in from home. Single sign-on works as usual, and API tokens
+keep working, so an administrator caught this way can still sign in with
+SSO, or act through the API with a token. If the lockouts matter more than
+the guessing they stop, raise the limit, or set it to `0` to turn it off and
+rely on the per-address limits. The `DispatchOps` resource doesn't
+expose the throttle settings, so under the operator they keep their
+defaults.
+
 ## Task manager only
 
 | Variable | Default | |
 |---|---|---|
 | `DISPATCH_RUNNER_API_URL` | (required) | The API URL as job pods reach it |
 | `DISPATCH_RUNNER_API_TLS_DIR` | | A directory holding the API's certificate Secret (`ca.crt` or `tls.crt`). Job pods trust it, besides the system's roots |
-| `DISPATCH_JOB_NAMESPACE` | `dispatch-jobs` | Namespace for job pods (and the leader Lease) |
+| `DISPATCH_JOB_NAMESPACE` | `dispatch-jobs` | Namespace for job pods (and the leader Lease). It must serve only this installation |
+| `DISPATCH_INSTALLATION` | | Labels the Kubernetes objects the task manager creates (`dispatch-ops.io/installation`) and names its leader Lease; it deletes only Kubernetes Jobs with its own label or whose job is in its database, never one labeled for another installation whose job isn't. The operator sets it to the `DispatchOps`'s UID |
 | `DISPATCH_KUBE_CONTEXT` | | kubeconfig context; empty uses the in-cluster config if available |
 | `DISPATCH_MAX_CONCURRENT_JOBS` | `10` | Jobs waiting or running at once |
 | `DISPATCH_JOB_START_TIMEOUT` | `10m` | How long a pod may take to start its runner |

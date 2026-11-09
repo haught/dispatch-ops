@@ -2,8 +2,17 @@
 # digest together with its "# vX.Y.Z" comment or tag.
 #   github-actions  the SHA-pinned actions in .github/workflows
 #   docker          the digest-pinned base images (FROM lines) of the release
-#                   images; ee-ansible's pip and Galaxy pins are ARGs in its
-#                   Dockerfile, which Dependabot can't see: bump those by hand
+#                   images; ee-ansible's pip and Galaxy pins and ee-python's
+#                   pip pins are ARGs in their Dockerfiles, which Dependabot
+#                   can't see: bump those by hand
+#   gomod           Go modules (go.mod), such as golang.org/x/crypto
+#   npm             the UI's dependencies (web/package-lock.json)
+#
+# Not tracked, so bump by hand: the PostgreSQL image digest in Go source
+# (DefaultPostgresImage, internal/operator/resources.go) and the CI service
+# container's in .github/workflows/ci.yml. Dependabot's docker ecosystem
+# reads only Dockerfiles, Compose files and Kubernetes or Helm manifests,
+# not Go constants or workflow service containers. Keep the two in step.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -21,4 +30,27 @@ updates:
       interval: weekly
     groups:
       base-images:
+        patterns: ["*"]
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Security fixes come as their own PRs, outside these groups.
+      kubernetes:
+        patterns: ["k8s.io/*", "sigs.k8s.io/*"]
+      golang-x:
+        patterns: ["golang.org/x/*"]
+      go-modules:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      npm-development:
+        dependency-type: development
+        patterns: ["*"]
+      npm-production:
+        dependency-type: production
         patterns: ["*"]

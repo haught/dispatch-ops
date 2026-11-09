@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -54,7 +56,7 @@ func TestClientIP(t *testing.T) {
 
 func TestWithClientIPSetsContext(t *testing.T) {
 	var got string
-	h := withClientIP(nil, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	h := withClientIP(nil, slog.New(slog.DiscardHandler), http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		got = auth.ClientIPFromContext(r.Context())
 	}))
 	r := httptest.NewRequest("GET", "/", nil)
@@ -62,6 +64,35 @@ func TestWithClientIPSetsContext(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	if got != "192.0.2.7" {
 		t.Errorf("client IP in context = %q", got)
+	}
+}
+
+// With no trusted proxies, a forwarded request from a private address is
+// warned about, once; with them, or from a public address, it isn't.
+func TestWithClientIPWarnsOfUntrustedProxy(t *testing.T) {
+	serve := func(trusted []netip.Prefix, remotes ...string) int {
+		var buf bytes.Buffer
+		log := slog.New(slog.NewTextHandler(&buf, nil))
+		h := withClientIP(trusted, log, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		for _, remote := range remotes {
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = remote
+			r.Header.Set("X-Forwarded-For", "198.51.100.1")
+			h.ServeHTTP(httptest.NewRecorder(), r)
+		}
+		return strings.Count(buf.String(), "carries X-Forwarded-For")
+	}
+	if n := serve(nil, "10.1.2.3:80", "10.1.2.4:80", "[::1]:80"); n != 1 {
+		t.Errorf("private peers with no trusted proxies: %d warnings, want 1", n)
+	}
+	if n := serve(nil, "127.0.0.1:80"); n != 1 {
+		t.Errorf("loopback peer with no trusted proxies: %d warnings, want 1", n)
+	}
+	if n := serve(nil, "203.0.113.5:80"); n != 0 {
+		t.Errorf("public peer: %d warnings", n)
+	}
+	if n := serve([]netip.Prefix{netip.MustParsePrefix("10.1.2.3/32")}, "10.1.2.3:80", "10.9.9.9:80"); n != 0 {
+		t.Errorf("with trusted proxies: %d warnings", n)
 	}
 }
 

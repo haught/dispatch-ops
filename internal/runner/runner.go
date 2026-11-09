@@ -4,6 +4,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -111,7 +112,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	log("dispatch-runner %s (protocol %d), job %s", cfg.Version, runnerapi.ProtocolVersion, cfg.JobID)
 
-	spec, err := fetchSpec(ctx, client, cfg)
+	spec, overrideVars, err := fetchSpec(ctx, client, cfg)
 	if err != nil {
 		return fmt.Errorf("fetch job spec: %w", err)
 	}
@@ -127,7 +128,7 @@ func Run(ctx context.Context, cfg Config) error {
 	report := func(ctx context.Context, path string) (*runnerapi.RunnerInventoryResult, error) {
 		return reportInventory(ctx, client, cfg.JobID, path)
 	}
-	result := execute(ctx, cfg, spec, ev, stop, report)
+	result := execute(ctx, cfg, spec, overrideVars, ev, stop, report)
 	stopHeartbeat()
 
 	sendErr := ev.close()
@@ -164,8 +165,12 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-func fetchSpec(ctx context.Context, client *runnerapi.ClientWithResponses, cfg Config) (*runnerapi.RunnerJobSpec, error) {
+// fetchSpec fetches the job's spec, and the launcher's extra vars if the
+// server says which of the spec's extra vars they are (overrideVars). Those
+// are decoded with UseNumber, so integers reach Ansible exactly as sent.
+func fetchSpec(ctx context.Context, client *runnerapi.ClientWithResponses, cfg Config) (*runnerapi.RunnerJobSpec, map[string]any, error) {
 	var spec *runnerapi.RunnerJobSpec
+	var body []byte
 	err := retry(ctx, 2*time.Minute, func(ctx context.Context) error {
 		resp, err := client.GetRunnerJobSpecWithResponse(ctx, cfg.JobID, &runnerapi.GetRunnerJobSpecParams{
 			Protocol: runnerapi.ProtocolVersion, Version: cfg.Version,
@@ -176,10 +181,24 @@ func fetchSpec(ctx context.Context, client *runnerapi.ClientWithResponses, cfg C
 		if err := classify(resp.StatusCode(), resp.Body, 200); err != nil {
 			return err
 		}
-		spec = resp.JSON200
+		spec, body = resp.JSON200, resp.Body
 		return nil
 	})
-	return spec, err
+	if err != nil || spec == nil || spec.OverrideVars == nil {
+		return spec, nil, err
+	}
+	var exact struct {
+		OverrideVars map[string]any `json:"overrideVars"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&exact); err != nil {
+		return nil, nil, fmt.Errorf("decode the job's overrideVars: %w", err)
+	}
+	if exact.OverrideVars == nil {
+		exact.OverrideVars = map[string]any{}
+	}
+	return spec, exact.OverrideVars, nil
 }
 
 // heartbeat tells the API the job is alive, and learns about cancellation.
@@ -255,7 +274,7 @@ type inventoryReporter func(ctx context.Context, path string) (*runnerapi.Runner
 // execute prepares the workspace, checks out the project, runs the command
 // and returns the result to report. An inventory sync's result is sent
 // with report before execute returns.
-func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev *emitter, stop *stopper, report inventoryReporter) runnerapi.RunnerFinish {
+func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, overrideVars map[string]any, ev *emitter, stop *stopper, report inventoryReporter) runnerapi.RunnerFinish {
 	timeout := time.Duration(spec.TimeoutSeconds) * time.Second
 	result := runnerapi.RunnerFinish{}
 	fail := func(reason string) runnerapi.RunnerFinish {
@@ -287,6 +306,7 @@ func execute(ctx context.Context, cfg Config, spec *runnerapi.RunnerJobSpec, ev 
 	if err != nil {
 		return fail("Could not prepare the workspace: " + err.Error())
 	}
+	ws.overrideVars = overrideVars
 	for _, n := range ws.notices {
 		ev.runner(n)
 	}
@@ -488,6 +508,10 @@ type workspace struct {
 	env       []string
 	inventory string // the inventory file, or "" if the job has none
 	vars      string // the extra vars file
+	// overrideVars are the launcher's extra vars (a subset of the spec's,
+	// which already include them), or nil if the server didn't say which
+	// they are. Ansible gets them marked unsafe; see ansibleVarArgs.
+	overrideVars map[string]any
 	// knownHosts is the machine credential's known_hosts file, or "" if it
 	// has none; with one, Ansible checks host keys against it.
 	knownHosts string
@@ -525,10 +549,15 @@ func (w *workspace) secret(elem ...string) string {
 //	DISPATCH_CREDENTIALS_DIR one directory per credential, one file per input
 //
 // Each input of a generic credential is also set as a variable of the same
-// name (e.g. AKIPS_PASSWORD), except names envname.Reserved reports. When
-// two generic credentials set the same name, the later one wins.
+// name (e.g. AKIPS_PASSWORD), except names envname.Reserved reports. A job
+// whose generic credentials set the same name is refused (see genericEnv).
 func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) (*workspace, error) {
 	ws := &workspace{dir: cfg.WorkDir, secrets: filepath.Join(cfg.WorkDir, "secrets")}
+	// Before anything is written, so a refused job leaves no secrets behind.
+	credEnv, err := ws.genericEnv(spec.Credentials)
+	if err != nil {
+		return nil, err
+	}
 	for _, d := range []string{ws.dir, ws.secrets, ws.path(), ws.secret()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
@@ -589,18 +618,29 @@ func prepare(cfg Config, spec *runnerapi.RunnerJobSpec) (*workspace, error) {
 	}
 	set("DISPATCH_CREDENTIALS", credsJSON)
 	set("DISPATCH_CREDENTIALS_DIR", credDir)
-	env = append(env, ws.genericEnv(spec.Credentials)...)
+	env = append(env, credEnv...)
 	ws.env = env
 	return ws, nil
 }
 
 // genericEnv returns the inputs of the generic credentials as environment
-// variables, in credential order, and records notices for the names it
-// skips or overrides.
-func (ws *workspace) genericEnv(creds []runnerapi.RunnerCredential) []string {
-	setBy := map[string]string{}
-	values := map[string]string{}
-	var order []string
+// variables, in credential order, and records notices for the reserved names
+// it skips.
+//
+// Two credentials that set the same name are an error, not one silently
+// overriding the other: the overriding one would decide where the other's
+// secrets go (its VAULT_ADDR beside another's VAULT_TOKEN), and whoever
+// attached it may not be allowed to use the other. Names are compared
+// ignoring case, since some tools read either case of a variable. Other
+// kinds set no variables, and each credential's files go in a directory of
+// its own, so only generic credentials can collide.
+func (ws *workspace) genericEnv(creds []runnerapi.RunnerCredential) ([]string, error) {
+	type setter struct {
+		cred string
+		id   uuid.UUID
+	}
+	setBy := map[string]setter{}
+	var env []string
 	for _, c := range creds {
 		if c.Kind != runnerapi.Generic {
 			continue
@@ -615,20 +655,17 @@ func (ws *workspace) genericEnv(creds []runnerapi.RunnerCredential) []string {
 				ws.notices = append(ws.notices, fmt.Sprintf("Credential %q: %s is a reserved name, so it is not set as an environment variable", c.Name, name))
 				continue
 			}
-			if prev, ok := setBy[name]; ok {
-				ws.notices = append(ws.notices, fmt.Sprintf("Credential %q sets %s, overriding credential %q", c.Name, name, prev))
-			} else {
-				order = append(order, name)
+			key := strings.ToUpper(name)
+			if prev, ok := setBy[key]; ok && prev.id != c.Id {
+				return nil, fmt.Errorf("credentials %q and %q both set the environment variable %s; "+
+					"a job's credentials can't set the same variable, so the job was not run. "+
+					"Remove one of them from the template (or inventory source)", prev.cred, c.Name, name)
 			}
-			setBy[name] = c.Name
-			values[name] = c.Inputs[name]
+			setBy[key] = setter{cred: c.Name, id: c.Id}
+			env = append(env, name+"="+c.Inputs[name])
 		}
 	}
-	env := make([]string, 0, len(order))
-	for _, name := range order {
-		env = append(env, name+"="+values[name])
-	}
-	return env
+	return env, nil
 }
 
 // baseEnv is the runner's environment without its own settings, which the

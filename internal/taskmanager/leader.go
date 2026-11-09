@@ -14,6 +14,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+
+	"dispatch-ops/internal/taskmanager/joblabels"
 )
 
 // KubeConfig returns the in-cluster configuration when running in a pod,
@@ -34,9 +36,6 @@ func KubeConfig(kubeContext string) (*rest.Config, error) {
 	return cfg, nil
 }
 
-// leaseName is the Lease the task manager replicas compete for.
-const leaseName = "dispatch-ops-task-manager"
-
 // RunWithLeaderElection runs the manager only while this process holds the
 // Lease, so that at most one task manager acts at a time. It returns when
 // ctx is done or leadership is lost; the caller should then exit, so that a
@@ -44,8 +43,10 @@ const leaseName = "dispatch-ops-task-manager"
 func RunWithLeaderElection(ctx context.Context, kube kubernetes.Interface, m *Manager, log *slog.Logger) error {
 	host, _ := os.Hostname()
 	identity := host + "_" + uuid.NewString()[:8]
+	// One Lease per installation (see joblabels.LeaseName), so another
+	// installation can't hold this one's.
 	lock := &resourcelock.LeaseLock{
-		LeaseMeta:  metav1.ObjectMeta{Name: leaseName, Namespace: m.Config.Namespace},
+		LeaseMeta:  metav1.ObjectMeta{Name: joblabels.LeaseName(m.Config.Installation), Namespace: m.Config.Namespace},
 		Client:     kube.CoordinationV1(),
 		LockConfig: resourcelock.ResourceLockConfig{Identity: identity},
 	}

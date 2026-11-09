@@ -2,6 +2,7 @@ package server
 
 import (
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -40,9 +41,23 @@ func WithBodyReadTimeout(d time.Duration) Option {
 
 // withClientIP records the request's client address in its context, for
 // sign-in throttling.
-func withClientIP(trusted []netip.Prefix, next http.Handler) http.Handler {
+//
+// With no trusted proxies, the first request from a private or loopback
+// address that carries X-Forwarded-For is logged: it most likely came
+// through a proxy, so every client shares the proxy's address and limits.
+func withClientIP(trusted []netip.Prefix, log *slog.Logger, next http.Handler) http.Handler {
+	var warn sync.Once
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := ClientIP(r, trusted)
+		if len(trusted) == 0 && r.Header.Get("X-Forwarded-For") != "" {
+			if addr, err := netip.ParseAddr(ip); err == nil && (addr.IsPrivate() || addr.IsLoopback()) {
+				warn.Do(func() {
+					log.Warn("a request from a private address carries X-Forwarded-For, but DISPATCH_TRUSTED_PROXIES is empty: "+
+						"if the server is behind a proxy, every client shares the proxy's address for sign-in throttling, "+
+						"so set DISPATCH_TRUSTED_PROXIES to the proxy's addresses", "peer", ip)
+				})
+			}
+		}
 		next.ServeHTTP(w, r.WithContext(auth.WithClientIP(r.Context(), ip)))
 	})
 }

@@ -105,7 +105,15 @@ func (e *ValidationError) Error() string { return e.msg }
 // secret value the credential holds again. oldPublic are the credential's
 // public values before the update, secretNames the names of the secrets it
 // holds, and changes the update's inputs (an empty value removes one).
+//
+// On a Freeform (generic) credential any input can be a destination: jobs
+// get each as an environment variable, and VAULT_ADDR, AWS_ENDPOINT_URL or
+// GH_HOST decide where tools send the token next to it. So adding or
+// changing any input needs every value the credential keeps given again.
 func (k Kind) CheckDestinationChange(oldPublic map[string]string, secretNames []string, changes map[string]string) error {
+	if k.Freeform {
+		return checkFreeformChange(secretNames, changes)
+	}
 	var moved []string
 	for _, f := range k.Fields {
 		if v, ok := changes[f.Name]; f.Destination && ok && v != oldPublic[f.Name] {
@@ -127,6 +135,33 @@ func (k Kind) CheckDestinationChange(oldPublic map[string]string, secretNames []
 	sort.Strings(missing)
 	return &ValidationError{fmt.Sprintf("changing %s decides where this credential's secrets are sent, so %s must be given again in the same change",
 		strings.Join(moved, " and "), strings.Join(missing, ", "))}
+}
+
+func checkFreeformChange(secretNames []string, changes map[string]string) error {
+	var changed []string
+	for name, v := range changes {
+		if v != "" {
+			changed = append(changed, name)
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, name := range secretNames {
+		v, given := changes[name]
+		if v == "" && !given { // an empty value given removes it
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(changed)
+	sort.Strings(missing)
+	return &ValidationError{fmt.Sprintf("on a generic credential any value can decide where the others are sent (e.g. VAULT_ADDR), "+
+		"so setting %s needs every value it keeps given again in the same change: %s",
+		strings.Join(changed, " and "), strings.Join(missing, ", "))}
 }
 
 // Split validates a complete set of inputs for the kind and separates the
