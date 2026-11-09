@@ -1,0 +1,63 @@
+# Builds the execution environment, checks it with `dispatch-runner selftest`,
+# and pushes it to GitHub Container Registry as ghcr.io/<owner>/<repo>:
+#   :sha-<commit>  every push to main
+#   :main, :latest the newest build of main
+#   :1.2.3         a v1.2.3 tag
+# Pull requests are built and tested, not pushed.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      # Also lets the build pull a starter EE published to a private GHCR package.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build for the self-test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ee:test
+          cache-from: type=gha
+      - name: Self-test
+        run: docker run --rm ee:test selftest
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

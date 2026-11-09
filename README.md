@@ -41,7 +41,8 @@ Kubernetes.
 | `internal/db` | Connection pool and embedded SQL migrations |
 | `internal/server` | Top-level HTTP handler: API, runner API, health probes, embedded UI |
 | `internal/operator` | The operator's reconciler and the objects it creates; `api/v1alpha1` is the `DispatchOps` resource |
-| `images/` | `runner-base` and the starter execution environments `ee-shell`, `ee-python` and `ee-ansible` |
+| `images/` | `runner-base` and the starter execution environments `ee-shell`, `ee-python` and `ee-ansible`; your own EEs in the gitignored `images/local/` |
+| `examples/ee-template` | Starting point for a repository holding a custom execution environment |
 | `deploy/dev/` | kind cluster config and the `DispatchOps` for development |
 | `deploy/helm/dispatch-ops-operator` | Helm chart that installs the operator and the CRD (`files/` is generated) |
 | `deploy/examples/` | A production-style `DispatchOps` |
@@ -537,27 +538,67 @@ Inventory syncs need runner protocol 3 or later.
 ## Execution environments
 
 An execution environment is an image whose entrypoint is `dispatch-runner`
-and that runs as a numeric non-root user. Build one `FROM
-dispatch-ops/runner-base` (see `images/runner-base/Dockerfile`), or copy a
-static binary from `make runner` into any image:
+and that runs as a numeric non-root user. The starter EEs are:
 
-```dockerfile
-COPY dispatch-runner-linux-amd64 /usr/local/bin/dispatch-runner
-USER 1000:1000
-ENTRYPOINT ["/usr/local/bin/dispatch-runner"]
-```
+- `ee-shell`: bash, curl, jq, git and ssh.
+- `ee-python`: Python in a virtualenv on `PATH`, with requests and PyYAML.
+- `ee-ansible`: ansible-core with `ansible.posix`, `community.general` and
+  `ansible.utils`, the requests and netaddr libraries inventory plugins often
+  need, plus git, ssh and sshpass.
 
-The runner reports its protocol version; the API rejects runners it doesn't
-support with an explanation on the job. Ansible and script jobs need
-protocol 2 or later, and inventory syncs protocol 3, so images built with
-an older runner keep running the job types they know but must be rebuilt
-for the newer ones.
+`make images` builds them as `dispatch-ops/<name>:dev`. `make publish-images
+IMAGE_REPO=ghcr.io/<org>/dispatch-ops PUBLISH_TAGS="1.4.0 1.4 latest"` pushes
+them for amd64 and arm64, along with `runner-base` and `runner`.
 
-The starter EEs are `ee-shell` (bash, curl, jq, git, ssh), `ee-python`
-(Python in a virtualenv on `PATH`, with requests and PyYAML) and `ee-ansible`
-(ansible-core with `ansible.posix`, `community.general` and `ansible.utils`,
-the requests and netaddr libraries inventory plugins often need, plus git,
-ssh and sshpass).
+There are three ways to get what your jobs need, simplest first.
+
+1. **Collections a project needs:** list them in the project's
+   `requirements.yml` (see [Roles and collections](#roles-and-collections)). The
+   runner installs them at the start of every job, so you need no image of your
+   own, but each job takes longer to start.
+2. **Extend a starter EE:** start a repository from
+   [`examples/ee-template`](examples/ee-template). It holds a Dockerfile,
+   `packages.txt` (Debian packages), `requirements.txt` (Python packages),
+   `requirements.yml` (collections and roles), and a GitHub Actions workflow
+   that builds, tests and pushes the image. The starter EEs include
+   `dispatch-ee-install`, which installs those files into the right places:
+
+   ```dockerfile
+   FROM ghcr.io/<org>/dispatch-ops/ee-ansible:1.4
+   USER root
+   COPY packages.txt requirements.txt requirements.yml /tmp/ee/
+   RUN dispatch-ee-install /tmp/ee && rm -rf /tmp/ee
+   USER 1000:1000
+   ```
+
+   To build your EE against the runner in a checkout, link it into
+   `images/local/`, which is gitignored (see
+   [images/local/README.md](images/local/README.md)). `make kind-load` then
+   builds and loads it as `dispatch-ops/local-<name>:dev`.
+3. **Bring your own base image:** copy the runner in from the `runner` image,
+   which holds only the static binary:
+
+   ```dockerfile
+   FROM registry.example.com/hardened/python:3.13
+   COPY --from=ghcr.io/<org>/dispatch-ops/runner:1.4 /dispatch-runner /usr/local/bin/dispatch-runner
+   USER 1000:1000
+   ENTRYPOINT ["/usr/local/bin/dispatch-runner"]
+   ```
+
+   `make runner` also builds the binary for amd64 and arm64, in `bin/`.
+
+Check an image before you register it with `docker run --rm <image>
+selftest`. It verifies that the image runs as a non-root user and has git, ssh
+and, for Ansible images, the Ansible tools. It lists the collections and prints
+the runner protocol, and it exits non-zero when the image can't run jobs. The
+template's workflow runs it on every build.
+
+The runner reports its protocol version, and the API rejects runners it doesn't
+support with an explanation on the job. Ansible and script jobs need protocol 2
+or later, and inventory syncs protocol 3. Images built with an older runner keep
+running the job types they know but must be rebuilt for newer ones. Rebuilding
+a custom EE on a newer starter EE picks up the new runner. The template's
+Renovate config opens that pull request for you.
 
 ## Configuration
 

@@ -12,6 +12,9 @@ TEST_DATABASE_URL := $(subst /dispatch?,/dispatch_test?,$(DISPATCH_DATABASE_URL)
 PG_CONTAINER ?= postgresql
 PG_SUPERUSER ?= postgres
 
+# Execution environment images are $(IMAGE_REPO)/<name>:$(IMAGE_TAG). Local
+# dev keeps dispatch-ops/<name>:dev, the names EEs are registered by.
+IMAGE_REPO ?= dispatch-ops
 IMAGE_TAG ?= dev
 KIND_VERSION := v0.33.0
 KIND := go run sigs.k8s.io/kind@$(KIND_VERSION)
@@ -127,17 +130,43 @@ kind-down: ## Delete the kind cluster
 	$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 EES := ee-shell ee-python ee-ansible
+# Your own EEs: each images/local/<name>/ with a Dockerfile (a directory, or a
+# symlink to a checkout of your EE repo) builds as $(IMAGE_REPO)/local-<name>,
+# on top of the starter EEs built here. images/local is gitignored; see
+# images/local/README.md.
+LOCAL_EES := $(notdir $(patsubst %/Dockerfile,%,$(wildcard images/local/*/Dockerfile)))
+# What `make publish-images` pushes: each tag, for each platform.
+PUBLISH_TAGS ?= $(VERSION)
+PLATFORMS ?= linux/amd64,linux/arm64
+publish_tags = $(foreach t,$(PUBLISH_TAGS),-t $(IMAGE_REPO)/$(1):$(t))
+BUILDX := docker buildx build --push --platform $(PLATFORMS)
 
 .PHONY: images
-images: ## Build the runner-base image and the starter EEs (ee-shell, ee-python, ee-ansible)
-	docker build -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) -t dispatch-ops/runner-base:$(IMAGE_TAG) .
+images: ## Build the runner images, the starter EEs and any EEs in images/local
+	docker build -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) --target runner -t $(IMAGE_REPO)/runner:$(IMAGE_TAG) .
+	docker build -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) -t $(IMAGE_REPO)/runner-base:$(IMAGE_TAG) .
 	for ee in $(EES); do \
-		docker build --build-arg RUNNER_BASE=dispatch-ops/runner-base:$(IMAGE_TAG) -t dispatch-ops/$$ee:$(IMAGE_TAG) images/$$ee || exit 1; \
+		docker build --build-arg RUNNER_BASE=$(IMAGE_REPO)/runner-base:$(IMAGE_TAG) -t $(IMAGE_REPO)/$$ee:$(IMAGE_TAG) images/$$ee || exit 1; \
+	done
+	for ee in $(LOCAL_EES); do \
+		docker build --build-arg IMAGE_REPO=$(IMAGE_REPO) --build-arg IMAGE_TAG=$(IMAGE_TAG) \
+			-t $(IMAGE_REPO)/local-$$ee:$(IMAGE_TAG) images/local/$$ee/ || exit 1; \
 	done
 
 .PHONY: kind-load
 kind-load: images ## Build the images and load them into the kind cluster
-	$(KIND) load docker-image --name $(KIND_CLUSTER) dispatch-ops/runner-base:$(IMAGE_TAG) $(foreach ee,$(EES),dispatch-ops/$(ee):$(IMAGE_TAG))
+	$(KIND) load docker-image --name $(KIND_CLUSTER) $(IMAGE_REPO)/runner-base:$(IMAGE_TAG) \
+		$(foreach ee,$(EES),$(IMAGE_REPO)/$(ee):$(IMAGE_TAG)) \
+		$(foreach ee,$(LOCAL_EES),$(IMAGE_REPO)/local-$(ee):$(IMAGE_TAG))
+
+.PHONY: publish-images
+publish-images: ## Push multi-platform runner, runner-base and starter EEs (IMAGE_REPO=ghcr.io/<org>/dispatch-ops PUBLISH_TAGS="1.4.0 1.4 latest")
+	@if [ "$(IMAGE_REPO)" = dispatch-ops ]; then \
+		echo "Set IMAGE_REPO to the registry to push to, e.g. IMAGE_REPO=ghcr.io/<org>/dispatch-ops"; exit 1; fi
+	$(BUILDX) -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) --target runner $(call publish_tags,runner) .
+	$(BUILDX) -f images/runner-base/Dockerfile --build-arg VERSION=$(VERSION) $(call publish_tags,runner-base) .
+	$(foreach ee,$(EES),$(BUILDX) --build-arg RUNNER_BASE=$(IMAGE_REPO)/runner-base:$(firstword $(PUBLISH_TAGS)) \
+		$(call publish_tags,$(ee)) images/$(ee) &&) true
 
 .PHONY: runner
 runner: ## Build static dispatch-runner binaries (linux amd64/arm64) for custom EE images

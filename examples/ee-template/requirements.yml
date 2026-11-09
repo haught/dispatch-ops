@@ -1,0 +1,16 @@
+# Ansible collections and roles to bake into the image, in ansible-galaxy's
+# requirements format. ee-ansible already has ansible.posix, community.general
+# and ansible.utils.
+#
+# Content a single project needs can instead go in that project's own
+# requirements.yml, which the runner installs at the start of every job. Baking
+# it in here makes jobs start faster and lets every project use it.
+#
+# collections:
+#   - name: community.crypto
+#     version: ">=2.0.0"
+#   - name: https://git.example.com/infra/our_collection.git
+#     type: git
+#     version: main
+# roles:
+#   - name: geerlingguy.ntp

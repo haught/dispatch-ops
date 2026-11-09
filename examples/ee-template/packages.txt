@@ -1,0 +1,6 @@
+# Debian packages (trixie), one per line. Blank lines and # comments are ignored.
+# Find package names at https://packages.debian.org/trixie/
+#
+# rsync
+# dnsutils
+# libpq-dev

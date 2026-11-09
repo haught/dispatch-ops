@@ -21,6 +21,10 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	// `docker run --rm <image> selftest` checks a custom execution environment.
+	if len(os.Args) > 1 && os.Args[1] == "selftest" {
+		os.Exit(runner.SelfTest(os.Stdout, version))
+	}
 	// Git runs the runner as GIT_ASKPASS to get a project's username and password.
 	if dir := os.Getenv(runner.AskpassDirEnv); dir != "" {
 		os.Exit(runner.Askpass(dir, os.Args[1:], os.Stdout))

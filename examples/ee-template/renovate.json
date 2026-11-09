@@ -1,0 +1,14 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "description": "The Dispatch Ops starter EE in the Dockerfile's IMAGE_TAG",
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s+ARG\\s+IMAGE_TAG=(?<currentValue>\\S+)"
+      ]
+    }
+  ]
+}

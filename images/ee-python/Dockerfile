@@ -2,10 +2,14 @@
 #
 # Starter execution environment for Python scripts: Python 3 in a virtual
 # environment on PATH (with requests and PyYAML), git and an SSH client, on
-# top of the runner base image. Add packages with
+# top of the runner base image. Add Debian and Python packages with
+# dispatch-ee-install (see examples/ee-template):
 #
 #   FROM dispatch-ops/ee-python:<version>
-#   RUN pip install --no-cache-dir <packages>
+#   USER root
+#   COPY packages.txt requirements.txt /tmp/ee/
+#   RUN dispatch-ee-install /tmp/ee && rm -rf /tmp/ee
+#   USER 1000:1000
 
 ARG RUNNER_BASE=dispatch-ops/runner-base:dev
 FROM ${RUNNER_BASE}
@@ -16,5 +20,6 @@ RUN apt-get update \
     && python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir requests pyyaml \
     && chown -R 1000:1000 /opt/venv
-ENV PATH=/opt/venv/bin:$PATH
+ENV PATH=/opt/venv/bin:$PATH \
+    DISPATCH_EE_PIP=/opt/venv/bin/pip
 USER 1000:1000

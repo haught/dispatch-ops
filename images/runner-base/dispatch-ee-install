@@ -1,0 +1,102 @@
+#!/bin/sh
+# dispatch-ee-install DIR
+#
+# Installs what an execution environment adds on top of a starter EE, from
+# whichever of these files DIR holds:
+#
+#   packages.txt                  Debian packages, one per line
+#   requirements.txt              Python packages, installed with pip into the
+#                                 image's Python environment ($DISPATCH_EE_PIP)
+#   roles/requirements.yml        Ansible roles             } the same files a
+#   collections/requirements.yml  Ansible collections       } project may hold;
+#   requirements.yml              roles and/or collections  } .yaml works too
+#
+# Blank lines and # comments are ignored, and files with nothing else in them
+# are skipped. Run it as root, in a Dockerfile:
+#
+#   USER root
+#   COPY packages.txt requirements.txt requirements.yml /tmp/ee/
+#   RUN dispatch-ee-install /tmp/ee && rm -rf /tmp/ee
+#   USER 1000:1000
+#
+# Each starter EE says where its things go, so user Dockerfiles don't need to:
+#   DISPATCH_EE_PIP          pip of the Python environment on PATH (unset: no Python)
+#   DISPATCH_EE_COLLECTIONS  collections directory (default /usr/share/ansible/collections)
+#   DISPATCH_EE_ROLES        roles directory (default /usr/share/ansible/roles)
+
+set -eu
+
+prog=dispatch-ee-install
+
+die() {
+	echo "$prog: $*" >&2
+	exit 1
+}
+
+# content FILE prints FILE without comments and blank lines.
+content() {
+	sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$1"
+}
+
+# has FILE succeeds when FILE exists and has something besides comments.
+has() {
+	[ -f "$1" ] && [ -n "$(content "$1")" ]
+}
+
+[ $# -eq 1 ] || die "usage: $prog DIR"
+dir=$1
+[ -d "$dir" ] || die "$dir is not a directory"
+[ "$(id -u)" = 0 ] || die "must run as root: put USER root before this RUN step, and USER 1000:1000 after it"
+
+if has "$dir/packages.txt"; then
+	echo "$prog: installing Debian packages from packages.txt"
+	apt-get update
+	# The list is word-split on purpose: one package per word.
+	# shellcheck disable=SC2046
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $(content "$dir/packages.txt")
+	rm -rf /var/lib/apt/lists/*
+fi
+
+if has "$dir/requirements.txt"; then
+	[ -n "${DISPATCH_EE_PIP:-}" ] ||
+		die "requirements.txt: this image has no Python environment (DISPATCH_EE_PIP is unset); start from ee-python or ee-ansible"
+	echo "$prog: installing Python packages from requirements.txt"
+	# Keep the environment owned by whoever owned it before (ee-python's is
+	# the runner user's, so jobs can add packages at run time).
+	venv=$(dirname "$(dirname "$DISPATCH_EE_PIP")")
+	owner=$(stat -c %u:%g "$venv")
+	"$DISPATCH_EE_PIP" install --no-cache-dir -r "$dir/requirements.txt"
+	[ "$owner" = 0:0 ] || chown -R "$owner" "$venv"
+fi
+
+# galaxy FILE KIND installs FILE's roles (KIND role), collections (KIND
+# collection) or both (KIND empty).
+galaxy() {
+	command -v ansible-galaxy >/dev/null ||
+		die "$1: this image has no ansible-galaxy; start from ee-ansible"
+	collections=${DISPATCH_EE_COLLECTIONS:-/usr/share/ansible/collections}
+	roles=${DISPATCH_EE_ROLES:-/usr/share/ansible/roles}
+	mkdir -p "$collections" "$roles"
+	cache=$(mktemp -d)
+	echo "$prog: installing Ansible content from $1"
+	# Without -p, roles and collections go to the first of these paths.
+	# shellcheck disable=SC2086
+	ANSIBLE_COLLECTIONS_PATH=$collections ANSIBLE_ROLES_PATH=$roles \
+		ANSIBLE_GALAXY_CACHE_DIR=$cache ANSIBLE_NOCOLOR=True \
+		ansible-galaxy $2 install -r "$dir/$1"
+	rm -rf "$cache"
+}
+
+# The same files, in the same order, as the runner installs from a project.
+for spec in roles/requirements:role collections/requirements:collection requirements:; do
+	base=${spec%%:*}
+	kind=${spec#*:}
+	for ext in yml yaml; do
+		if [ -f "$dir/$base.$ext" ]; then
+			if has "$dir/$base.$ext"; then
+				galaxy "$base.$ext" "$kind"
+			fi
+			break
+		fi
+	done
+done

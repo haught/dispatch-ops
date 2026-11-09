@@ -16,3 +16,6 @@ PLAN.md
 
 # Dev SPECS
 /SPECS
+# Your own execution environments, built by `make images` (images/local/README.md)
+/images/local/*
+!/images/local/README.md
