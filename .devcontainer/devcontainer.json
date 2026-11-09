@@ -39,8 +39,6 @@
 	"mounts": [
 		// add mounts
 	],
-	// A new volume is root-owned; let `make deps` write to it.
-	"postCreateCommand": "sudo chown vscode:vscode web/node_modules",
 	"customizations": {
 		"vscode": {
 			"extensions": [
