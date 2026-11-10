@@ -2,6 +2,24 @@ apiVersion: v1
 entries:
   dispatch-ops-operator:
   - apiVersion: v2
+    appVersion: 1.0.1
+    created: "2026-11-10T05:09:40.987534989Z"
+    description: Installs the Dispatch Ops operator, which runs Dispatch Ops from
+      DispatchOps resources.
+    digest: 6479cafe1197187aed81fdbf76d47b58c8e23fbaf5dc04f643f90013fa5d8e9c
+    home: https://github.com/haught/dispatch-ops
+    kubeVersion: '>=1.30.0-0'
+    maintainers:
+    - name: Matt Haught
+      url: https://github.com/haught
+    name: dispatch-ops-operator
+    sources:
+    - https://github.com/haught/dispatch-ops
+    type: application
+    urls:
+    - https://github.com/haught/dispatch-ops/releases/download/v1.0.1/dispatch-ops-operator-1.0.1.tgz
+    version: 1.0.1
+  - apiVersion: v2
     appVersion: 1.0.0
     created: "2026-11-09T21:09:19.927454495Z"
     description: Installs the Dispatch Ops operator, which runs Dispatch Ops from
@@ -19,4 +37,4 @@ entries:
     urls:
     - https://github.com/haught/dispatch-ops/releases/download/v1.0.0/dispatch-ops-operator-1.0.0.tgz
     version: 1.0.0
-generated: "2026-11-09T21:09:19.926420562Z"
+generated: "2026-11-10T05:09:40.986559357Z"
