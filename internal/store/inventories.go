@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"dispatch-ops/internal/hostpattern"
 	"dispatch-ops/internal/rbac"
 )
 
@@ -523,6 +524,75 @@ func (s *Store) GetInventorySnapshot(ctx context.Context, id uuid.UUID) (Invento
 		return err
 	})
 	return snap, err
+}
+
+// HostTree is an inventory's group tree and enabled hosts, by name only:
+// what a limit pattern is matched against.
+type HostTree struct {
+	Inventory hostpattern.Inventory
+	// Hosts maps each enabled host's name to its ID and direct groups.
+	Hosts map[string]TreeHost
+}
+
+// TreeHost is a host in a HostTree.
+type TreeHost struct {
+	ID       uuid.UUID
+	GroupIDs []uuid.UUID
+}
+
+// GetHostTree reads an inventory's HostTree in one consistent snapshot.
+// It returns ErrNotFound if the inventory does not exist.
+func (s *Store) GetHostTree(ctx context.Context, id uuid.UUID) (HostTree, error) {
+	tree := HostTree{Hosts: map[string]TreeHost{}}
+	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM inventories WHERE id = $1)`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		rows, err := tx.Query(ctx, `
+			SELECT g.name,
+				ARRAY(SELECT cg.name FROM inventory_group_children c JOIN inventory_groups cg ON cg.id = c.child_id
+				      WHERE c.parent_id = g.id),
+				ARRAY(SELECT h.name FROM inventory_group_hosts gh JOIN hosts h ON h.id = gh.host_id
+				      WHERE gh.group_id = g.id AND h.enabled)
+			FROM inventory_groups g WHERE g.inventory_id = $1`, id)
+		if err != nil {
+			return err
+		}
+		tree.Inventory.Groups, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (hostpattern.Group, error) {
+			var g hostpattern.Group
+			err := row.Scan(&g.Name, &g.Children, &g.Hosts)
+			return g, err
+		})
+		if err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `
+			SELECT h.id, h.name,
+				ARRAY(SELECT gh.group_id FROM inventory_group_hosts gh WHERE gh.host_id = h.id ORDER BY gh.group_id)
+			FROM hosts h WHERE h.inventory_id = $1 AND h.enabled`, id)
+		if err != nil {
+			return err
+		}
+		type namedHost struct {
+			name string
+			TreeHost
+		}
+		hosts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (namedHost, error) {
+			var h namedHost
+			err := row.Scan(&h.ID, &h.name, &h.GroupIDs)
+			return h, err
+		})
+		for _, h := range hosts {
+			tree.Hosts[h.name] = h.TreeHost
+			tree.Inventory.Hosts = append(tree.Inventory.Hosts, h.name)
+		}
+		return err
+	})
+	return tree, err
 }
 
 // Ansible returns the snapshot in Ansible's JSON inventory format.

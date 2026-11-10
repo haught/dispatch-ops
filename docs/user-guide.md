@@ -172,6 +172,15 @@ prompted fields can be changed for that launch only. They start as the
 template's values, and only those that differ are sent. Extra variables merge
 over the template's at the top level, so removing one there doesn't unset it.
 
+The dialog also counts the hosts the limit selects in the chosen inventory,
+and **Show** lists them. It matches the pattern as Ansible does: groups
+include their child groups, and `:`, `,`, `&`, `!`, globs, `~regex` and
+`[i:j]` subscripts all work. It also notes any part of the pattern that
+matched nothing. Only enabled hosts count. Ansible's implicit `localhost`
+isn't included, and a playbook's own `hosts:` can narrow the set further. The
+preview needs `read` on the inventory, and the API serves it at
+`GET /api/v1/inventories/{id}/host-matches?pattern=…`.
+
 ## Projects
 
 A project is a git repository (`scmUrl`) and a branch, tag or commit

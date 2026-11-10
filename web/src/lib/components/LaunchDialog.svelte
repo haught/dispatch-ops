@@ -12,6 +12,7 @@
 	import { buildLaunchRequest, type LaunchValues } from '#lib/overrides.js';
 	import { can } from '#lib/permissions.svelte.js';
 	import { loadTemplateRefs, noRefs, type Ref, type TemplateRefs } from '#lib/templateRefs.js';
+	import MatchedHostsDialog from './MatchedHostsDialog.svelte';
 	import VarsField from './VarsField.svelte';
 
 	/**
@@ -83,6 +84,47 @@
 	);
 	const extraVars = $derived(fmtVars({ ...t.extraVars, ...body.extraVars }));
 
+	// How many hosts the limit selects in the chosen inventory, counted by the
+	// server as Ansible would match the pattern.
+	type LimitMatch =
+		| { kind: 'none' } // no inventory
+		| { kind: 'loading' }
+		| { kind: 'ok'; total: number; unmatched: string[] }
+		| { kind: 'hidden' } // the launcher can't read the inventory
+		| { kind: 'error'; message: string };
+	let limitMatch = $state<LimitMatch>({ kind: 'loading' });
+	let showHosts = $state(false);
+	const matchPattern = $derived(values.limit.trim());
+
+	$effect(() => {
+		const inventoryId = values.inventoryId;
+		const pattern = matchPattern;
+		if (!inventoryId) {
+			limitMatch = { kind: 'none' };
+			return;
+		}
+		let cancelled = false;
+		const timer = setTimeout(async () => {
+			const {
+				data,
+				error: err,
+				response
+			} = await api.GET('/api/v1/inventories/{inventoryId}/host-matches', {
+				params: { path: { inventoryId }, query: { pattern: pattern || undefined, limit: 1 } }
+			});
+			if (cancelled) return;
+			if (data) limitMatch = { kind: 'ok', total: data.total, unmatched: data.unmatched };
+			else if (response.status === 404) limitMatch = { kind: 'hidden' };
+			else limitMatch = { kind: 'error', message: errorMessage(err) };
+		}, 300);
+		return () => {
+			cancelled = true;
+			clearTimeout(timer);
+		};
+	});
+
+	const plural = (n: number) => `${n} host${n === 1 ? '' : 's'}`;
+
 	function close() {
 		dialog.close();
 	}
@@ -111,6 +153,31 @@
 
 {#snippet changed(on: boolean)}
 	{#if on}<span class="badge accent">changed</span>{/if}
+{/snippet}
+
+<!-- The limit's match count; with a link to list the hosts when withList. -->
+{#snippet matches(withList: boolean)}
+	{#if limitMatch.kind === 'ok'}
+		{#if limitMatch.total === 0}
+			<span class="warn small">· no hosts match</span>
+		{:else}
+			<span class="muted small">· {plural(limitMatch.total)}</span>
+			{#if withList}
+				<button type="button" class="link small" onclick={() => (showHosts = true)}>Show</button>
+			{/if}
+		{/if}
+		{#if withList && limitMatch.unmatched.length}
+			<div class="warn small">
+				Matched nothing: {limitMatch.unmatched.map((u) => `"${u}"`).join(', ')}
+			</div>
+		{/if}
+	{:else if limitMatch.kind === 'loading'}
+		<span class="muted small">· counting…</span>
+	{:else if limitMatch.kind === 'hidden' && withList}
+		<span class="muted small">· can't preview: inventory not visible to you</span>
+	{:else if limitMatch.kind === 'error' && withList}
+		<div class="error small">{limitMatch.message}</div>
+	{/if}
 {/snippet}
 
 <!-- A click outside the panel lands on the dialog itself (its backdrop); Esc closes it too. -->
@@ -151,6 +218,7 @@
 					{#if prompted('limit')}
 						<label>
 							Limit {@render changed(body.limit !== undefined)}
+							{@render matches(false)}
 							<input
 								bind:value={values.limit}
 								maxlength="4096"
@@ -222,6 +290,7 @@
 					{#if body.limit ?? t.limit}<code>{body.limit ?? t.limit}</code>{:else}<span class="muted"
 							>all hosts</span
 						>{/if}
+					{@render matches(true)}
 				</dd>
 				{#if t.jobType === 'ansible'}
 					<dt>Tags {@render changed(body.tags !== undefined)}</dt>
@@ -261,6 +330,15 @@
 		</footer>
 	</form>
 </dialog>
+
+{#if showHosts && values.inventoryId}
+	<MatchedHostsDialog
+		inventoryId={values.inventoryId}
+		inventoryName={inventory?.name ?? null}
+		pattern={matchPattern}
+		onclose={() => (showHosts = false)}
+	/>
+{/if}
 
 <style>
 	dialog {
@@ -346,5 +424,16 @@
 
 	.badge {
 		font-weight: normal;
+	}
+
+	.warn {
+		color: var(--warn);
+	}
+
+	button.link {
+		padding: 0;
+		border: none;
+		background: none;
+		color: var(--accent);
 	}
 </style>

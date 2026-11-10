@@ -33,6 +33,7 @@ export type NotificationDelivery = components['schemas']['NotificationDelivery']
 export type Inventory = components['schemas']['Inventory'];
 export type InventorySource = components['schemas']['InventorySource'];
 export type Host = components['schemas']['Host'];
+export type MatchedHost = components['schemas']['MatchedHost'];
 export type Group = components['schemas']['Group'];
 export type Variables = components['schemas']['Variables'];
 export type Credential = components['schemas']['Credential'];

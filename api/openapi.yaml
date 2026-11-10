@@ -1187,6 +1187,41 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 
+  /api/v1/inventories/{inventoryId}/host-matches:
+    parameters:
+      - $ref: "#/components/parameters/InventoryId"
+    get:
+      operationId: matchHosts
+      tags: [inventories]
+      summary: List the hosts a limit pattern selects
+      description: |
+        Evaluates a limit pattern against the inventory as Ansible would for
+        a job: enabled hosts only, groups including their descendants. The
+        implicit `localhost` that Ansible adds when a pattern names it is
+        not included. Hosts are sorted by name.
+      parameters:
+        - name: pattern
+          in: query
+          description: Limit pattern; blank or absent selects every host
+          schema:
+            $ref: "#/components/schemas/HostPattern"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200":
+          description: A page of matching hosts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostMatches"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /api/v1/hosts/{hostId}:
     parameters:
       - $ref: "#/components/parameters/HostId"
@@ -3830,6 +3865,39 @@ components:
             $ref: "#/components/schemas/Host"
         total:
           type: integer
+
+    HostMatches:
+      type: object
+      required: [items, total, unmatched]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MatchedHost"
+        total:
+          type: integer
+          description: Matching hosts (after `search`)
+        unmatched:
+          type: array
+          description: Terms of the pattern that matched no host
+          items:
+            type: string
+
+    MatchedHost:
+      type: object
+      required: [id, name, groupIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        groupIds:
+          type: array
+          description: Groups the host is a direct member of
+          items:
+            type: string
+            format: uuid
 
     GroupName:
       type: string

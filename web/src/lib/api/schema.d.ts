@@ -620,6 +620,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/inventories/{inventoryId}/host-matches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List the hosts a limit pattern selects
+         * @description Evaluates a limit pattern against the inventory as Ansible would for
+         *     a job: enabled hosts only, groups including their descendants. The
+         *     implicit `localhost` that Ansible adds when a pattern names it is
+         *     not included. Hosts are sorted by name.
+         */
+        get: operations["matchHosts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/hosts/{hostId}": {
         parameters: {
             query?: never;
@@ -1882,6 +1907,20 @@ export interface components {
         HostList: {
             items: components["schemas"]["Host"][];
             total: number;
+        };
+        HostMatches: {
+            items: components["schemas"]["MatchedHost"][];
+            /** @description Matching hosts (after `search`) */
+            total: number;
+            /** @description Terms of the pattern that matched no host */
+            unmatched: string[];
+        };
+        MatchedHost: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @description Groups the host is a direct member of */
+            groupIds: string[];
         };
         /**
          * @description A valid Ansible group name: letters, digits and underscores, not
@@ -3880,6 +3919,38 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    matchHosts: {
+        parameters: {
+            query?: {
+                /** @description Limit pattern; blank or absent selects every host */
+                pattern?: components["schemas"]["HostPattern"];
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+            };
+            header?: never;
+            path: {
+                inventoryId: components["parameters"]["InventoryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of matching hosts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostMatches"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
     getHost: {

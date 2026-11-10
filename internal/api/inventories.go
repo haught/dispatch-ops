@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -167,6 +169,43 @@ func (h *Handlers) ListHosts(ctx context.Context, req apigen.ListHostsRequestObj
 	out := apigen.ListHosts200JSONResponse{Items: make([]apigen.Host, 0, len(items)), Total: total}
 	for _, host := range items {
 		out.Items = append(out.Items, toAPIHost(host))
+	}
+	return out, nil
+}
+
+// MatchHosts lists the hosts a limit pattern selects in an inventory, as
+// the launch dialog's preview of a job's limit.
+func (h *Handlers) MatchHosts(ctx context.Context, req apigen.MatchHostsRequestObject) (apigen.MatchHostsResponseObject, error) {
+	if err := h.authorize(ctx, rbac.Inventory, req.InventoryId, rbac.Read); err != nil {
+		return nil, err
+	}
+	p := req.Params
+	pattern := deref(p.Pattern)
+	if err := hostpattern.CheckLimit(pattern); err != nil {
+		return nil, badRequest("%v", err)
+	}
+	tree, err := h.Store.GetHostTree(ctx, req.InventoryId)
+	if err != nil {
+		return nil, orNotFound(err, "Inventory")
+	}
+	names, unmatched, err := hostpattern.Match(tree.Inventory, pattern)
+	if err != nil {
+		return nil, badRequest("%v", err)
+	}
+	if search := strings.ToLower(deref(p.Search)); search != "" {
+		names = slices.DeleteFunc(names, func(n string) bool { return !strings.Contains(strings.ToLower(n), search) })
+	}
+	slices.Sort(names)
+
+	page := pageOf(p.Limit, p.Offset)
+	out := apigen.MatchHosts200JSONResponse{
+		Items:     []apigen.MatchedHost{},
+		Total:     len(names),
+		Unmatched: append([]string{}, unmatched...),
+	}
+	for _, name := range names[min(page.Offset, len(names)):min(page.Offset+page.Limit, len(names))] {
+		host := tree.Hosts[name]
+		out.Items = append(out.Items, apigen.MatchedHost{Id: host.ID, Name: name, GroupIds: append([]uuid.UUID{}, host.GroupIDs...)})
 	}
 	return out, nil
 }
