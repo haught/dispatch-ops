@@ -164,7 +164,13 @@ others with `/bin/sh`.
 
 A job template holds everything a job needs. Its `allowOverrides` list says
 which fields (such as `limit`, `tags`, `extraVars` or `inventory`) a launcher
-may change at launch.
+may change at launch; in the UI, these are the fields ticked **Prompt on
+launch**.
+
+**Launch** opens a dialog summarizing what the job will run with, where the
+prompted fields can be changed for that launch only. They start as the
+template's values, and only those that differ are sent. Extra variables merge
+over the template's at the top level, so removing one there doesn't unset it.
 
 ## Projects
 

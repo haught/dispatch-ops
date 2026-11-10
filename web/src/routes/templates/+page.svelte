@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { api, errorMessage, type JobTemplate } from '#lib/api/client.js';
+	import LaunchDialog from '#lib/components/LaunchDialog.svelte';
 	import TemplateForm from '#lib/components/TemplateForm.svelte';
 	import { canCreate, loadMyGrants } from '#lib/permissions.svelte.js';
 
@@ -9,7 +10,8 @@
 	let search = $state('');
 	let loading = $state(true);
 	let error = $state('');
-	let launching = $state<string | null>(null);
+	// The template whose launch dialog is open.
+	let launchTemplate = $state<JobTemplate | null>(null);
 	let creating = $state(false);
 
 	const mayCreate = $derived(canCreate('job_template'));
@@ -35,19 +37,11 @@
 		void search;
 		load();
 	});
-
-	async function launch(t: JobTemplate) {
-		launching = t.id;
-		error = '';
-		const { data, error: err } = await api.POST('/api/v1/job-templates/{jobTemplateId}/launch', {
-			params: { path: { jobTemplateId: t.id } },
-			body: {}
-		});
-		launching = null;
-		if (data) goto(`/jobs/${data.id}`);
-		else error = errorMessage(err);
-	}
 </script>
+
+{#if launchTemplate}
+	<LaunchDialog template={launchTemplate} onclose={() => (launchTemplate = null)} />
+{/if}
 
 <div class="page-header">
 	<h1>Job templates</h1>
@@ -106,9 +100,7 @@
 								>
 							</td>
 							<td>
-								<button onclick={() => launch(t)} disabled={launching !== null}>
-									{launching === t.id ? 'Launching…' : 'Launch'}
-								</button>
+								<button onclick={() => (launchTemplate = t)}>Launch</button>
 							</td>
 						</tr>
 					{/each}

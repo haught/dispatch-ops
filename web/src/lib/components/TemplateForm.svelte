@@ -21,7 +21,10 @@
 		parseVars,
 		varsError
 	} from '#lib/format.js';
+	import { overridesFor } from '#lib/overrides.js';
 	import { can } from '#lib/permissions.svelte.js';
+	import PromptField from './PromptField.svelte';
+	import PromptToggle from './PromptToggle.svelte';
 	import VarsField from './VarsField.svelte';
 
 	/**
@@ -46,15 +49,6 @@
 		{ type: 'container', label: 'Container', help: 'Runs a command in the image' }
 	];
 
-	const overridable: { field: OverridableField; label: string; types: JobType[] }[] = [
-		{ field: 'inventory', label: 'Inventory', types: ['ansible', 'script', 'container'] },
-		{ field: 'extraVars', label: 'Extra variables', types: ['ansible', 'script', 'container'] },
-		{ field: 'limit', label: 'Limit', types: ['ansible', 'script', 'container'] },
-		{ field: 'command', label: 'Command', types: ['container'] },
-		{ field: 'tags', label: 'Tags', types: ['ansible'] },
-		{ field: 'skipTags', label: 'Skip tags', types: ['ansible'] }
-	];
-
 	const t = untrack(() => template);
 	let jobType = $state<JobType>(t?.jobType ?? 'ansible');
 	let name = $state(t?.name ?? '');
@@ -73,7 +67,8 @@
 	let skipTags = $state(t?.skipTags ?? '');
 	let verbosity = $state(t?.verbosity ?? 0);
 	let timeout = $state<number | null>(t?.timeoutSeconds ?? 3600);
-	let allowOverrides = $state<OverridableField[]>([...(t?.allowOverrides ?? [])]);
+	// The fields launchers are prompted for (the template's allowOverrides).
+	let prompts = $state<OverridableField[]>([...(t?.allowOverrides ?? [])]);
 
 	let ees = $state<ExecutionEnvironment[]>([]);
 	let projects = $state<Project[]>([]);
@@ -116,15 +111,13 @@
 
 	const usesProject = $derived(jobType !== 'container');
 	const what = $derived(jobType === 'ansible' ? 'Playbook' : 'Script');
-	const overrideOptions = $derived(overridable.filter((o) => o.types.includes(jobType)));
+	const overrideOptions = $derived(overridesFor(jobType));
 	// Allowed overrides that let a launcher change what runs, or where, and so
 	// reach the credentials (the API also asks for use on them to allow these).
 	const credentialOverrides = $derived(
 		overrideOptions
 			.filter(
-				(o) =>
-					['inventory', 'extraVars', 'command'].includes(o.field) &&
-					allowOverrides.includes(o.field)
+				(o) => ['inventory', 'extraVars', 'command'].includes(o.field) && prompts.includes(o.field)
 			)
 			.map((o) => o.label.toLowerCase())
 	);
@@ -133,9 +126,7 @@
 	// credentials to allow these too).
 	const guardOverrides = $derived(
 		overrideOptions
-			.filter(
-				(o) => ['limit', 'tags', 'skipTags'].includes(o.field) && allowOverrides.includes(o.field)
-			)
+			.filter((o) => ['limit', 'tags', 'skipTags'].includes(o.field) && prompts.includes(o.field))
 			.map((o) => o.label.toLowerCase())
 	);
 	const commandProblem = $derived(jobType === 'container' ? argvError(command) : '');
@@ -160,7 +151,7 @@
 			extraVars: parseVars(vars),
 			limit: limit.trim(),
 			timeoutSeconds: timeout ?? 3600,
-			allowOverrides: allowOverrides.filter((f) => overrideOptions.some((o) => o.field === f)),
+			allowOverrides: prompts.filter((f) => overrideOptions.some((o) => o.field === f)),
 			...(usesProject ? { projectId, entrypoint: entrypoint.trim() } : {}),
 			...(jobType === 'container' ? { command: parseArgv(command) } : {}),
 			...(jobType === 'script' ? { arguments: parseArgv(args) } : {}),
@@ -265,17 +256,24 @@
 	{/if}
 
 	{#if jobType === 'container'}
-		<label>
-			Command <span class="muted small">one argument per line, not run through a shell</span>
-			<textarea
-				bind:value={command}
-				class="code"
-				rows={Math.min(12, Math.max(3, command.split('\n').length + 1))}
-				spellcheck="false"
-				required
-				placeholder={'bash\n-c\necho hello from $(hostname)'}></textarea>
-			{#if commandProblem}<span class="error small">{commandProblem}</span>{/if}
-		</label>
+		<PromptField
+			label="Command"
+			hint="one argument per line, not run through a shell"
+			field="command"
+			bind:prompts
+		>
+			{#snippet children(id)}
+				<textarea
+					{id}
+					bind:value={command}
+					class="code"
+					rows={Math.min(12, Math.max(3, command.split('\n').length + 1))}
+					spellcheck="false"
+					required
+					placeholder={'bash\n-c\necho hello from $(hostname)'}></textarea>
+				{#if commandProblem}<span class="error small">{commandProblem}</span>{/if}
+			{/snippet}
+		</PromptField>
 	{:else if jobType === 'script'}
 		<label>
 			Arguments <span class="muted small">one per line</span>
@@ -297,20 +295,27 @@
 
 	<h3>Hosts and secrets</h3>
 	<div class="form-grid">
-		<label>
-			Inventory
-			<select bind:value={inventoryId}>
-				<option value="">None</option>
-				{@render hidden(inventoryId, inventoryOptions, 'an inventory')}
-				{#each inventoryOptions as i (i.id)}
-					<option value={i.id}>{i.name}</option>
-				{/each}
-			</select>
-		</label>
-		<label>
-			Limit
-			<input bind:value={limit} maxlength="4096" placeholder="web:&db1 (all hosts if blank)" />
-		</label>
+		<PromptField label="Inventory" field="inventory" bind:prompts>
+			{#snippet children(id)}
+				<select {id} bind:value={inventoryId}>
+					<option value="">None</option>
+					{@render hidden(inventoryId, inventoryOptions, 'an inventory')}
+					{#each inventoryOptions as i (i.id)}
+						<option value={i.id}>{i.name}</option>
+					{/each}
+				</select>
+			{/snippet}
+		</PromptField>
+		<PromptField label="Limit" field="limit" bind:prompts>
+			{#snippet children(id)}
+				<input
+					{id}
+					bind:value={limit}
+					maxlength="4096"
+					placeholder="web:&db1 (all hosts if blank)"
+				/>
+			{/snippet}
+		</PromptField>
 	</div>
 	<div class="field">
 		Credentials
@@ -342,13 +347,23 @@
 			</p>
 		{/if}
 	</div>
-	<VarsField bind:value={vars} label="Extra variables" />
+	<VarsField bind:value={vars} label="Extra variables">
+		{#snippet aside()}<PromptToggle field="extraVars" bind:prompts />{/snippet}
+	</VarsField>
 
 	<h3>Options</h3>
 	<div class="form-grid">
 		{#if jobType === 'ansible'}
-			<label>Tags <input bind:value={tags} maxlength="4096" placeholder="All tasks" /></label>
-			<label>Skip tags <input bind:value={skipTags} maxlength="4096" /></label>
+			<PromptField label="Tags" field="tags" bind:prompts>
+				{#snippet children(id)}
+					<input {id} bind:value={tags} maxlength="4096" placeholder="All tasks" />
+				{/snippet}
+			</PromptField>
+			<PromptField label="Skip tags" field="skipTags" bind:prompts>
+				{#snippet children(id)}
+					<input {id} bind:value={skipTags} maxlength="4096" />
+				{/snippet}
+			</PromptField>
 			<label>
 				Verbosity
 				<select bind:value={verbosity}>
@@ -368,35 +383,29 @@
 		<p class="muted small hint">Jobs that run longer than {fmtSeconds(timeout)} are stopped.</p>
 	{/if}
 
-	<div class="field">
-		Can be overridden at launch
-		<div class="checks">
-			{#each overrideOptions as o (o.field)}
-				<label
-					><input type="checkbox" bind:group={allowOverrides} value={o.field} /> {o.label}</label
-				>
-			{/each}
+	{#if credentialOverrides.length > 0 || guardOverrides.length > 0}
+		<div class="prompt-warnings">
+			{#if credentialOverrides.length > 0}
+				<p class="small warning">
+					Prompting for {credentialOverrides.join(' and ')} at launch lets anyone who can launch this
+					template make its jobs hand over the template's credentials{credentialOverrides.includes(
+						'inventory'
+					)
+						? ' (an inventory of theirs brings its own host variables)'
+						: ''}. Give the execute role only to those who may use the credentials themselves.
+					{#if prompts.includes('extraVars')}
+						Launch-time extra variables named <code>ansible_*</code> or containing Jinja are refused.
+					{/if}
+				</p>
+			{/if}
+			{#if guardOverrides.length > 0}
+				<p class="small warning">
+					Prompting for {guardOverrides.join(' and ')} at launch lets launchers skip plays or tasks, including
+					any checks the playbook makes before it uses the credentials.
+				</p>
+			{/if}
 		</div>
-		{#if credentialOverrides.length > 0}
-			<p class="small warning">
-				Allowing {credentialOverrides.join(' and ')} to be overridden lets anyone who can launch this
-				template make its jobs hand over the template's credentials{credentialOverrides.includes(
-					'inventory'
-				)
-					? ' (an inventory of theirs brings its own host variables)'
-					: ''}. Give the execute role only to those who may use the credentials themselves.
-				{#if allowOverrides.includes('extraVars')}
-					Launch-time extra variables named <code>ansible_*</code> or containing Jinja are refused.
-				{/if}
-			</p>
-		{/if}
-		{#if guardOverrides.length > 0}
-			<p class="small warning">
-				Allowing {guardOverrides.join(' and ')} to be overridden lets launchers skip plays or tasks, including
-				any checks the playbook makes before it uses the credentials.
-			</p>
-		{/if}
-	</div>
+	{/if}
 
 	<div class="form-actions">
 		<button type="submit" disabled={saving || !loaded}>
@@ -424,6 +433,10 @@
 
 	.hint {
 		margin-top: -0.25rem;
+	}
+
+	.prompt-warnings {
+		margin: 0.75rem 0;
 	}
 
 	.warning {

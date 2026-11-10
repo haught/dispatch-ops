@@ -12,6 +12,7 @@ export type JobEvent = components['schemas']['JobEvent'];
 export type JobTemplate = components['schemas']['JobTemplate'];
 export type JobType = components['schemas']['JobType'];
 export type OverridableField = components['schemas']['OverridableField'];
+export type LaunchRequest = components['schemas']['LaunchRequest'];
 export type JobHostSummary = components['schemas']['JobHostSummary'];
 export type TokenScope = components['schemas']['TokenScope'];
 export type Team = components['schemas']['Team'];
