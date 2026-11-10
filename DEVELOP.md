@@ -178,8 +178,10 @@ the API server in the cluster.
 ### How the dev installation is configured
 
 The operator runs the `DispatchOps` in `deploy/dev/dispatchops.yaml`: one API
-replica, one task manager running jobs in the `dispatch-jobs` namespace, and
-the external database from `.env`. The `Tiltfile` fills in the rest before
+replica, one task manager running jobs in the `dispatch-ops-jobs` namespace
+(the chart's default job namespace for `dispatch-ops`), and the external
+database from `.env`. The `Tiltfile` installs the chart with its own
+installation and namespaces turned off, and fills in the rest before
 applying it:
 
 - `spec.image`: the server image Tilt just built.
@@ -282,7 +284,7 @@ of your own execution environment from elsewhere on your machine:
 | `images/` | `runner-base` and the starter execution environments `ee-shell`, `ee-python` and `ee-ansible`; your own EEs go in the gitignored `images/local/` |
 | `examples/ee-template` | Starting point for a repository holding a custom execution environment |
 | `deploy/dev/` | kind cluster config, the dev `DispatchOps`, and the Dockerfiles Tilt builds from |
-| `deploy/helm/dispatch-ops-operator` | Helm chart that installs the operator and the CRD (`files/` is generated) |
+| `deploy/helm/dispatch-ops-operator` | Helm chart that installs the operator, the CRD (`crds/` is generated), the namespaces and an installation |
 | `deploy/examples/` | A production-style `DispatchOps` |
 | `docs/` | Administration guide, user guide and configuration reference |
 | `web/` | SvelteKit / Svelte 5 single-page app, embedded into the server binary |
@@ -310,8 +312,9 @@ Things the pipeline does for you, and things you must do yourself:
 
 Edit `internal/operator/api/v1alpha1/types.go` (kubebuilder markers set
 validation and defaults) and run `make manifests`. It regenerates the
-deepcopy code and the CRD in the Helm chart's `files/`. `make generate` does
-it too.
+deepcopy code and the CRD, in `internal/operator/crd/` (embedded in the
+operator, which applies it at startup) and the Helm chart's `crds/`, which
+`make helm-lint` checks are the same. `make generate` does it too.
 
 ## Tests and checks
 

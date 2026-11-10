@@ -17,17 +17,29 @@ imagePullSecrets: []
 # Replicas elect one active operator.
 replicaCount: 1
 
-# Namespaces whose DispatchOps resources the operator manages. Empty means
-# all namespaces, and the operator gets a ClusterRole that can read and
-# write every Secret and workload in the cluster. Set, it gets a Role in
-# each of these namespaces (and the job namespaces in allowedJobNamespaces)
-# instead, and nothing cluster-wide; see docs/administration.md ("Operator
-# permissions").
-watchNamespaces: []
+# Namespaces whose DispatchOps resources the operator manages. It gets a Role
+# in each of these and in their job namespaces, and nothing cluster-wide
+# beyond reading those namespaces' Pod Security labels; see
+# docs/administration.md ("Operator permissions"). None may be the release
+# namespace, the operator's own.
+watchNamespaces: [dispatch-ops]
 
-# Namespaces a DispatchOps may run its jobs in (spec.taskManager
-# .jobNamespace) besides its own, each mapped to the namespaces whose
-# DispatchOps may use it:
+# Manage DispatchOps in every namespace instead, with a ClusterRole that can
+# read and write every Secret and workload in the cluster: effectively
+# cluster-admin. watchNamespaces and jobNamespaceSuffix are then ignored.
+watchAllNamespaces: false
+
+# Each watched namespace <namespace> gets its own job namespace,
+# <namespace><jobNamespaceSuffix> (dispatch-ops-jobs), where its DispatchOps
+# run their jobs unless they set spec.taskManager.jobNamespace. Job pods can
+# mount any Secret in their namespace, so a namespace of their own keeps the
+# installation's Secrets out of their reach. "" runs jobs in each
+# DispatchOps's own namespace.
+jobNamespaceSuffix: -jobs
+
+# More namespaces a DispatchOps may run its jobs in (spec.taskManager
+# .jobNamespace) besides its own and its default job namespace, each mapped
+# to the namespaces whose DispatchOps may use it:
 #
 #   allowedJobNamespaces:
 #     jobs-a: [team-a]
@@ -37,10 +49,10 @@ watchNamespaces: []
 # and a pod can mount any Secret in its namespace. A job namespace must not
 # also be in watchNamespaces (the chart and the operator refuse that): one
 # that hosts a DispatchOps holds its encryption key and database Secrets.
-# With watchNamespaces empty, a namespace can also opt in by itself with the
-# label dispatch-ops.io/allow-jobs-from=<DispatchOps namespace>. With
-# watchNamespaces set, only these work, the namespaces they map must be
-# watched, and the operator is given a Role in each job namespace.
+# The namespaces they map must be watched, and the operator is given a Role
+# in each job namespace. With watchAllNamespaces, a namespace can also opt
+# in by itself with the label dispatch-ops.io/allow-jobs-from=<DispatchOps
+# namespace>.
 #
 # A namespace serves exactly one installation, never two: the first to
 # claim it (a dispatch-ops-claim ConfigMap, created by the operator) keeps
@@ -53,6 +65,13 @@ watchNamespaces: []
 # NamespaceReleased) until an administrator has checked it and deleted the
 # tombstone; see docs/administration.md ("Released namespaces").
 allowedJobNamespaces: {}
+
+namespaces:
+  # Create the watched namespaces, their job namespaces and the
+  # installation's, labeled pod-security.kubernetes.io/enforce=restricted,
+  # and keep them on uninstall. Namespaces that already exist are left as
+  # they are.
+  create: true
 
 # The operator refuses to run jobs in a namespace (including a
 # DispatchOps's own, the default job namespace) that doesn't enforce Pod
@@ -84,12 +103,6 @@ jobDNS:
 networkPolicy:
   enabled: true
 
-crds:
-  # Install and upgrade the DispatchOps CRD with the chart.
-  install: true
-  # Keep the CRD (and so every DispatchOps) when the chart is uninstalled.
-  keep: true
-
 serviceAccount:
   # Defaults to the release's full name.
   name: ""
@@ -109,18 +122,15 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
-# A Dispatch Ops installation (a DispatchOps resource) for this release's
-# operator to run, with the settings `.env` holds in development. Off by
-# default: without it, create DispatchOps resources yourself (see README.md).
-#
-# On a cluster that doesn't have the DispatchOps CRD yet, the first
-# `helm install` can only install the CRD; run `helm upgrade` once more with
-# the same values to create the installation.
+# The Dispatch Ops installation (a DispatchOps resource) for this release's
+# operator to run, with the settings `.env` holds in development. false
+# leaves creating DispatchOps resources to you (see docs/administration.md).
 installation:
-  enabled: false
+  enabled: true
   name: dispatch-ops
-  # Defaults to the release's namespace. It must exist, and be in
-  # watchNamespaces when that's set.
+  # Defaults to the first of watchNamespaces (dispatch-ops with
+  # watchAllNamespaces). It must be watched, and not be the release
+  # namespace.
   namespace: ""
   # Keep the DispatchOps (and so the running installation) and the Secrets
   # below when the chart is uninstalled. Losing the encryption key loses every

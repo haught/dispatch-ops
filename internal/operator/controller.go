@@ -117,6 +117,11 @@ type Reconciler struct {
 	// serves one installation at a time: the one holding its claim (see
 	// claim.go).
 	AllowedJobNamespaces map[string][]string
+	// DefaultJobNamespaces maps a namespace to the job namespace its
+	// DispatchOps run their jobs in when spec.taskManager.jobNamespace is
+	// unset (see withDefaults); without an entry, their own namespace.
+	// Each is also in AllowedJobNamespaces for that namespace.
+	DefaultJobNamespaces map[string]string
 	// AllowJobNamespacesWithoutPodSecurity runs jobs in namespaces that
 	// don't enforce the restricted or baseline Pod Security Standard. By
 	// default the operator refuses them: whoever can create a DispatchOps
@@ -164,7 +169,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			},
 			UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				o, n := e.ObjectOld.(*v1alpha1.DispatchOps), e.ObjectNew.(*v1alpha1.DispatchOps)
-				if (install{DispatchOps: o}).jobNamespace() != (install{DispatchOps: n}).jobNamespace() ||
+				if (install{DispatchOps: r.withDefaults(o)}).jobNamespace() != (install{DispatchOps: r.withDefaults(n)}).jobNamespace() ||
 					o.DeletionTimestamp.IsZero() != n.DeletionTimestamp.IsZero() {
 					r.enqueueJobNamespaceUsers(ctx, q, o, n)
 				}
@@ -185,10 +190,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // withDefaults fills in what the CRD's defaults would, so a resource that
-// skipped them (or an older one) still works.
-func withDefaults(d *v1alpha1.DispatchOps) *v1alpha1.DispatchOps {
+// skipped them (or an older one) still works, and the job namespace from
+// DefaultJobNamespaces.
+func (r *Reconciler) withDefaults(d *v1alpha1.DispatchOps) *v1alpha1.DispatchOps {
 	d = d.DeepCopy()
 	s := &d.Spec
+	if s.TaskManager.JobNamespace == "" {
+		s.TaskManager.JobNamespace = r.DefaultJobNamespaces[d.Namespace]
+	}
 	if s.ImagePullPolicy == "" {
 		s.ImagePullPolicy = corev1.PullIfNotPresent
 	}
@@ -227,7 +236,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	in := install{DispatchOps: withDefaults(&cr), image: cr.Status.Image}
+	in := install{DispatchOps: r.withDefaults(&cr), image: cr.Status.Image}
 	status := cr.Status.DeepCopy()
 	status.ObservedGeneration = cr.Generation
 	set := func(t string, ok bool, reason, msg string) {

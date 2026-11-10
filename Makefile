@@ -34,7 +34,7 @@ CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 CHART := deploy/helm/dispatch-ops-operator
 KIND_CLUSTER := dispatch-ops
 KUBE_CONTEXT := kind-$(KIND_CLUSTER)
-DISPATCH_JOB_NAMESPACE ?= dispatch-jobs
+DISPATCH_JOB_NAMESPACE ?= dispatch-ops-jobs
 DEV_NAMESPACE := dispatch-ops
 
 .DEFAULT_GOAL := help
@@ -63,9 +63,10 @@ generate: manifests ## Regenerate Go server and TS client from api/openapi.yaml,
 	cd web && npm run gen:api
 
 .PHONY: manifests
-manifests: ## Regenerate the DispatchOps CRD and its deepcopy code from internal/operator/api
+manifests: ## Regenerate the DispatchOps CRD (the operator's embedded copy and the chart's crds/) and its deepcopy code
 	$(CONTROLLER_GEN) object paths=./internal/operator/api/... \
-		crd paths=./internal/operator/api/... output:crd:dir=$(CHART)/files
+		crd paths=./internal/operator/api/... output:crd:dir=internal/operator/crd
+	cp internal/operator/crd/dispatch-ops.io_dispatchops.yaml $(CHART)/crds/
 
 # --- Database ----------------------------------------------------------------
 
@@ -214,16 +215,31 @@ docker: ## Build the server and operator container images
 	docker build --build-arg VERSION=$(VERSION) -t dispatch-ops:$(VERSION) .
 	docker build --build-arg VERSION=$(VERSION) --target operator -t dispatch-ops-operator:$(VERSION) .
 
+# helm lint and template run in this namespace, as the README installs the chart.
+CHART_NAMESPACE := dispatch-ops-system
+
 .PHONY: helm-lint
-helm-lint: ## Lint the operator's Helm chart
-	helm lint $(CHART)
-	helm lint $(CHART) -f $(CHART)/ci/installation-values.yaml
-	helm lint $(CHART) -f $(CHART)/ci/namespaced-values.yaml
+helm-lint: ## Lint the operator's Helm chart, and check its CRD matches the operator's
+	@cmp -s internal/operator/crd/dispatch-ops.io_dispatchops.yaml $(CHART)/crds/dispatch-ops.io_dispatchops.yaml \
+		|| { echo 'the chart'"'"'s crds/ differ from the operator'"'"'s CRD: run make manifests'; exit 1; }
+	helm lint $(CHART) -n $(CHART_NAMESPACE)
+	helm lint $(CHART) -n $(CHART_NAMESPACE) -f $(CHART)/ci/installation-values.yaml
+	helm lint $(CHART) -n $(CHART_NAMESPACE) -f $(CHART)/ci/namespaced-values.yaml
+	helm lint $(CHART) -n $(CHART_NAMESPACE) --set watchAllNamespaces=true
+	helm lint $(CHART) -n $(CHART_NAMESPACE) --set jobNamespaceSuffix= --set namespaces.create=false --set installation.enabled=false
+	@# Cluster-wide mode only by name, never by an empty list.
+	@! helm template $(CHART) -n $(CHART_NAMESPACE) --set 'watchNamespaces=null' >/dev/null 2>&1 \
+		|| { echo 'the chart rendered an empty watchNamespaces'; exit 1; }
 	@# A watched namespace must never be a job namespace too: the chart refuses.
-	@! helm template $(CHART) --set 'watchNamespaces={team-a,jobs-a}' --set 'allowedJobNamespaces.jobs-a={team-a}' \
+	@! helm template $(CHART) -n $(CHART_NAMESPACE) --set 'watchNamespaces={team-a,jobs-a}' --set 'allowedJobNamespaces.jobs-a={team-a}' \
 		>/dev/null 2>&1 || { echo 'the chart rendered a job namespace that is also watched'; exit 1; }
-	@! helm template $(CHART) --set 'allowedJobNamespaces={jobs-a}' >/dev/null 2>&1 \
+	@! helm template $(CHART) -n $(CHART_NAMESPACE) --set 'watchNamespaces={a,a-jobs}' >/dev/null 2>&1 \
+		|| { echo 'the chart rendered a default job namespace that is also watched'; exit 1; }
+	@! helm template $(CHART) -n $(CHART_NAMESPACE) --set 'allowedJobNamespaces={jobs-a}' >/dev/null 2>&1 \
 		|| { echo 'the chart rendered allowedJobNamespaces without the namespaces allowed to use them'; exit 1; }
+	@# The operator's namespace must host no installation or jobs.
+	@! helm template $(CHART) -n dispatch-ops >/dev/null 2>&1 \
+		|| { echo 'the chart rendered the operator'"'"'s namespace as a watched namespace'; exit 1; }
 
 # --- Release -----------------------------------------------------------------
 

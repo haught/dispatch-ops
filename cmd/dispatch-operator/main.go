@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"maps"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -31,6 +33,7 @@ import (
 
 	"dispatch-ops/internal/operator"
 	"dispatch-ops/internal/operator/api/v1alpha1"
+	"dispatch-ops/internal/operator/crd"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -44,6 +47,7 @@ func main() {
 		leaderElect          bool
 		watchNamespace       string
 		allowedJobNamespaces string
+		defaultJobNamespaces string
 		noPodSecurity        bool
 		dnsNamespaces        string
 		dnsPods              string
@@ -62,6 +66,11 @@ func main() {
 			"<job namespace>=<namespace>[|<namespace>...], comma-separated, e.g. jobs-a=team-a,jobs-b=team-b|team-c "+
 			"(ALLOWED_JOB_NAMESPACES). None may be in --watch-namespaces. When watching all namespaces, a namespace "+
 			"labeled "+operator.AllowJobsFromLabel+"=<namespace> also allows that namespace's")
+	flag.StringVar(&defaultJobNamespaces, "default-job-namespaces", os.Getenv("DEFAULT_JOB_NAMESPACES"),
+		"the job namespace a DispatchOps runs its jobs in when its spec.taskManager.jobNamespace is unset, per "+
+			"namespace: <namespace>=<job namespace>, comma-separated, e.g. team-a=team-a-jobs (DEFAULT_JOB_NAMESPACES). "+
+			"Each is also allowed for its namespace, as in --allowed-job-namespaces. Without one, a DispatchOps runs "+
+			"its jobs in its own namespace")
 	flag.BoolVar(&noPodSecurity, "allow-job-namespaces-without-pod-security", envBool("ALLOW_JOB_NAMESPACES_WITHOUT_POD_SECURITY"),
 		"run jobs in namespaces that aren't labeled pod-security.kubernetes.io/enforce=restricted (or baseline) "+
 			"(ALLOW_JOB_NAMESPACES_WITHOUT_POD_SECURITY). Whoever can create a DispatchOps can then create any pod, "+
@@ -102,13 +111,37 @@ func main() {
 
 	watched := splitList(watchNamespace)
 	allowedJobNS, err := parseAllowedJobNamespaces(allowedJobNamespaces)
-	if err == nil {
-		err = checkAllowedJobNamespaces(allowedJobNS, watched)
-	}
 	if err != nil {
 		log.Error(err, "invalid allowed job namespaces")
 		os.Exit(1)
 	}
+	defaultJobNS, err := parseDefaultJobNamespaces(defaultJobNamespaces)
+	if err != nil {
+		log.Error(err, "invalid default job namespaces")
+		os.Exit(1)
+	}
+	allowDefaultJobNamespaces(allowedJobNS, defaultJobNS)
+	if err := checkAllowedJobNamespaces(allowedJobNS, watched); err != nil {
+		log.Error(err, "invalid job namespaces")
+		os.Exit(1)
+	}
+
+	// Bring the DispatchOps CRD up to this version: Helm installs it from
+	// the chart's crds/ but never upgrades it.
+	cfg := ctrl.GetConfigOrDie()
+	direct, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		log.Error(err, "unable to create a client")
+		os.Exit(1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = crd.Ensure(ctx, direct, version)
+	cancel()
+	if err != nil {
+		log.Error(err, "unable to update the DispatchOps CRD")
+		os.Exit(1)
+	}
+
 	// Only cache the objects the operator made, not every Job or
 	// Deployment in the cluster.
 	ours := cache.ByObject{Label: labels.SelectorFromSet(labels.Set{"app.kubernetes.io/managed-by": operator.ManagedBy})}
@@ -138,7 +171,7 @@ func main() {
 		cacheOpts.ByObject[o] = inJobNS
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Cache:                  cacheOpts,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
@@ -156,6 +189,7 @@ func main() {
 		Scheme:               mgr.GetScheme(),
 		DefaultImage:         serverImage,
 		AllowedJobNamespaces: allowedJobNS,
+		DefaultJobNamespaces: defaultJobNS,
 		Namespaces:           accessible,
 		JobDNS:               jobDNS,
 
@@ -178,7 +212,7 @@ func main() {
 			"privileged pods in its job namespace")
 	}
 	log.Info("starting", "version", version, "default_server_image", serverImage, "watch_namespaces", watchNamespace,
-		"allowed_job_namespaces", allowedJobNamespaces)
+		"allowed_job_namespaces", allowedJobNamespaces, "default_job_namespaces", defaultJobNamespaces)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "operator stopped")
 		os.Exit(1)
@@ -258,6 +292,43 @@ func parseAllowedJobNamespaces(s string) (map[string][]string, error) {
 		out[jobNS] = slices.Compact(sources)
 	}
 	return out, nil
+}
+
+// parseDefaultJobNamespaces parses --default-job-namespaces: comma-separated
+// entries <namespace>=<job namespace>, at most one per namespace.
+func parseDefaultJobNamespaces(s string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, item := range splitList(s) {
+		src, jobNS, ok := strings.Cut(item, "=")
+		src, jobNS = strings.TrimSpace(src), strings.TrimSpace(jobNS)
+		if !ok || jobNS == "" {
+			return nil, fmt.Errorf("--default-job-namespaces: %q doesn't name a job namespace; write <namespace>=<job namespace>", item)
+		}
+		for _, ns := range []string{src, jobNS} {
+			if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
+				return nil, fmt.Errorf("--default-job-namespaces: %q is not a namespace: %s", ns, strings.Join(errs, "; "))
+			}
+		}
+		if src == jobNS {
+			return nil, fmt.Errorf("--default-job-namespaces: %s=%s: a DispatchOps runs jobs in its own namespace "+
+				"without a default; leave it out", src, jobNS)
+		}
+		if _, dup := out[src]; dup {
+			return nil, fmt.Errorf("--default-job-namespaces: %s is listed twice", src)
+		}
+		out[src] = jobNS
+	}
+	return out, nil
+}
+
+// allowDefaultJobNamespaces adds each default job namespace to allowed, for
+// the namespace it is the default of.
+func allowDefaultJobNamespaces(allowed map[string][]string, defaults map[string]string) {
+	for src, jobNS := range defaults {
+		sources := append(allowed[jobNS], src)
+		slices.Sort(sources)
+		allowed[jobNS] = slices.Compact(sources)
+	}
 }
 
 // checkAllowedJobNamespaces refuses an allowed job namespace that is also

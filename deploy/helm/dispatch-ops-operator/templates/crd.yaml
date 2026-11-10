@@ -1,7 +1,13 @@
-{{- if .Values.crds.install }}
-{{- $crd := .Files.Get "files/dispatch-ops.io_dispatchops.yaml" }}
-{{- if .Values.crds.keep }}
-{{- $crd = $crd | replace "\nmetadata:\n  annotations:\n" "\nmetadata:\n  annotations:\n    helm.sh/resource-policy: keep\n" }}
-{{- end }}
-{{ $crd }}
+{{- /*
+The DispatchOps CRD is in crds/: Helm installs it before the templates (so
+one install creates the installation too) and never deletes it; the operator
+upgrades it. Earlier charts had it here, as a template: an upgrade from
+one drops it from the release, and Helm would delete it, and every
+DispatchOps with it, unless it is annotated to be kept (crds.keep, on by
+default).
+*/ -}}
+{{- $crd := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "dispatchops.dispatch-ops.io" }}
+{{- $annotations := dig "metadata" "annotations" dict $crd }}
+{{- if and (eq (get $annotations "meta.helm.sh/release-name") .Release.Name) (eq (get $annotations "meta.helm.sh/release-namespace") .Release.Namespace) (ne (get $annotations "helm.sh/resource-policy") "keep") }}
+{{- fail "this release installed the dispatchops.dispatch-ops.io CRD with crds.keep=false, and upgrading would delete it, and every DispatchOps with it. Keep it first: kubectl annotate crd dispatchops.dispatch-ops.io helm.sh/resource-policy=keep" }}
 {{- end }}

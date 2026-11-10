@@ -1,7 +1,4 @@
 # Every installation.* setting, for `make helm-lint`. Not a real installation.
-# Its job namespace, opted in for its namespace.
-allowedJobNamespaces:
-  dispatch-jobs: [dispatch-ops]
 installation:
   enabled: true
   name: dispatch-ops
@@ -33,7 +30,6 @@ installation:
         className: nginx
         tlsSecretName: dispatch-ops-tls
     taskManager:
-      jobNamespace: dispatch-jobs
       maxConcurrentJobs: 20
     retention:
       jobs: 2160h

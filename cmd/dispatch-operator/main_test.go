@@ -68,3 +68,44 @@ func TestCheckAllowedJobNamespaces(t *testing.T) {
 		t.Error("overlap accepted")
 	}
 }
+
+func TestParseDefaultJobNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    map[string]string
+		wantErr string
+	}{
+		{in: "", want: map[string]string{}},
+		{in: " team-a = team-a-jobs , team-b=team-b-jobs,", want: map[string]string{"team-a": "team-a-jobs", "team-b": "team-b-jobs"}},
+		{in: "team-a", wantErr: "doesn't name a job namespace"},
+		{in: "team-a=", wantErr: "doesn't name a job namespace"},
+		{in: "=jobs", wantErr: "is not a namespace"},
+		{in: "team-a=Jobs", wantErr: "is not a namespace"},
+		{in: "team-a=team-a", wantErr: "its own namespace"},
+		{in: "team-a=jobs-a,team-a=jobs-b", wantErr: "listed twice"},
+	} {
+		got, err := parseDefaultJobNamespaces(tc.in)
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%q: error %v, want %q", tc.in, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q = %v, %v; want %v", tc.in, got, err, tc.want)
+		}
+	}
+}
+
+func TestAllowDefaultJobNamespaces(t *testing.T) {
+	allowed := map[string][]string{"shared": {"team-c"}}
+	allowDefaultJobNamespaces(allowed, map[string]string{"team-a": "team-a-jobs", "team-b": "shared", "team-c": "shared"})
+	want := map[string][]string{"team-a-jobs": {"team-a"}, "shared": {"team-b", "team-c"}}
+	if !reflect.DeepEqual(allowed, want) {
+		t.Errorf("allowed = %v, want %v", allowed, want)
+	}
+	// A default job namespace that is watched is refused like an allowed one.
+	if err := checkAllowedJobNamespaces(allowed, []string{"team-a", "team-b", "team-c", "team-a-jobs"}); err == nil {
+		t.Error("watched default job namespace accepted")
+	}
+}

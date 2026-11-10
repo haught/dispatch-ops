@@ -1,0 +1,845 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: dispatchops.dispatch-ops.io
+spec:
+  group: dispatch-ops.io
+  names:
+    categories:
+    - dispatch-ops
+    kind: DispatchOps
+    listKind: DispatchOpsList
+    plural: dispatchops
+    shortNames:
+    - dops
+    singular: dispatchops
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.image
+      name: Image
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          DispatchOps is one installation of Dispatch Ops: its API server, task
+          manager and database.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DispatchOpsSpec is the desired installation.
+            properties:
+              admin:
+                default: {}
+                description: AdminSpec is the local system administrator created at
+                  install.
+                properties:
+                  passwordSecret:
+                    description: |-
+                      PasswordSecret holds the administrator's initial password (at least
+                      12 characters). Without it, the operator generates
+                      <name>-admin-password. Changing the Secret later doesn't change the
+                      password.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  username:
+                    default: admin
+                    description: Username of the administrator, created if no user
+                      has it.
+                    minLength: 1
+                    type: string
+                type: object
+              api:
+                default: {}
+                description: APISpec configures the API server, which also serves
+                  the web UI.
+                properties:
+                  ingress:
+                    description: Ingress, if set, exposes the API server and UI.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      className:
+                        type: string
+                      host:
+                        minLength: 1
+                        type: string
+                      tlsSecretName:
+                        description: TLSSecretName enables TLS with this certificate
+                          Secret.
+                        type: string
+                    required:
+                    - host
+                    type: object
+                  maxJobOutput:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxJobOutput caps the output one job may store (its events' text and
+                      data), e.g. 1Gi. Past it, the job keeps running and its log says the
+                      output was cut; only its Ansible recap is still kept. 0 means no cap.
+                      Defaults to 256Mi.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  replicas:
+                    default: 2
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  resources:
+                    description: ResourceRequirements describes the compute resource
+                      requirements.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  serviceType:
+                    default: ClusterIP
+                    description: ServiceType of the <name>-api Service.
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                  tls:
+                    default: {}
+                    description: |-
+                      TLS configures the HTTPS the API server serves, on port 8443 (or plain
+                      HTTP on 8080 when disabled).
+                    properties:
+                      enabled:
+                        default: true
+                        description: |-
+                          Enabled serves HTTPS. Turn it off only where something else encrypts
+                          traffic to the pods, such as a service mesh.
+                        type: boolean
+                      secretName:
+                        description: |-
+                          SecretName is a kubernetes.io/tls Secret (tls.crt, tls.key and
+                          optionally ca.crt) to serve, such as one cert-manager keeps renewed;
+                          the server picks up a renewed certificate without a restart. Job pods
+                          reach the API at <name>-api.<namespace>.svc and trust its ca.crt (or
+                          tls.crt), so the certificate must be valid for that name. Without it,
+                          the operator generates a self-signed ECDSA P-384 certificate in
+                          <name>-api-tls; delete that Secret to have it generated again.
+                        type: string
+                    type: object
+                  trustedProxies:
+                    description: |-
+                      TrustedProxies are the addresses or CIDRs of the ingress controller
+                      or load balancer in front of the API server: its pods' exact IPs, or
+                      the narrowest CIDR that holds only them. Only from these is
+                      X-Forwarded-For believed, so sign-in throttling can tell clients
+                      apart; without them, every client behind a proxy shares the proxy's
+                      address and limit. List only proxies that overwrite X-Forwarded-For,
+                      or clients can pick their own address. Never list a broad range such
+                      as the cluster's pod CIDR: job pods can reach the API server, and
+                      from an address in this list they could forge X-Forwarded-For. Pod
+                      IPs change as pods are rescheduled, so rather than exact IPs you can
+                      give the ingress controller a range of its own and list that: run it
+                      on dedicated nodes (tainted against other pods) and list their pod
+                      CIDRs, or give it a dedicated pod IP pool.
+                    items:
+                      pattern: ^[0-9a-fA-F:.]+(/[0-9]{1,3})?$
+                      type: string
+                    type: array
+                type: object
+              database:
+                default:
+                  managed: {}
+                description: Database is where all state is kept.
+                properties:
+                  external:
+                    description: ExternalDatabase is a PostgreSQL database the operator
+                      doesn't manage.
+                    properties:
+                      urlSecret:
+                        description: |-
+                          URLSecret holds the connection URL, e.g.
+                          postgres://user:password@host:5432/dispatch?sslmode=require.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    required:
+                    - urlSecret
+                    type: object
+                  managed:
+                    description: |-
+                      ManagedDatabase is a single PostgreSQL instance the operator runs in a
+                      StatefulSet. Its volume and generated password are kept when the
+                      DispatchOps is deleted. It has no backups or replication; use an external
+                      database where that matters.
+
+                      PostgreSQL serves TLS with a certificate the operator generates in
+                      <name>-postgres-tls, and runs as UID 999 (the Debian-based postgres
+                      images' postgres user) with a read-only root filesystem.
+                    properties:
+                      image:
+                        description: |-
+                          Image defaults to a digest-pinned PostgreSQL 17 image, which the
+                          operator's releases update. Another image must be Debian-based
+                          (postgres is UID 999), not the Alpine variant.
+                        type: string
+                      resources:
+                        description: |-
+                          Resources defaults to requests of 100m CPU and 256Mi of memory and a
+                          1Gi memory limit.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                      storageClassName:
+                        type: string
+                      storageSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 10Gi
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: set exactly one of external and managed
+                  rule: has(self.external) != has(self.managed)
+              encryptionKeySecret:
+                description: |-
+                  EncryptionKeySecret names a Secret whose "key" holds the credential
+                  encryption key (base64 of 32 bytes; `dispatch-ops gen-key` makes one),
+                  and optionally "oldKeys" (comma-separated) during a key rotation.
+                  Without it, the operator generates <name>-encryption-key. Losing the
+                  key loses every stored credential, so back it up; the operator never
+                  deletes it.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              externalURL:
+                description: |-
+                  ExternalURL is the server's URL as browsers reach it, e.g.
+                  https://dispatch.example.com. Single sign-on needs it.
+                pattern: ^https?://[^/]+(/.*)?$
+                type: string
+              image:
+                description: |-
+                  Image is the dispatch-ops server image. Defaults to the image the
+                  operator was released with. Changing it upgrades the installation:
+                  database migrations run first, then the API server and task manager
+                  roll out.
+                type: string
+              imagePullPolicy:
+                default: IfNotPresent
+                description: PullPolicy describes a policy for if/when to pull a container
+                  image
+                enum:
+                - Always
+                - IfNotPresent
+                - Never
+                type: string
+              imagePullSecrets:
+                items:
+                  description: |-
+                    LocalObjectReference contains enough information to let you locate the
+                    referenced object inside the same namespace.
+                  properties:
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              logLevel:
+                default: info
+                enum:
+                - debug
+                - info
+                - warn
+                - error
+                type: string
+              metrics:
+                default: {}
+                description: |-
+                  MetricsSpec configures the Prometheus metrics the API server and task
+                  manager serve at :9090/metrics, on a port of their own (named
+                  "metrics") that the API Service doesn't expose.
+                properties:
+                  enabled:
+                    default: true
+                    description: |-
+                      Enabled serves metrics, and adds prometheus.io/scrape annotations to
+                      the pods.
+                    type: boolean
+                type: object
+              networkPolicy:
+                default: {}
+                description: |-
+                  NetworkPolicy isolates the database, the servers' metrics ports and
+                  job pods with NetworkPolicies. They only take effect where the
+                  cluster's network plugin enforces NetworkPolicy.
+                properties:
+                  enabled:
+                    default: true
+                    type: boolean
+                  jobEgressExcept:
+                    description: |-
+                      JobEgressExcept are more CIDRs job pods may not connect to, such as
+                      the cluster's pod and service CIDRs (so jobs can't reach other
+                      services in the cluster), or internal networks jobs have no business
+                      reaching.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              oidc:
+                description: OIDCSpec configures single sign-on.
+                properties:
+                  clientID:
+                    minLength: 1
+                    type: string
+                  clientSecret:
+                    description: SecretKeySelector selects a key of a Secret.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  displayName:
+                    type: string
+                  groupsClaim:
+                    type: string
+                  issuer:
+                    minLength: 1
+                    type: string
+                  scopes:
+                    description: Scopes besides openid. Defaults to profile and email.
+                    items:
+                      type: string
+                    type: array
+                  usernameClaim:
+                    type: string
+                required:
+                - clientID
+                - issuer
+                type: object
+              retention:
+                default: {}
+                description: |-
+                  RetentionSpec is how long old data is kept. The task manager deletes
+                  what is older every hour.
+                properties:
+                  auditLog:
+                    description: |-
+                      AuditLog is how long audit log entries are kept. Unset or 0s keeps
+                      them forever.
+                    type: string
+                  jobs:
+                    description: |-
+                      Jobs is how long finished jobs (with their output and notifications)
+                      are kept, e.g. 2160h for 90 days. 0s keeps them forever. Defaults to
+                      90 days.
+                    type: string
+                type: object
+              secureCookies:
+                default: true
+                description: |-
+                  SecureCookies marks the session cookie Secure. Turn off only when
+                  browsers reach the server over plain HTTP.
+                type: boolean
+              sessionTTL:
+                description: SessionTTL is how long a browser session lasts, e.g.
+                  12h.
+                type: string
+              taskManager:
+                default: {}
+                description: |-
+                  TaskManagerSpec configures the task manager, which runs jobs as
+                  Kubernetes Jobs. Replicas elect one leader; more than one only adds a
+                  standby.
+                properties:
+                  jobNamespace:
+                    description: |-
+                      JobNamespace is where job pods run. It must exist. Defaults to the
+                      operator's default job namespace for this DispatchOps's namespace
+                      (its --default-job-namespaces; the Helm chart's is
+                      <namespace>-jobs), or without one, the DispatchOps namespace. Any
+                      other namespace must be opted in, since
+                      the task manager creates pods there, and a pod can mount any Secret
+                      in its namespace: mapped to this DispatchOps's namespace in the
+                      operator's --allowed-job-namespaces (the chart's
+                      allowedJobNamespaces) or, when the operator watches all namespaces,
+                      labeled dispatch-ops.io/allow-jobs-from=<this DispatchOps's
+                      namespace>. A namespace serves one installation: while another holds
+                      it (by its dispatch-ops-claim ConfigMap), or it hosts another
+                      DispatchOps, this one is refused (JobNamespaceInUse); one that was
+                      another installation's job namespace, or a deleted one's namespace,
+                      is refused until an administrator clears it (JobNamespaceReleased).
+                      It must enforce
+                      Pod Security
+                      (pod-security.kubernetes.io/enforce=restricted, or baseline) unless
+                      the operator was started with
+                      --allow-job-namespaces-without-pod-security.
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  jobResources:
+                    description: |-
+                      JobResources are the CPU and memory requests and limits of job pods.
+                      Unset, job pods request 100m CPU and 256Mi of memory and are limited
+                      to 2 CPUs and 2Gi. Set, it replaces all four: one it leaves out means
+                      no such request or limit.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  jobStartTimeout:
+                    description: JobStartTimeout is how long a job's pod may take
+                      to start, e.g. 10m.
+                    type: string
+                  jobTTL:
+                    description: JobTTL is how long finished Kubernetes Jobs are kept,
+                      e.g. 1h.
+                    type: string
+                  jobWorkSizeLimit:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      JobWorkSizeLimit caps the job pod's working directory (the project
+                      checkout and whatever the job writes there); the pod is evicted past
+                      it. Defaults to 4Gi.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  maxConcurrentJobs:
+                    default: 10
+                    description: MaxConcurrentJobs limits jobs waiting or running
+                      at once.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  replicas:
+                    default: 1
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  resources:
+                    description: ResourceRequirements describes the compute resource
+                      requirements.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                type: object
+            type: object
+          status:
+            description: DispatchOpsStatus is what the operator last observed.
+            properties:
+              conditions:
+                description: |-
+                  Conditions: DatabaseReady, Migrated, APIReady, TaskManagerReady and
+                  Ready (all of them), and Degraded while the encryption key is missing.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              encryptionKeyGenerated:
+                description: |-
+                  EncryptionKeyGenerated records that the operator generated the
+                  encryption key Secret. If that Secret goes missing later, the operator
+                  doesn't generate another, which would leave the stored credentials
+                  unreadable: it reports Degraded (EncryptionKeyMissing) until the
+                  Secret is restored.
+                type: boolean
+              image:
+                description: |-
+                  Image is the server image whose migrations have run, which the API
+                  server and task manager run (or are rolling out to).
+                type: string
+              jobNamespaces:
+                description: |-
+                  JobNamespaces are the namespaces, other than its own, where the
+                  installation holds (or is about to take) a claim: the operator's
+                  record of where to clean up, whatever the spec or the namespaces'
+                  opt-in say by then. Written by the operator only: don't grant
+                  tenants update on dispatchops/status.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              observedGeneration:
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,29 @@
+{{- /*
+The namespaces the operator works in (namespaces.create): the watched ones,
+their job namespaces and the installation's, labeled to enforce the
+restricted Pod Security Standard (the operator runs jobs only where Pod
+Security is enforced, and all of its pods comply). Kept on uninstall, with
+the installation, its encryption key and its database in them.
+
+A namespace that already exists and isn't this release's is left alone, so
+namespaces created beforehand don't break the install: label those yourself.
+*/ -}}
+{{- if .Values.namespaces.create }}
+{{- range $ns := include "dispatch-ops-operator.createdNamespaces" . | fromJsonArray }}
+{{- $existing := lookup "v1" "Namespace" "" $ns }}
+{{- $annotations := dig "metadata" "annotations" dict $existing }}
+{{- $ours := and (eq (get $annotations "meta.helm.sh/release-name") $.Release.Name) (eq (get $annotations "meta.helm.sh/release-namespace") $.Release.Namespace) }}
+{{- if or (not $existing) $ours }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "dispatch-ops-operator.installationLabels" $ | nindent 4 }}
+    pod-security.kubernetes.io/enforce: restricted
+  annotations:
+    helm.sh/resource-policy: keep
+{{- end }}
+{{- end }}
+{{- end }}

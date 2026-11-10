@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -808,6 +809,53 @@ func TestJobNamespaceMustOptIn(t *testing.T) {
 				if !e.get("dops-api", &api) {
 					t.Error("the API server wasn't deployed")
 				}
+			}
+		})
+	}
+}
+
+// A DispatchOps without spec.taskManager.jobNamespace runs its jobs in its
+// namespace's default job namespace, when the operator has one, and an
+// explicit job namespace wins over it.
+func TestDefaultJobNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		spec     string
+		defaults map[string]string
+		want     string
+	}{
+		{name: "default", defaults: map[string]string{ns: "jobs"}, want: "jobs"},
+		{name: "no default", want: ns},
+		{name: "another namespace's default", defaults: map[string]string{"team-b": "jobs"}, want: ns},
+		{name: "explicit wins", spec: ns, defaults: map[string]string{ns: "jobs"}, want: ns},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
+				TaskManager: v1alpha1.TaskManagerSpec{JobNamespace: tc.spec},
+			}}, jobsNamespace(""))
+			e.r.DefaultJobNamespaces = tc.defaults
+			// As the operator's main does: a default is also allowed.
+			e.r.AllowedJobNamespaces = map[string][]string{}
+			for src, jobNS := range tc.defaults {
+				e.r.AllowedJobNamespaces[jobNS] = append(e.r.AllowedJobNamespaces[jobNS], src)
+			}
+			e.r.Namespaces = []string{ns, "jobs"}
+			e.deploy()
+			cr := e.cr()
+			if cr.Spec.TaskManager.JobNamespace != tc.spec {
+				t.Errorf("spec.taskManager.jobNamespace = %q, want it left %q", cr.Spec.TaskManager.JobNamespace, tc.spec)
+			}
+			var tm appsv1.Deployment
+			if !e.get("dops-task-manager", &tm) {
+				t.Fatal("no task manager")
+			}
+			if v, _ := envValue(tm.Spec.Template.Spec.Containers[0], "DISPATCH_JOB_NAMESPACE"); v.Value != tc.want {
+				t.Errorf("job namespace = %q, want %q", v.Value, tc.want)
+			}
+			var role rbacv1.Role
+			inJobs := e.exists("jobs", foreignName(componentTaskManager), &role)
+			if inJobs != (tc.want == "jobs") || slices.Contains(cr.Status.JobNamespaces, "jobs") != inJobs {
+				t.Errorf("task manager Role in jobs %t, status.jobNamespaces %v", inJobs, cr.Status.JobNamespaces)
 			}
 		})
 	}

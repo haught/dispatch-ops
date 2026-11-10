@@ -89,7 +89,7 @@ and upgrades all of this from a single `DispatchOps` resource.
 
 ## Quick start
 
-### 1. Install the operator
+### 1. Install
 
 Pick a version from the [releases page](https://github.com/haught/dispatch-ops/releases):
 
@@ -102,33 +102,21 @@ helm install dispatch-ops-operator \
 The chart is also in a Helm repository:
 `helm repo add dispatch-ops https://haught.github.io/dispatch-ops`.
 
-### 2. Create an installation
-
-```sh
-kubectl create namespace dispatch-ops
-# Jobs run only where Pod Security is enforced (job pods comply).
-kubectl label namespace dispatch-ops pod-security.kubernetes.io/enforce=restricted
-kubectl apply -f - <<'EOF'
-apiVersion: dispatch-ops.io/v1alpha1
-kind: DispatchOps
-metadata:
-  name: dispatch-ops
-  namespace: dispatch-ops
-spec: {}
-EOF
-```
-
-`spec: {}` runs a PostgreSQL the operator manages, two API server replicas
-and a task manager that runs jobs in the same namespace. That is fine for
-trying it out; see [Going to production](#going-to-production) for more.
+This installs the operator in `dispatch-ops-system` and an installation in
+`dispatch-ops`, which runs its jobs in `dispatch-ops-jobs`. The chart creates
+both namespaces with Pod Security enforced, and the operator gets
+permissions in those two only. The installation runs a PostgreSQL the
+operator manages, two API server replicas and a task manager. That is fine
+for trying it out; see [Going to production](#going-to-production) for
+more.
 
 Wait until it is ready:
 
 ```sh
-kubectl -n dispatch-ops get dops
+kubectl -n dispatch-ops get dops -w
 ```
 
-### 3. Sign in
+### 2. Sign in
 
 The operator creates a local administrator, `admin`, with a generated
 password:
@@ -152,7 +140,7 @@ stay readable in the cluster:
 kubectl -n dispatch-ops delete secret dispatch-ops-admin-password
 ```
 
-### 4. Run your first job
+### 3. Run your first job
 
 1. Under **Execution environments**, add one named `ee-shell` with the image
    `ghcr.io/haught/dispatch-ops/ee-shell:<version>`.
@@ -166,40 +154,36 @@ run Ansible playbooks. The [user guide](docs/user-guide.md) covers each.
 
 ## Going to production
 
-Start from [deploy/examples/dispatchops.yaml](deploy/examples/dispatchops.yaml),
-a production-style installation, and create the Secrets and namespaces it
-names first. In short:
+Configure the installation in a values file passed to the chart
+(`installation.*`; see
+[Installing with the chart's values](docs/administration.md#installing-with-the-charts-values)).
+The defaults already limit the operator to the installation's namespace and
+run jobs in a namespace of their own. In short:
 
-- **Use an external, backed-up database** (`spec.database.external`).
-- **Provide and back up the encryption key** (`spec.encryptionKeySecret`).
+- **Use an external, backed-up database** (`installation.database`).
+- **Provide and back up the encryption key** (`installation.encryptionKey`).
   Without it, stored credentials can't be decrypted.
-- **Limit the operator** to the namespaces it manages, and **run jobs in a
-  separate namespace**, one per installation, never shared. Install the
-  chart with
-  `--set 'watchNamespaces={dispatch-ops}' --set 'allowedJobNamespaces.dispatch-jobs={dispatch-ops}'`
-  (each job namespace maps to the namespaces whose `DispatchOps` may use
-  it, and must not be watched itself), label the job namespace
-  `pod-security.kubernetes.io/enforce=restricted` (the operator requires
-  it), and set `spec.taskManager.jobNamespace`. Each namespace hosts one
-  installation; see
-  [One installation per namespace](docs/administration.md#operator-permissions).
+- **Keep one installation per namespace, with its own job namespace.** To
+  run several, list their namespaces in `watchNamespaces`; each gets a job
+  namespace, `<namespace>-jobs`. See
+  [Operator permissions](docs/administration.md#operator-permissions).
 - **Treat creating a `DispatchOps` as privileged.** It lets you create pods
   in its job namespace, Ingresses with any host and annotations, and
   `LoadBalancer` Services; see
   [Operator permissions](docs/administration.md#operator-permissions).
-- **Expose it through an ingress** (`spec.api.ingress`) with a proper
-  certificate, and set `spec.externalURL` and `spec.api.trustedProxies`
+- **Expose it through an ingress** (`installation.spec.api.ingress`) with a
+  proper certificate, and set `installation.externalURL` and
+  `installation.spec.api.trustedProxies`
   (the ingress controller pods' exact IPs, or a range only they use, such as
   dedicated nodes' pod CIDRs; never a range that includes job pods).
-- **Set up single sign-on** (`spec.oidc`) and map provider groups to teams.
+- **Set up single sign-on** (`installation.oidc`) and map provider groups to
+  teams.
 - **Review who can change what jobs run.** Some roles are as good as the
   credentials a job uses; see
   [Roles that amount to credential access](docs/user-guide.md#roles-that-amount-to-credential-access).
 
 The [administration guide](docs/administration.md) explains each of these,
-along with network isolation, TLS, sizing, monitoring and retention. The
-chart can also create the installation for you from its values; see
-[Installing with the chart's values](docs/administration.md#installing-with-the-charts-values).
+along with network isolation, TLS, sizing, monitoring and retention.
 
 ## Upgrading
 

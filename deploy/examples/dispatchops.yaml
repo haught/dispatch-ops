@@ -20,13 +20,14 @@ spec:
       secretName: dispatch-ops-api-tls
   taskManager:
     replicas: 2
-    # Opt it in first for this namespace: the chart's
-    # allowedJobNamespaces ({dispatch-jobs: [dispatch-ops]}), or (when the
-    # operator watches all namespaces) the label
-    # dispatch-ops.io/allow-jobs-from=dispatch-ops on the namespace. It must
-    # also be labeled pod-security.kubernetes.io/enforce=restricted, host no
-    # DispatchOps, and serve no other installation.
-    jobNamespace: dispatch-jobs
+    # The chart's default job namespace for dispatch-ops (its
+    # jobNamespaceSuffix), which it creates. Another must be opted in first
+    # for this namespace: the chart's allowedJobNamespaces, or (with
+    # watchAllNamespaces) the label dispatch-ops.io/allow-jobs-from=
+    # dispatch-ops on the namespace. It must also be labeled
+    # pod-security.kubernetes.io/enforce=restricted, host no DispatchOps,
+    # and serve no other installation.
+    jobNamespace: dispatch-ops-jobs
     maxConcurrentJobs: 20
   # Keep job pods away from in-cluster services as well as cloud metadata:
   # this cluster's pod and service CIDRs.

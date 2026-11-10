@@ -514,7 +514,7 @@ func TestJobPodSelectorMatchesTaskManagerLabels(t *testing.T) {
 }
 
 func TestJobDNSIsConfigurable(t *testing.T) {
-	in := install{DispatchOps: withDefaults(another(ns, "dops", "uid-1", t0, ""))}
+	in := install{DispatchOps: (&Reconciler{}).withDefaults(another(ns, "dops", "uid-1", t0, ""))}
 	np, err := in.jobNetworkPolicy(&JobDNS{CIDRs: []string{"169.254.20.10/32"}})
 	if err != nil {
 		t.Fatal(err)

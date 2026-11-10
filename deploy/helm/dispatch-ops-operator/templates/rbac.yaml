@@ -3,14 +3,14 @@ What the operator does in the namespaces it manages. It holds every
 permission it grants the task manager in a job namespace (jobs, pods,
 secrets, leases), since Kubernetes only lets it grant those.
 
-With watchNamespaces empty, that is a ClusterRole for every namespace:
-effectively cluster-admin over Secrets and workloads (see
-docs/administration.md, "Operator permissions"). With watchNamespaces set,
-it is a Role in each watched namespace and each job namespace in
-allowedJobNamespaces, and cluster-wide only `get` on those very namespaces
-(their Pod Security label), by name.
-Either way, its own leader election Lease is in a Role in the release
-namespace.
+By default, that is a Role in each watched namespace (watchNamespaces) and
+each job namespace (the default ones, <namespace><jobNamespaceSuffix>, and
+allowedJobNamespaces), and cluster-wide only `get` on those very namespaces
+(their Pod Security label), by name. With watchAllNamespaces, it is a
+ClusterRole for every namespace: effectively cluster-admin over Secrets and
+workloads (see docs/administration.md, "Operator permissions").
+Either way, it may update its own CRD (by name), and its own leader
+election Lease is in a Role in the release namespace.
 */ -}}
 {{- define "dispatch-ops-operator.rules" -}}
 - apiGroups: [dispatch-ops.io]
@@ -77,8 +77,7 @@ namespace.
 {{- $fullname := include "dispatch-ops-operator.fullname" . }}
 {{- $labels := include "dispatch-ops-operator.labels" . }}
 {{- $sa := include "dispatch-ops-operator.serviceAccountName" . }}
-{{- $_ := include "dispatch-ops-operator.allowedJobNamespaces" . }}
-{{- if not .Values.watchNamespaces }}
+{{- if .Values.watchAllNamespaces }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -170,6 +169,36 @@ subjects:
     name: {{ $sa }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
+---
+# The operator brings the DispatchOps CRD up to its version at startup:
+# Helm installs it from crds/ but never upgrades it. A patch can't create an
+# object named by resourceNames, so this is that one CRD only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-crd
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    resourceNames: [dispatchops.dispatch-ops.io]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-crd
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-crd
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
 ---
 # The operator's own leader election, in its namespace.
 apiVersion: rbac.authorization.k8s.io/v1

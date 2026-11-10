@@ -1,3 +1,4 @@
+{{- include "dispatch-ops-operator.validateNamespaces" . }}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
 {{- $serverTag := .Values.serverImage.tag | default .Chart.AppVersion }}
 apiVersion: apps/v1
@@ -40,9 +41,11 @@ spec:
             - --zap-log-level={{ .Values.logLevel }}
           env:
             - name: WATCH_NAMESPACES
-              value: {{ join "," .Values.watchNamespaces | quote }}
+              value: {{ include "dispatch-ops-operator.watchNamespaces" . | fromJsonArray | join "," | quote }}
             - name: ALLOWED_JOB_NAMESPACES
               value: {{ include "dispatch-ops-operator.allowedJobNamespaces" . | quote }}
+            - name: DEFAULT_JOB_NAMESPACES
+              value: {{ include "dispatch-ops-operator.defaultJobNamespacesFlag" . | quote }}
             - name: ALLOW_JOB_NAMESPACES_WITHOUT_POD_SECURITY
               value: {{ .Values.allowJobNamespacesWithoutPodSecurity | toString | quote }}
             - name: JOB_DNS_NAMESPACE_SELECTOR

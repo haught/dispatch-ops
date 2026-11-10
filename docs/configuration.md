@@ -69,7 +69,7 @@ defaults.
 |---|---|---|
 | `DISPATCH_RUNNER_API_URL` | (required) | The API URL as job pods reach it |
 | `DISPATCH_RUNNER_API_TLS_DIR` | | A directory holding the API's certificate Secret (`ca.crt` or `tls.crt`). Job pods trust it, besides the system's roots |
-| `DISPATCH_JOB_NAMESPACE` | `dispatch-jobs` | Namespace for job pods (and the leader Lease). It must serve only this installation |
+| `DISPATCH_JOB_NAMESPACE` | `dispatch-ops-jobs` | Namespace for job pods (and the leader Lease). It must serve only this installation |
 | `DISPATCH_INSTALLATION` | | Labels the Kubernetes objects the task manager creates (`dispatch-ops.io/installation`) and names its leader Lease; it deletes only Kubernetes Jobs with its own label or whose job is in its database, never one labeled for another installation whose job isn't. The operator sets it to the `DispatchOps`'s UID |
 | `DISPATCH_KUBE_CONTEXT` | | kubeconfig context; empty uses the in-cluster config if available |
 | `DISPATCH_MAX_CONCURRENT_JOBS` | `10` | Jobs waiting or running at once |

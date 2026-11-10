@@ -157,30 +157,54 @@ send HSTS too (for ingress-nginx, its default with TLS enabled).
 ## Operator permissions
 
 What the operator may do decides how much an attacker gains by compromising
-it, or by creating a `DispatchOps`:
+it, or by creating a `DispatchOps`. By default the chart uses three
+namespaces, each of which its values can change:
 
-- **Watching all namespaces** (`watchNamespaces` empty, the default), the
-  operator has a ClusterRole that can read and write every Secret, create
+| Namespace | Holds | Set by |
+|---|---|---|
+| `dispatch-ops-system` (the release's) | The operator | `helm install --namespace` |
+| `dispatch-ops` | The installation: API server, task manager, managed database and their Secrets | `watchNamespaces` (a list: the installation goes in the first) |
+| `dispatch-ops-jobs` | Job pods and job Secrets | `jobNamespaceSuffix`: each watched `<namespace>` gets `<namespace>-jobs` |
+
+The chart creates the watched namespaces and their job namespaces
+(`namespaces.create`), labeled to enforce the restricted Pod Security
+Standard, and keeps them when it is uninstalled. A namespace that already
+exists is left as it is; label it yourself (see Pod Security below).
+
+- **Watching some namespaces** (the default; `watchNamespaces`), the chart
+  gives the operator a Role in each of them and in each of their job
+  namespaces. Cluster-wide it gets only a ClusterRole,
+  `<release>-namespaces`, with `get` on exactly those namespaces (by
+  `resourceNames`), to read their Pod Security label, and
+  `<release>-crd`, with `get` and `patch` on the `DispatchOps` CRD alone,
+  to upgrade it (see [Upgrades](#upgrades)). The release namespace may be
+  none of these: the chart refuses, since a task manager there could start
+  pods as the operator's ServiceAccount, and so take over its permissions.
+  An empty `watchNamespaces` is refused too.
+- **Watching all namespaces** (`watchAllNamespaces: true`), the operator
+  has a ClusterRole that can read and write every Secret, create
   Deployments, StatefulSets and Jobs, and write Roles and RoleBindings in
   every namespace. That is effectively cluster-admin: whoever controls the
-  operator's pod or token controls the cluster. Use this mode on clusters
-  where only cluster admins administer Dispatch Ops.
-- **Watching some namespaces** (`watchNamespaces` set), the chart gives it a
-  Role in each of them and in each job namespace in
-  `allowedJobNamespaces`. Cluster-wide
-  it gets only the `DispatchOps` CRD and a ClusterRole,
-  `<release>-namespaces`, with `get` on exactly those namespaces (by
-  `resourceNames`), to read their Pod Security label. Prefer this in
-  production.
+  operator's pod or token controls the cluster. Use it only on clusters
+  where only cluster admins administer Dispatch Ops. The chart then knows
+  no job namespaces but `allowedJobNamespaces`, so installations run their
+  jobs in their own namespace unless they set
+  `spec.taskManager.jobNamespace`.
 - **Job namespaces.** The task manager creates Jobs, pods and Secrets in
   its job namespace, and the operator grants it that. A pod can mount any
   Secret in its namespace, so a `DispatchOps` may only use its own
-  namespace, or one that is opted in for its namespace: mapped to it in the
-  chart's `allowedJobNamespaces`
-  (`{dispatch-jobs: [dispatch-ops]}`; the operator's
-  `--allowed-job-namespaces=dispatch-jobs=dispatch-ops`, with `|` between
-  several namespaces), or, when the operator watches all namespaces,
-  labeled `dispatch-ops.io/allow-jobs-from=<the DispatchOps's namespace>`
+  namespace, its default job namespace, or one that is opted in for its
+  namespace. A `DispatchOps` without `spec.taskManager.jobNamespace` runs
+  its jobs in its namespace's default job namespace, `<namespace>-jobs`
+  with the chart (the operator's
+  `--default-job-namespaces=dispatch-ops=dispatch-ops-jobs`), or, with
+  `jobNamespaceSuffix: ""`, in its own namespace (see
+  [Separate job namespaces](#separate-job-namespaces)). Other namespaces
+  are opted in by mapping them to the namespaces allowed to use them in the
+  chart's `allowedJobNamespaces` (`{jobs-a: [team-a]}`; the operator's
+  `--allowed-job-namespaces=jobs-a=team-a`, with `|` between several
+  namespaces), or, when the operator watches all namespaces, by the label
+  `dispatch-ops.io/allow-jobs-from=<the DispatchOps's namespace>`
   (which takes rights to label namespaces). A `DispatchOps` in any other
   namespace may not use it. Otherwise the installation reports
   `TaskManagerReady=False` (`JobNamespaceNotAllowed`) and the task manager
@@ -190,8 +214,8 @@ it, or by creating a `DispatchOps`:
   objects its task manager created without the installation's labels
   (Secrets, Jobs, pods) may remain. The namespace then keeps a tombstone
   (see [Released namespaces](#released-namespaces)); to hand it to
-  someone else, delete and recreate it. A job namespace in
-  `allowedJobNamespaces` must not also be in `watchNamespaces`: the chart
+  someone else, delete and recreate it. A job namespace (a default one,
+  or one in `allowedJobNamespaces`) must not also be watched: the chart
   fails, and the operator refuses to start, rather than let one
   installation's task manager create pods next to another's encryption key
   and database Secrets. An entry without the namespaces allowed to use it
@@ -256,17 +280,17 @@ it, or by creating a `DispatchOps`:
   in the namespaces it holds claims in, so a pod labeled for it elsewhere
   can't hold up its deletion.
 - **Pod Security.** The operator runs jobs only in namespaces that enforce
-  the restricted (or baseline) Pod Security Standard. Label each job
-  namespace, including a `DispatchOps`'s own when it runs its jobs there:
+  the restricted (or baseline) Pod Security Standard. The chart labels the
+  namespaces it creates; label any other job namespace, including a
+  `DispatchOps`'s own when it runs its jobs there:
   `kubectl label namespace <namespace> pod-security.kubernetes.io/enforce=restricted`
   (job pods comply). Without it, the installation reports
   `TaskManagerReady=False` (`JobNamespacePodSecurity`) and the
   installation leaves the namespace as above, within five minutes of the
   label's removal. The chart's
   `allowJobNamespacesWithoutPodSecurity: true` lifts this, at the cost
-  below. The operator needs `get` on those namespaces; with
-  `watchNamespaces` set, the chart grants it for the watched and allowed
-  job namespaces only.
+  below. The operator needs `get` on those namespaces; unless it watches all
+  namespaces, the chart grants it for the watched and job namespaces only.
 - **Creating or editing a `DispatchOps`** lets you:
   - choose the server image, and so run any code with the task manager's
     permissions in its namespace and job namespace: create pods there, as
@@ -330,9 +354,10 @@ namespace:
 
 ```sh
 kubectl get configmaps -A -l dispatch-ops.io/released        # the tombstones
-kubectl delete namespace dispatch-jobs && kubectl create namespace dispatch-jobs
+kubectl delete namespace dispatch-ops-jobs && kubectl create namespace dispatch-ops-jobs
+kubectl label namespace dispatch-ops-jobs pod-security.kubernetes.io/enforce=restricted
 # or, once it is clean:
-kubectl delete configmap -n dispatch-jobs dispatch-ops-claim
+kubectl delete configmap -n dispatch-ops-jobs dispatch-ops-claim
 ```
 
 Whoever can write ConfigMaps in a namespace can delete its tombstone:
@@ -404,9 +429,9 @@ behind in a job namespace without replacing the tombstones above.
 
 ### Separate job namespaces
 
-A separate job namespace is safer than the default (the installation's own
-namespace): `kubectl create namespace dispatch-jobs`, label it for Pod
-Security, opt it in, and set `spec.taskManager.jobNamespace`. The task
+Each installation runs its jobs in a namespace of its own by default
+(`<namespace>-jobs`); `jobNamespaceSuffix: ""` runs them in the
+installation's namespace instead, which is less safe. The task
 manager's Role allows only `create` on Secrets: through the Kubernetes API
 it can't read, list, change or delete any Secret, its own job Secrets
 included (each is owned by its Job and deleted with it). But it creates
@@ -414,20 +439,17 @@ pods, and a pod can mount any Secret in its namespace. In a namespace of its own
 installation's other Secrets (the OIDC client secret, the administrator's
 initial password, the database password, the API's private key) are out of
 the reach of a compromised task manager. (It holds the encryption key and
-database URL either way, since it needs them.) It isn't the default because
-the namespace has to be created and opted in first. The task manager gets
+database URL either way, since it needs them.) The task manager gets
 only the public half of the API's certificate, never its private key.
 
 ## Installing with the chart's values
 
-Instead of applying a `DispatchOps` yourself, the chart can create the
-installation and its Secrets from the `installation` section of its values:
+The chart creates the installation (a `DispatchOps`) and its Secrets from
+the `installation` section of its values:
 
 ```yaml
 # lab-values.yaml
 installation:
-  enabled: true
-  namespace: dispatch-ops
   externalURL: https://dispatch.lab.example
   logLevel: info
   database:
@@ -458,11 +480,16 @@ the chart stays readable there, by anyone who can read Secrets in the
 chart's namespace, after you change or remove it. If you do pass values,
 keep them in a separate values file out of version control.
 
-The installation's namespace must exist. Helm can't create a `DispatchOps`
-in the same install that first creates its CRD, so on a new cluster run
-`helm upgrade --install` twice; the chart's notes say when. Uninstalling the
+The installation goes in the first of `watchNamespaces` unless
+`installation.namespace` names another watched namespace. Uninstalling the
 chart keeps the installation and its Secrets unless `installation.keep` is
-false.
+false, and always keeps the namespaces it created.
+
+With `installation.enabled: false`, create `DispatchOps` resources yourself,
+one per watched namespace;
+[deploy/examples/dispatchops.yaml](../deploy/examples/dispatchops.yaml) is a
+production-style one. The chart's `installation` values take the same
+settings, with `installation.spec` for any other field.
 
 ## What the operator creates
 
@@ -598,6 +625,14 @@ out. If migrations fail, the installation stays on the old image with
 
 Migrations only go forward, so going back to an older image after an upgrade
 is not supported. Back up the database before upgrading.
+
+Helm installs the `DispatchOps` CRD from the chart's `crds/` directory, but
+never upgrades it. The operator applies its own version of the CRD when it
+starts, unless a newer operator has already (it records its version in the
+CRD's `dispatch-ops.io/operator-version` annotation), so rolling back the
+chart doesn't take the CRD back. It may only get and patch that CRD, not
+create it: with `helm install --skip-crds`, apply the chart's `crds/`
+yourself first.
 
 Before upgrading to an operator that requires Pod Security on job
 namespaces, label them (see [Operator permissions](#operator-permissions));

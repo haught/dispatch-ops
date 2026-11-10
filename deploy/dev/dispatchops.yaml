@@ -2,7 +2,7 @@
 # `tilt up` (`make dev`) applies it and fills in what comes from .env: the
 # server image it builds (spec.image), the Secrets below, and, when
 # DISPATCH_OIDC_ISSUER is set, spec.externalURL and spec.oidc. Jobs run in the
-# dispatch-jobs namespace.
+# dispatch-ops-jobs namespace, its default job namespace.
 apiVersion: dispatch-ops.io/v1alpha1
 kind: DispatchOps
 metadata:
@@ -14,7 +14,6 @@ spec:
   api:
     replicas: 1
   taskManager:
-    jobNamespace: dispatch-jobs
     maxConcurrentJobs: 5
   # The Postgres outside the cluster that DISPATCH_DATABASE_URL names (see
   # `make db-init`). The Tiltfile creates this Secret from .env.

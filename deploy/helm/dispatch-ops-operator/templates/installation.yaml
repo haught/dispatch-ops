@@ -1,14 +1,14 @@
 {{- /*
-The optional DispatchOps installation (installation.* in values.yaml) and the
-Secrets it names. The DispatchOps renders only once the API server knows its
-kind: Helm can't create it in the same install that first creates the CRD.
+The DispatchOps installation (installation.* in values.yaml) and the Secrets
+it names. Helm installs the CRD from crds/ first, so one install creates it.
 */ -}}
 {{- if .Values.installation.enabled }}
 {{- $i := .Values.installation }}
 {{- $name := required "installation.name is required" $i.name }}
 {{- $ns := include "dispatch-ops-operator.installationNamespace" . }}
 
-{{- if and .Values.watchNamespaces (not (has $ns .Values.watchNamespaces)) }}
+{{- $watched := include "dispatch-ops-operator.watchNamespaces" . | fromJsonArray }}
+{{- if and $watched (not (has $ns $watched)) }}
 {{- fail (printf "installation.namespace %q is not in watchNamespaces, so the operator would not run it" $ns) }}
 {{- end }}
 {{- if and $i.database.url $i.database.existingSecret }}
@@ -131,7 +131,6 @@ stringData:
   clientSecret: {{ $i.oidc.clientSecret | quote }}
 {{- end }}
 
-{{- if .Capabilities.APIVersions.Has "dispatch-ops.io/v1alpha1/DispatchOps" }}
 ---
 apiVersion: dispatch-ops.io/v1alpha1
 kind: DispatchOps
@@ -149,5 +148,4 @@ spec:
   {{- toYaml $spec | nindent 2 }}
   {{- else }} {}
   {{- end }}
-{{- end }}
 {{- end }}

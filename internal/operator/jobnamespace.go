@@ -181,7 +181,7 @@ func (r *Reconciler) enqueueJobNamespaceUsers(ctx context.Context, q workqueue.T
 	namespaces, self := map[string]bool{}, map[types.UID]bool{}
 	for _, o := range objs {
 		if d, ok := o.(*v1alpha1.DispatchOps); ok {
-			namespaces[install{DispatchOps: d}.jobNamespace()] = true
+			namespaces[install{DispatchOps: r.withDefaults(d)}.jobNamespace()] = true
 			namespaces[d.Namespace] = true
 			self[d.UID] = true
 		}
@@ -193,7 +193,7 @@ func (r *Reconciler) enqueueJobNamespaceUsers(ctx context.Context, q workqueue.T
 	}
 	for i := range list.Items {
 		d := &list.Items[i]
-		if !self[d.UID] && namespaces[install{DispatchOps: d}.jobNamespace()] {
+		if !self[d.UID] && namespaces[install{DispatchOps: r.withDefaults(d)}.jobNamespace()] {
 			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: d.Namespace, Name: d.Name}})
 		}
 	}
@@ -408,7 +408,7 @@ func (r *Reconciler) finalize(ctx context.Context, cr *v1alpha1.DispatchOps) (ct
 	if !controllerutil.ContainsFinalizer(cr, finalizer) {
 		return ctrl.Result{}, nil
 	}
-	pending, err := r.revokeJobAccess(ctx, cr, install{DispatchOps: withDefaults(cr)})
+	pending, err := r.revokeJobAccess(ctx, cr, install{DispatchOps: r.withDefaults(cr)})
 	if err != nil {
 		return ctrl.Result{}, err
 	}

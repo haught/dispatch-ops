@@ -18,7 +18,7 @@
 CONTEXT = 'kind-dispatch-ops'
 NAMESPACE = 'dispatch-ops'
 OPERATOR_NAMESPACE = 'dispatch-ops-system'
-JOB_NAMESPACE = 'dispatch-jobs'
+JOB_NAMESPACE = 'dispatch-ops-jobs'
 CHART = 'deploy/helm/dispatch-ops-operator'
 
 if k8s_context() != CONTEXT:
@@ -119,17 +119,22 @@ k8s_yaml(helm(CHART, name='dispatch-ops-operator', namespace=OPERATOR_NAMESPACE,
     # images it builds by these local names.
     'image.repository=dispatch-ops-operator',
     'serverImage.repository=dispatch-ops',
-    # deploy/dev/dispatchops.yaml runs its jobs there.
-    'allowedJobNamespaces.%s={%s}' % (JOB_NAMESPACE, NAMESPACE),
+    # Tilt applies deploy/dev/dispatchops.yaml, with what .env holds, and
+    # makes the namespaces above. The chart's defaults watch NAMESPACE and
+    # run its jobs in JOB_NAMESPACE (its <namespace>-jobs).
+    'installation.enabled=false',
+    'namespaces.create=false',
 ]))
 k8s_resource(
     'dispatch-ops-operator',
     objects=[
         'dispatchops.dispatch-ops.io:customresourcedefinition',
         'dispatch-ops-operator:serviceaccount',
-        'dispatch-ops-operator:clusterrole',
-        'dispatch-ops-operator:clusterrolebinding',
-    ],
+        'dispatch-ops-operator-namespaces:clusterrole',
+        'dispatch-ops-operator-namespaces:clusterrolebinding',
+        'dispatch-ops-operator-crd:clusterrole',
+        'dispatch-ops-operator-crd:clusterrolebinding',
+    ] + ['dispatch-ops-operator:%s:%s' % (kind, ns) for kind in ['role', 'rolebinding'] for ns in [NAMESPACE, JOB_NAMESPACE]],
     resource_deps=['namespaces', 'operator-compile'],
     labels=['cluster'],
 )

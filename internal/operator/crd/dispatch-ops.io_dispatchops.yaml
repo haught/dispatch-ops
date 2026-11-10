@@ -568,7 +568,10 @@ spec:
                   jobNamespace:
                     description: |-
                       JobNamespace is where job pods run. It must exist. Defaults to the
-                      DispatchOps namespace. Any other namespace must be opted in, since
+                      operator's default job namespace for this DispatchOps's namespace
+                      (its --default-job-namespaces; the Helm chart's is
+                      <namespace>-jobs), or without one, the DispatchOps namespace. Any
+                      other namespace must be opted in, since
                       the task manager creates pods there, and a pod can mount any Secret
                       in its namespace: mapped to this DispatchOps's namespace in the
                       operator's --allowed-job-namespaces (the chart's

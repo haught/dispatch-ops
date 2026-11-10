@@ -208,7 +208,7 @@ func Load() (Config, error) {
 			DisplayName:   getenv("DISPATCH_OIDC_DISPLAY_NAME", "Single sign-on"),
 		},
 		TaskManager: TaskManager{
-			Namespace:       getenv("DISPATCH_JOB_NAMESPACE", "dispatch-jobs"),
+			Namespace:       getenv("DISPATCH_JOB_NAMESPACE", "dispatch-ops-jobs"),
 			Installation:    os.Getenv("DISPATCH_INSTALLATION"),
 			KubeContext:     os.Getenv("DISPATCH_KUBE_CONTEXT"),
 			RunnerAPIURL:    strings.TrimRight(os.Getenv("DISPATCH_RUNNER_API_URL"), "/"),

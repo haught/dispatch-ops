@@ -1,28 +1,33 @@
 The Dispatch Ops operator is running in {{ .Release.Namespace }}. It runs
 {{ .Values.serverImage.repository }}:{{ .Values.serverImage.tag | default .Chart.AppVersion }} for DispatchOps resources that don't name an image.
 {{- $ns := include "dispatch-ops-operator.installationNamespace" . }}
+{{- $defaults := include "dispatch-ops-operator.defaultJobNamespaces" . | fromJson }}
+{{- if .Values.watchAllNamespaces }}
+
+It manages DispatchOps in every namespace, with cluster-wide permissions.
+{{- else }}
+
+It manages DispatchOps in {{ include "dispatch-ops-operator.watchNamespaces" . | fromJsonArray | join ", " }}.
+{{- end }}
 {{- if not .Values.allowJobNamespacesWithoutPodSecurity }}
 
-Job namespaces (by default each DispatchOps's own namespace) must enforce Pod
-Security, or the operator won't run the task manager there:
+Job namespaces must enforce Pod Security, or the operator won't run the task
+manager there.
+{{- if .Values.namespaces.create }} The chart labels the namespaces it creates; one that
+existed before needs
+
+  kubectl label namespace <namespace> pod-security.kubernetes.io/enforce=restricted
+{{- else }} Label each:
 
   kubectl label namespace <namespace> pod-security.kubernetes.io/enforce=restricted
 {{- end }}
+{{- end }}
 {{- if .Values.installation.enabled }}
-{{- if .Capabilities.APIVersions.Has "dispatch-ops.io/v1alpha1/DispatchOps" }}
 
-It runs the installation {{ .Values.installation.name }} in {{ $ns }}. Follow it with
+It runs the installation {{ .Values.installation.name }} in {{ $ns }}
+{{- with get $defaults $ns }}, with its jobs in {{ . }}{{ end }}. Follow it with
 
   kubectl get dispatchops -n {{ $ns }} -w
-{{- else }}
-
-The DispatchOps CRD was new to this cluster, so Helm couldn't create the
-installation {{ .Values.installation.name }} yet. Create it with
-
-  helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reuse-values
-
-then follow it with `kubectl get dispatchops -n {{ $ns }} -w`.
-{{- end }}
 {{- if not (or .Values.installation.encryptionKey.key .Values.installation.encryptionKey.existingSecret) }}
 
 The operator generates the encryption key in the
@@ -41,7 +46,9 @@ serve your own, such as a cert-manager Certificate's.
 {{- end }}
 {{- if not .Values.installation.spec.admin }}
 
-The administrator's password is in the {{ .Values.installation.name }}-admin-password Secret.
+The administrator's password is in the {{ .Values.installation.name }}-admin-password Secret:
+
+  kubectl -n {{ $ns }} get secret {{ .Values.installation.name }}-admin-password -o jsonpath='{.data.password}' | base64 -d
 {{- end }}
 {{- else }}
 
@@ -52,11 +59,10 @@ Create an installation, e.g. with an operator-managed database:
   kind: DispatchOps
   metadata:
     name: dispatch-ops
-    namespace: dispatch-ops
+    namespace: {{ $ns }}
   spec: {}
   YAML
 
-or set installation.enabled in the chart's values. Follow it with
-`kubectl get dispatchops -n dispatch-ops -w`. The administrator's password is
-in the <name>-admin-password Secret.
+Follow it with `kubectl get dispatchops -n {{ $ns }} -w`. The administrator's
+password is in the <name>-admin-password Secret.
 {{- end }}
