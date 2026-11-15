@@ -398,11 +398,12 @@ paths:
     post:
       operationId: createUser
       tags: [users]
-      summary: Create a local user
+      summary: Create a user
       description: |
         System administrators only. Local users sign in with a password; they
         are mainly for automation (service accounts). OIDC users are created
-        when they first sign in.
+        when they first sign in, or can be added here beforehand, to give
+        them roles and teams in advance.
       requestBody:
         required: true
         content:
@@ -3113,7 +3114,7 @@ components:
 
     User:
       type: object
-      required: [id, username, displayName, email, authSource, isAdmin, isAuditor, isActive, createdAt, lastLoginAt]
+      required: [id, username, displayName, email, authSource, isAdmin, isAuditor, isActive, oidcPending, createdAt, lastLoginAt]
       properties:
         id:
           type: string
@@ -3136,6 +3137,11 @@ components:
         isActive:
           type: boolean
           description: Inactive users can't sign in, and their API tokens don't work
+        oidcPending:
+          type: boolean
+          description: |
+            A single sign-on user an administrator added who hasn't signed in
+            yet. Whoever first signs in with this username becomes this user.
         createdAt:
           type: string
           format: date-time
@@ -3233,9 +3239,18 @@ components:
 
     UserCreate:
       type: object
-      required: [username, password]
+      required: [username]
       additionalProperties: false
       properties:
+        authSource:
+          type: string
+          enum: [local, oidc]
+          default: local
+          description: |
+            `local` users sign in with `password`, which is required. `oidc`
+            users have none: the user is pending until someone signs in
+            through the provider with this username, and that takes it over.
+            Needs single sign-on to be configured.
         username:
           $ref: "#/components/schemas/Username"
         displayName:
@@ -3245,7 +3260,9 @@ components:
           type: string
           maxLength: 255
         password:
-          $ref: "#/components/schemas/Password"
+          allOf:
+            - $ref: "#/components/schemas/Password"
+          description: Local users only, and required for them
 
     UserUpdate:
       type: object
@@ -3254,7 +3271,7 @@ components:
         username:
           allOf:
             - $ref: "#/components/schemas/Username"
-          description: Local users only
+          description: Local users, and single sign-on users who haven't signed in yet
         displayName:
           type: string
           maxLength: 255

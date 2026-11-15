@@ -54,6 +54,19 @@ then `email`, then the subject), and their display name and email from `name`
 and `email`; all three are refreshed at each sign-in. A username already used
 by another account is refused.
 
+An administrator can also add a single sign-on user beforehand, on the Users
+page, to grant them roles and put them in teams before they arrive. The user
+shows as awaiting first sign-in. Whoever first signs in through the provider
+with that username (compared without regard to case) becomes that user, and
+from then on is recognised by issuer and subject like any other. Enter the
+username exactly as the provider's username claim sends it; it can be
+corrected until the first sign-in.
+
+By default anyone the provider signs in gets an account. To let only users
+an administrator added sign in, set `spec.oidc.autoCreateUsers: false`
+(`DISPATCH_OIDC_AUTO_CREATE_USERS=false`); everyone else is turned away at
+the sign-in page.
+
 Teams list provider groups. At each sign-in a user joins the teams that list
 one of the groups in their groups claim (default `groups`), and leaves the
 teams they joined that way if they no longer have it. Members added by an
@@ -66,8 +79,8 @@ The provider is contacted on the first sign-in, not at startup, so the API
 keeps serving local users, tokens and jobs while it is unreachable. Signing
 out ends the Dispatch Ops session only, not the provider's.
 
-To make a single sign-on user an administrator after their first sign-in,
-run `dispatch-ops user grant-admin <username>` in an API pod, or grant
+To make a single sign-on user an administrator, once they have signed in or
+been added, run `dispatch-ops user grant-admin <username>` in an API pod, or grant
 `system_admin` to a team mapped from a provider group.
 
 ## Access control

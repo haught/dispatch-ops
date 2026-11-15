@@ -713,6 +713,9 @@ func (in install) apiEnv() []corev1.EnvVar {
 				env = append(env, corev1.EnvVar{Name: kv[0], Value: kv[1]})
 			}
 		}
+		if o.AutoCreateUsers != nil {
+			env = append(env, corev1.EnvVar{Name: "DISPATCH_OIDC_AUTO_CREATE_USERS", Value: strconv.FormatBool(*o.AutoCreateUsers)})
+		}
 	}
 	return env
 }

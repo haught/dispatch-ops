@@ -30,6 +30,7 @@
 	let tokens = $state<ApiToken[]>([]);
 	let error = $state('');
 
+	let username = $state('');
 	let displayName = $state('');
 	let email = $state('');
 	let newPassword = $state('');
@@ -59,6 +60,7 @@
 			return;
 		}
 		user = data;
+		username = data.username;
 		displayName = data.displayName;
 		email = data.email;
 		const t = await api.GET('/api/v1/teams', { params: { query: { userId: id, limit: 500 } } });
@@ -81,6 +83,7 @@
 	});
 
 	async function update(body: {
+		username?: string;
 		displayName?: string;
 		email?: string;
 		isActive?: boolean;
@@ -101,7 +104,9 @@
 
 	async function saveProfile(event: SubmitEvent) {
 		event.preventDefault();
-		await update({ displayName, email });
+		// Only a single sign-on user who hasn't signed in yet can be renamed
+		// here: after that the provider names them.
+		await update(user?.oidcPending ? { username, displayName, email } : { displayName, email });
 	}
 
 	async function setPassword(event: SubmitEvent) {
@@ -163,6 +168,7 @@
 	<h1>
 		{user.username}
 		{#if !user.isActive}<span class="badge warn">deactivated</span>{/if}
+		{#if user.oidcPending}<span class="badge">awaiting first sign-in</span>{/if}
 	</h1>
 	<p class="muted">
 		{user.authSource === 'oidc' ? 'Single sign-on user' : 'Local user'} · created {fmtTime(
@@ -176,10 +182,21 @@
 		{#if isAdmin}
 			<section class="card">
 				<h2>Profile</h2>
-				{#if user.authSource === 'oidc'}
+				{#if user.oidcPending}
+					<p class="muted small">
+						Whoever first signs in through the provider with this username becomes this user. The
+						provider then sets the display name and email at each sign-in.
+					</p>
+				{:else if user.authSource === 'oidc'}
 					<p class="muted small">The provider updates these at each sign-in.</p>
 				{/if}
 				<form onsubmit={saveProfile} class="form-grid">
+					{#if user.oidcPending}
+						<label>
+							Username
+							<input bind:value={username} required pattern="\S+" autocomplete="off" />
+						</label>
+					{/if}
 					<label>Display name <input bind:value={displayName} /></label>
 					<label>Email <input type="email" bind:value={email} /></label>
 					<label><button type="submit">Save</button></label>

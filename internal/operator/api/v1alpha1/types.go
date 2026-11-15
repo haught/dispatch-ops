@@ -383,6 +383,11 @@ type OIDCSpec struct {
 	GroupsClaim string `json:"groupsClaim,omitempty"`
 	// +optional
 	DisplayName string `json:"displayName,omitempty"`
+	// AutoCreateUsers gives anyone the provider signs in an account when
+	// they first sign in. Set it to false to let only users an
+	// administrator added sign in. Defaults to true.
+	// +optional
+	AutoCreateUsers *bool `json:"autoCreateUsers,omitempty"`
 }
 
 // DispatchOpsStatus is what the operator last observed.

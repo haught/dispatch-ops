@@ -316,7 +316,8 @@ func TestExternalDatabaseAndSettings(t *testing.T) {
 		ExternalURL:         "https://dispatch.example.com",
 		OIDC: &v1alpha1.OIDCSpec{
 			Issuer: "https://idp.example.com", ClientID: "dispatch", Scopes: []string{"profile", "groups"},
-			ClientSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "oidc"}, Key: "secret"},
+			AutoCreateUsers: new(false),
+			ClientSecret:    &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "oidc"}, Key: "secret"},
 		},
 		API: v1alpha1.APISpec{Ingress: &v1alpha1.IngressSpec{Host: "dispatch.example.com", TLSSecretName: "tls"}},
 		Retention: v1alpha1.RetentionSpec{
@@ -353,6 +354,7 @@ func TestExternalDatabaseAndSettings(t *testing.T) {
 	for name, want := range map[string]string{
 		"DISPATCH_EXTERNAL_URL": "https://dispatch.example.com", "DISPATCH_OIDC_ISSUER": "https://idp.example.com",
 		"DISPATCH_OIDC_SCOPES": "profile,groups", "DISPATCH_SECURE_COOKIES": "true",
+		"DISPATCH_OIDC_AUTO_CREATE_USERS": "false",
 	} {
 		if v, _ := envValue(c, name); v.Value != want {
 			t.Errorf("%s = %q, want %q", name, v.Value, want)

@@ -49,7 +49,10 @@ type Handlers struct {
 	// Hub wakes live job streams; it must be running (see jobstream.Hub.Run).
 	Hub *jobstream.Hub
 	// OIDC signs users in with single sign-on; nil if it isn't configured.
-	OIDC          *oidc.Provider
+	OIDC *oidc.Provider
+	// OIDCAddedOnly refuses single sign-on by anyone an administrator hasn't
+	// added as a user; otherwise they get an account when they first sign in.
+	OIDCAddedOnly bool
 	Log           *slog.Logger
 	SessionTTL    time.Duration
 	SecureCookies bool
@@ -452,6 +455,7 @@ func toAPIUser(u store.User) apigen.User {
 		IsAdmin:     u.IsAdmin,
 		IsAuditor:   u.IsAuditor,
 		IsActive:    u.IsActive,
+		OidcPending: u.OIDCPending,
 		CreatedAt:   u.CreatedAt,
 		LastLoginAt: u.LastLoginAt,
 	}

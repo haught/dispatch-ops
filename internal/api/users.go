@@ -29,13 +29,31 @@ func (h *Handlers) CreateUser(ctx context.Context, req apigen.CreateUserRequestO
 		return nil, err
 	}
 	b := req.Body
-	hash, err := auth.HashPassword(b.Password)
-	if err != nil {
-		return nil, err
+	var u store.User
+	var err error
+	switch source := deref(b.AuthSource); source {
+	case apigen.UserCreateAuthSourceOidc:
+		if b.Password != nil {
+			return nil, badRequest("single sign-on users have no password")
+		}
+		if h.OIDC == nil {
+			return nil, badRequest("single sign-on is not configured")
+		}
+		u, err = h.Store.CreateOIDCUser(ctx, store.NewOIDCUser{
+			Username: b.Username, DisplayName: deref(b.DisplayName), Email: deref(b.Email),
+		})
+	default:
+		if b.Password == nil {
+			return nil, badRequest("a local user needs a password")
+		}
+		var hash string
+		if hash, err = auth.HashPassword(*b.Password); err != nil {
+			return nil, err
+		}
+		u, err = h.Store.CreateLocalUser(ctx, store.NewLocalUser{
+			Username: b.Username, DisplayName: deref(b.DisplayName), Email: deref(b.Email), PasswordHash: hash,
+		})
 	}
-	u, err := h.Store.CreateLocalUser(ctx, store.NewLocalUser{
-		Username: b.Username, DisplayName: deref(b.DisplayName), Email: deref(b.Email), PasswordHash: hash,
-	})
 	if errors.Is(err, store.ErrConflict) {
 		return nil, conflict("the username %q is taken", b.Username)
 	}
@@ -86,8 +104,13 @@ func (h *Handlers) UpdateUser(ctx context.Context, req apigen.UpdateUserRequestO
 		keep = p.TokenID
 	}
 	u, err := h.Store.UpdateUser(ctx, req.UserId, keep, func(f *store.UserFields) error {
-		if f.AuthSource != "local" && (b.Username != nil || b.Password != nil) {
-			return badRequest("single sign-on users get their username from the provider and have no password")
+		if f.AuthSource != "local" && b.Password != nil {
+			return badRequest("single sign-on users have no password")
+		}
+		// Until a single sign-on user first signs in, their username is
+		// what an administrator typed, and may need correcting.
+		if f.AuthSource != "local" && !f.OIDCPending && b.Username != nil {
+			return badRequest("single sign-on users get their username from the provider")
 		}
 		setIf(&f.Username, b.Username)
 		setIf(&f.DisplayName, b.DisplayName)

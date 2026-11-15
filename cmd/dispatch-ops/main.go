@@ -153,7 +153,8 @@ func serve() error {
 			Issuer: o.Issuer, ClientID: o.ClientID, ClientSecret: o.ClientSecret, RedirectURL: cfg.OIDCRedirectURL(),
 			Scopes: o.Scopes, UsernameClaim: o.UsernameClaim, GroupsClaim: o.GroupsClaim, DisplayName: o.DisplayName,
 		})
-		log.Info("single sign-on enabled", "issuer", o.Issuer, "redirect_url", cfg.OIDCRedirectURL())
+		log.Info("single sign-on enabled", "issuer", o.Issuer, "redirect_url", cfg.OIDCRedirectURL(),
+			"auto_create_users", o.AutoCreateUsers)
 	}
 
 	apiHandler, err := api.NewHandler(&api.Handlers{
@@ -161,6 +162,7 @@ func serve() error {
 		Vault:         credentials.Vault{Keys: keys},
 		Hub:           hub,
 		OIDC:          sso,
+		OIDCAddedOnly: !cfg.OIDC.AutoCreateUsers,
 		Log:           log,
 		SessionTTL:    cfg.SessionTTL,
 		SecureCookies: cfg.SecureCookies,
@@ -503,7 +505,7 @@ func grantAdmin(username string) error {
 	st := store.New(pool)
 	u, err := st.GetUserByUsername(ctx, username)
 	if errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("no user %q (single sign-on users exist once they have signed in)", username)
+		return fmt.Errorf("no user %q (single sign-on users exist once they have signed in or an administrator has added them)", username)
 	}
 	if err != nil {
 		return err

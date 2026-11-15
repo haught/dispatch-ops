@@ -21,18 +21,21 @@ type User struct {
 	IsAdmin      bool
 	IsAuditor    bool
 	IsActive     bool
-	CreatedAt    time.Time
-	LastLoginAt  *time.Time
+	// OIDCPending is true for a single sign-on user an administrator added
+	// who hasn't signed in yet, so has no issuer and subject.
+	OIDCPending bool
+	CreatedAt   time.Time
+	LastLoginAt *time.Time
 }
 
 const userColumns = `u.id, u.username, u.display_name, u.email, u.auth_source, u.password_hash,
 	EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.resource_type IS NULL AND r.role = 'system_admin'),
 	EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.resource_type IS NULL AND r.role = 'auditor'),
-	u.is_active, u.created_at, u.last_login_at`
+	u.is_active, u.auth_source = 'oidc' AND u.oidc_subject IS NULL, u.created_at, u.last_login_at`
 
 func (u *User) scanTargets() []any {
 	return []any{&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.AuthSource, &u.PasswordHash,
-		&u.IsAdmin, &u.IsAuditor, &u.IsActive, &u.CreatedAt, &u.LastLoginAt}
+		&u.IsAdmin, &u.IsAuditor, &u.IsActive, &u.OIDCPending, &u.CreatedAt, &u.LastLoginAt}
 }
 
 // NewLocalUser holds the fields for creating a password-based user.
@@ -67,6 +70,30 @@ func (s *Store) CreateLocalUser(ctx context.Context, in NewLocalUser) (User, err
 		return err
 	})
 	return out, err
+}
+
+// NewOIDCUser holds the fields for adding a single sign-on user before they
+// first sign in.
+type NewOIDCUser struct {
+	// Username is the username the provider will send for the user.
+	Username    string
+	DisplayName string
+	Email       string
+}
+
+// CreateOIDCUser inserts a pending single sign-on user, which the first
+// sign-in with that username claims (see SignInOIDCUser). It returns
+// ErrConflict if the username is taken, compared case-insensitively.
+func (s *Store) CreateOIDCUser(ctx context.Context, in NewOIDCUser) (User, error) {
+	var u User
+	err := s.pool.QueryRow(ctx, `
+		WITH u AS (
+			INSERT INTO users (username, display_name, email, auth_source)
+			VALUES ($1, $2, $3, 'oidc') RETURNING *
+		)
+		SELECT `+userColumns+` FROM u`,
+		in.Username, in.DisplayName, in.Email).Scan(u.scanTargets()...)
+	return u, mapErr(err)
 }
 
 func grantSystemAdmin(ctx context.Context, db querier, userID uuid.UUID) error {
@@ -118,6 +145,7 @@ type UserFields struct {
 	Email        string
 	IsActive     bool
 	AuthSource   string // read-only
+	OIDCPending  bool   // read-only; see User.OIDCPending
 	PasswordHash *string
 }
 
@@ -130,9 +158,10 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, keepToken uuid.UUI
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var f UserFields
 		err := tx.QueryRow(ctx, `
-			SELECT username, display_name, email, is_active, auth_source, password_hash
+			SELECT username, display_name, email, is_active, auth_source,
+				auth_source = 'oidc' AND oidc_subject IS NULL, password_hash
 			FROM users WHERE id = $1 FOR UPDATE`, id).
-			Scan(&f.Username, &f.DisplayName, &f.Email, &f.IsActive, &f.AuthSource, &f.PasswordHash)
+			Scan(&f.Username, &f.DisplayName, &f.Email, &f.IsActive, &f.AuthSource, &f.OIDCPending, &f.PasswordHash)
 		if err != nil {
 			return mapErr(err)
 		}
@@ -196,11 +225,20 @@ type OIDCIdentity struct {
 	Groups []string
 }
 
-// SignInOIDCUser finds the user with id's issuer and subject, or creates
-// one, and updates their profile and OIDC team memberships from id. The
-// username is only changed if the new one is free. It returns ErrConflict
-// if a new user's username is taken. The caller must check IsActive.
-func (s *Store) SignInOIDCUser(ctx context.Context, id OIDCIdentity) (User, error) {
+// ErrNotProvisioned means a single sign-on user has no account and accounts
+// aren't created at sign-in.
+var ErrNotProvisioned = errors.New("user has not been added")
+
+// SignInOIDCUser finds the user with id's issuer and subject and updates
+// their profile and OIDC team memberships from id. The username is only
+// changed if the new one is free.
+//
+// Someone signing in for the first time takes over the pending user with
+// their username (see CreateOIDCUser), which gets their issuer and subject.
+// If there is none, a user is created if allowCreate, and ErrNotProvisioned
+// is returned otherwise. It returns ErrConflict if a new user's username is
+// taken. The caller must check IsActive.
+func (s *Store) SignInOIDCUser(ctx context.Context, id OIDCIdentity, allowCreate bool) (User, error) {
 	var out User
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var userID uuid.UUID
@@ -209,8 +247,17 @@ func (s *Store) SignInOIDCUser(ctx context.Context, id OIDCIdentity) (User, erro
 			SELECT id, is_active FROM users
 			WHERE auth_source = 'oidc' AND oidc_issuer = $1 AND oidc_subject = $2 FOR UPDATE`,
 			id.Issuer, id.Subject).Scan(&userID, &active)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = tx.QueryRow(ctx, `
+				SELECT id, is_active FROM users
+				WHERE auth_source = 'oidc' AND oidc_subject IS NULL AND lower(username) = lower($1) FOR UPDATE`,
+				id.Username).Scan(&userID, &active)
+		}
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
+			if !allowCreate {
+				return ErrNotProvisioned
+			}
 			err = tx.QueryRow(ctx, `
 				INSERT INTO users (username, display_name, email, auth_source, oidc_issuer, oidc_subject, last_login_at)
 				VALUES ($1, $2, $3, 'oidc', $4, $5, now()) RETURNING id`,
@@ -218,20 +265,21 @@ func (s *Store) SignInOIDCUser(ctx context.Context, id OIDCIdentity) (User, erro
 			if err != nil {
 				return mapErr(err)
 			}
-			active = true
 		case err != nil:
 			return err
+		case !active:
+			// A deactivated pending user stays pending.
+			out, err = getUser(ctx, tx, userID)
+			return err
 		default:
-			if !active {
-				out, err = getUser(ctx, tx, userID)
-				return err
-			}
+			// The issuer and subject are only set here for a pending user.
 			if _, err := tx.Exec(ctx, `
 				UPDATE users SET display_name = $2, email = $3, last_login_at = now(),
+					oidc_issuer = COALESCE(oidc_issuer, $5), oidc_subject = COALESCE(oidc_subject, $6),
 					username = CASE WHEN EXISTS (
 						SELECT 1 FROM users o WHERE lower(o.username) = lower($4) AND o.id <> $1
 					) THEN username ELSE $4 END
-				WHERE id = $1`, userID, id.DisplayName, id.Email, id.Username); err != nil {
+				WHERE id = $1`, userID, id.DisplayName, id.Email, id.Username, id.Issuer, id.Subject); err != nil {
 				return mapErr(err)
 			}
 		}

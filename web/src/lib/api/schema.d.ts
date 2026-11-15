@@ -214,10 +214,11 @@ export interface paths {
         get: operations["listUsers"];
         put?: never;
         /**
-         * Create a local user
+         * Create a user
          * @description System administrators only. Local users sign in with a password; they
          *     are mainly for automation (service accounts). OIDC users are created
-         *     when they first sign in.
+         *     when they first sign in, or can be added here beforehand, to give
+         *     them roles and teams in advance.
          */
         post: operations["createUser"];
         delete?: never;
@@ -1553,6 +1554,11 @@ export interface components {
             isAuditor: boolean;
             /** @description Inactive users can't sign in, and their API tokens don't work */
             isActive: boolean;
+            /**
+             * @description A single sign-on user an administrator added who hasn't signed in
+             *     yet. Whoever first signs in with this username becomes this user.
+             */
+            oidcPending: boolean;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -1596,13 +1602,23 @@ export interface components {
         Username: string;
         Password: string;
         UserCreate: {
+            /**
+             * @description `local` users sign in with `password`, which is required. `oidc`
+             *     users have none: the user is pending until someone signs in
+             *     through the provider with this username, and that takes it over.
+             *     Needs single sign-on to be configured.
+             * @default local
+             * @enum {string}
+             */
+            authSource: "local" | "oidc";
             username: components["schemas"]["Username"];
             displayName?: string;
             email?: string;
-            password: components["schemas"]["Password"];
+            /** @description Local users only, and required for them */
+            password?: components["schemas"]["Password"];
         };
         UserUpdate: {
-            /** @description Local users only */
+            /** @description Local users, and single sign-on users who haven't signed in yet */
             username?: components["schemas"]["Username"];
             displayName?: string;
             email?: string;

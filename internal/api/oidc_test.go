@@ -269,3 +269,115 @@ func TestOIDCDisabled(t *testing.T) {
 	}
 	anon.mustDo("GET", "/api/v1/auth/oidc/login", nil, 404)
 }
+
+// testSSO is a provider configuration for idp.
+func testSSO(idp *fakeIDP) *oidc.Provider {
+	return oidc.New(oidc.Config{
+		Issuer: idp.srv.URL, ClientID: "dispatch", ClientSecret: "s", RedirectURL: "http://dispatch.test/cb",
+		Scopes: []string{"profile", "email", "groups"}, UsernameClaim: "preferred_username",
+		GroupsClaim: "groups", DisplayName: "Corp SSO",
+	})
+}
+
+// An administrator can add a single sign-on user before they sign in; the
+// first sign-in with that username takes the user over.
+func TestOIDCUserAddedBeforeSignIn(t *testing.T) {
+	idp := newFakeIDP(t)
+	srv, _, username, password := startServerWith(t, func(h *api.Handlers) { h.OIDC = testSSO(idp) })
+	admin := login(t, srv.URL, username, password)
+
+	name := unique("carol")
+	// Single sign-on users have no password, and local users need one.
+	admin.mustDo("POST", "/api/v1/users", map[string]any{"authSource": "oidc", "username": name, "password": "another-long-password"}, 400)
+	admin.mustDo("POST", "/api/v1/users", map[string]any{"authSource": "local", "username": name}, 400)
+	admin.mustDo("POST", "/api/v1/users", map[string]any{"username": name}, 400)
+
+	added := admin.mustDo("POST", "/api/v1/users", map[string]any{"authSource": "oidc", "username": name, "displayName": "Carol"}, 201)
+	id := added["id"].(string)
+	if added["authSource"] != "oidc" || added["oidcPending"] != true || added["lastLoginAt"] != nil {
+		t.Errorf("added user = %v", added)
+	}
+	admin.mustDo("POST", "/api/v1/users", map[string]any{"authSource": "oidc", "username": name}, 409)
+	// They can't sign in with a password.
+	anon := &client{t: t, base: srv.URL}
+	anon.mustDo("POST", "/api/v1/auth/login", map[string]string{"username": name, "password": "another-long-password"}, 401)
+	admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"password": "another-long-password"}, 400)
+	_, bob := newUser(t, srv, admin)
+	if u := admin.mustDo("GET", "/api/v1/users/"+bob, nil, 200); u["oidcPending"] != false {
+		t.Errorf("local user = %v", u)
+	}
+
+	// Roles can be granted in advance, and a mistyped username corrected.
+	grant(admin, map[string]any{"role": "auditor", "userId": id})
+	admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"username": name + "-typo"}, 200)
+	admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"username": name}, 200)
+
+	// A deactivated pending user is refused, and stays pending.
+	claims := map[string]any{"sub": unique("sub"), "preferred_username": strings.ToUpper(name), "name": "Carol C.", "email": "carol@example.com"}
+	admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"isActive": false}, 200)
+	if loc := idp.signIn(srv.URL, claims).Header.Get("Location"); loc != "/login?error=deactivated" {
+		t.Errorf("deactivated pending user redirects to %q", loc)
+	}
+	if u := admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"isActive": true}, 200); u["oidcPending"] != true {
+		t.Errorf("after a refused sign-in: %v", u)
+	}
+
+	// The first sign-in, whatever the username's case, is the added user.
+	carol := sessionFrom(t, srv.URL, idp.signIn(srv.URL, claims))
+	me := carol.mustDo("GET", "/api/v1/me", nil, 200)
+	if me["id"] != id || me["oidcPending"] != false || me["isAuditor"] != true ||
+		me["username"] != strings.ToUpper(name) || me["displayName"] != "Carol C." || me["email"] != "carol@example.com" {
+		t.Errorf("me = %v", me)
+	}
+	// From then on the provider names the user.
+	admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"username": name + "-2"}, 400)
+
+	// Later sign-ins go by subject, so a new username keeps the user, and
+	// someone else with the old username is a different user.
+	claims["preferred_username"] = name + "-renamed"
+	carol = sessionFrom(t, srv.URL, idp.signIn(srv.URL, claims))
+	if me := carol.mustDo("GET", "/api/v1/me", nil, 200); me["id"] != id || me["username"] != name+"-renamed" {
+		t.Errorf("after a rename: %v", me)
+	}
+	other := sessionFrom(t, srv.URL, idp.signIn(srv.URL, map[string]any{"sub": unique("sub"), "preferred_username": name}))
+	if me := other.mustDo("GET", "/api/v1/me", nil, 200); me["id"] == id || me["isAuditor"] != false {
+		t.Errorf("a second user with the old username: %v", me)
+	}
+}
+
+// With OIDCAddedOnly, single sign-on is only for users an administrator
+// added.
+func TestOIDCAddedUsersOnly(t *testing.T) {
+	idp := newFakeIDP(t)
+	srv, _, username, password := startServerWith(t, func(h *api.Handlers) {
+		h.OIDC = testSSO(idp)
+		h.OIDCAddedOnly = true
+	})
+	admin := login(t, srv.URL, username, password)
+
+	name := unique("dave")
+	claims := map[string]any{"sub": unique("sub"), "preferred_username": name}
+	if loc := idp.signIn(srv.URL, claims).Header.Get("Location"); loc != "/login?error=not_provisioned" {
+		t.Errorf("unknown user redirects to %q", loc)
+	}
+	if list := admin.mustDo("GET", "/api/v1/users?search="+name, nil, 200); list["total"].(float64) != 0 {
+		t.Errorf("a refused sign-in created a user: %v", list)
+	}
+
+	added := admin.mustDo("POST", "/api/v1/users", map[string]any{"authSource": "oidc", "username": name}, 201)
+	dave := sessionFrom(t, srv.URL, idp.signIn(srv.URL, claims))
+	if me := dave.mustDo("GET", "/api/v1/me", nil, 200); me["id"] != added["id"] {
+		t.Errorf("me = %v", me)
+	}
+	// And again, now by subject.
+	sessionFrom(t, srv.URL, idp.signIn(srv.URL, claims))
+}
+
+// Without single sign-on, there are no single sign-on users to add.
+func TestAddOIDCUserNeedsOIDC(t *testing.T) {
+	srv, username, password := testServer(t)
+	admin := login(t, srv.URL, username, password)
+	admin.mustDo("POST", "/api/v1/users", map[string]any{"authSource": "oidc", "username": unique("erin")}, 400)
+	user, _ := newUser(t, srv, admin)
+	user.mustDo("POST", "/api/v1/users", map[string]any{"authSource": "oidc", "username": unique("erin")}, 403)
+}

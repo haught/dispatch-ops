@@ -121,6 +121,10 @@ type OIDC struct {
 	GroupsClaim string
 	// DisplayName labels the sign-in button (DISPATCH_OIDC_DISPLAY_NAME).
 	DisplayName string
+	// AutoCreateUsers gives anyone the provider signs in an account. When
+	// false, only users an administrator added may sign in
+	// (DISPATCH_OIDC_AUTO_CREATE_USERS, default true).
+	AutoCreateUsers bool
 }
 
 // Enabled reports whether single sign-on is configured.
@@ -237,6 +241,8 @@ func Load() (Config, error) {
 	c.SecureCookies, err = getbool("DISPATCH_SECURE_COOKIES", true)
 	collect(err)
 	c.AutoMigrate, err = getbool("DISPATCH_AUTO_MIGRATE", false)
+	collect(err)
+	c.OIDC.AutoCreateUsers, err = getbool("DISPATCH_OIDC_AUTO_CREATE_USERS", true)
 	collect(err)
 	c.SessionTTL, err = getduration("DISPATCH_SESSION_TTL", 12*time.Hour)
 	collect(err)

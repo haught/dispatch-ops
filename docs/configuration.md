@@ -39,6 +39,7 @@ without the operator.
 | `DISPATCH_OIDC_USERNAME_CLAIM` | `preferred_username` | |
 | `DISPATCH_OIDC_GROUPS_CLAIM` | `groups` | Claim listing the user's groups, which teams map to |
 | `DISPATCH_OIDC_DISPLAY_NAME` | `Single sign-on` | Label of the sign-in button |
+| `DISPATCH_OIDC_AUTO_CREATE_USERS` | `true` | Give anyone the provider signs in an account at their first sign-in. `false` lets only users an administrator added sign in |
 
 ### Sign-in throttling and account lockout
 

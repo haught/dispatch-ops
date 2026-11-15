@@ -223,6 +223,7 @@ const (
 	loginErrFailed              loginErrorCode = "failed"
 	loginErrUsernameTaken       loginErrorCode = "username_taken"
 	loginErrDeactivated         loginErrorCode = "deactivated"
+	loginErrNotProvisioned      loginErrorCode = "not_provisioned"
 )
 
 // loginError is the UI's sign-in page reporting code.
@@ -267,7 +268,11 @@ func (h *Handlers) OidcCallback(ctx context.Context, req apigen.OidcCallbackRequ
 	user, err := h.Store.SignInOIDCUser(ctx, store.OIDCIdentity{
 		Issuer: id.Issuer, Subject: id.Subject, Username: id.Username, DisplayName: id.DisplayName,
 		Email: id.Email, Groups: id.Groups,
-	})
+	}, !h.OIDCAddedOnly)
+	if errors.Is(err, store.ErrNotProvisioned) {
+		h.Log.InfoContext(ctx, "OIDC sign-in by a user who has not been added", "username", id.Username, "subject", id.Subject)
+		return fail(loginErrNotProvisioned)
+	}
 	if errors.Is(err, store.ErrConflict) {
 		h.Log.WarnContext(ctx, "OIDC username taken", "username", id.Username, "subject", id.Subject)
 		return fail(loginErrUsernameTaken)

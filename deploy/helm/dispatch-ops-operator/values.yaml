@@ -178,6 +178,10 @@ installation:
     usernameClaim: ""
     groupsClaim: ""
     displayName: ""
+    # Whether anyone the provider signs in gets an account on first sign-in
+    # (the default). Set to false to let only users an administrator added
+    # sign in.
+    autoCreateUsers: true
 
   # The API server serves HTTPS on port 8443. Without existingSecret, the
   # operator generates a self-signed ECDSA P-384 certificate in

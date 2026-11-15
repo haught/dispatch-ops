@@ -56,6 +56,7 @@ it names. Helm installs the CRD from crds/ first, so one install creates it.
 {{- with $i.oidc.usernameClaim }}{{ $_ := set $oidc "usernameClaim" . }}{{ end }}
 {{- with $i.oidc.groupsClaim }}{{ $_ := set $oidc "groupsClaim" . }}{{ end }}
 {{- with $i.oidc.displayName }}{{ $_ := set $oidc "displayName" . }}{{ end }}
+{{- if not (kindIs "invalid" $i.oidc.autoCreateUsers) }}{{ $_ := set $oidc "autoCreateUsers" $i.oidc.autoCreateUsers }}{{ end }}
 {{- if $i.oidc.clientSecret }}
 {{- $_ := set $oidc "clientSecret" (dict "name" (printf "%s-oidc" $name) "key" "clientSecret") }}
 {{- else if $i.oidc.existingSecret }}
