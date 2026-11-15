@@ -55,7 +55,15 @@ export function fmtArgv(argv: string[]): string {
 
 /** Why text isn't a valid command or argument list, or '' if it is. */
 export function argvError(text: string): string {
-	if (!text.trimStart().startsWith('[')) return '';
+	if (!text.trimStart().startsWith('[')) {
+		// Each line is one argument, spaces and all, so a stray space makes
+		// "bash " a program that doesn't exist. Arguments that really need
+		// surrounding spaces can use the JSON form.
+		const lines = text.split('\n').map((l) => l.replace(/\r$/, ''));
+		const i = lines.findIndex((l) => l.trim() && l !== l.trim());
+		if (i < 0) return '';
+		return `Line ${i + 1} (${JSON.stringify(lines[i])}) has a space at the start or end. Each line is one argument; use a JSON list if an argument needs the spaces.`;
+	}
 	try {
 		const v: unknown = JSON.parse(text);
 		if (!Array.isArray(v) || v.some((a) => typeof a !== 'string')) {

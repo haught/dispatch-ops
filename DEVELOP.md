@@ -131,8 +131,15 @@ and `dispatch-ops/ee-ansible:dev`.
 1. Go to **Execution environments** and add one named `ee-shell` with the
    image `dispatch-ops/ee-shell:dev`.
 2. Go to **Job templates**, then **New job template**. Choose the job type
-   `container`, the `ee-shell` execution environment, and a command such as
-   `bash -c 'echo hello from $(hostname)'`.
+   **Container** (the form starts on Ansible, which needs a project) and the
+   `ee-shell` execution environment. The command is not run through a
+   shell: each line is one argument, so enter
+
+   ```text
+   bash
+   -c
+   echo hello from $(hostname)
+   ```
 3. Launch the template. The job page streams the output as the pod runs.
 
 You now have a working environment. Edit code and Tilt redeploys it (see
