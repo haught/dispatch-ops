@@ -59,67 +59,65 @@
 	</section>
 {/if}
 
-<label class="search">
-	Search
-	<input bind:value={search} placeholder="Name contains…" />
-</label>
+{#if !creating}
+	<label class="search">
+		Search
+		<input bind:value={search} placeholder="Name contains…" />
+	</label>
 
-{#if error}
-	<p class="error" role="alert">{error}</p>
-{/if}
-
-<section class="card">
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if templates.length === 0}
-		<p class="muted">No job templates{search ? ' match' : ' yet'}.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>Type</th>
-						<th>Runs</th>
-						<th></th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each templates as t (t.id)}
-						<tr>
-							<td>
-								<a href="/templates/{t.id}">{t.name}</a>
-								{#if t.description}<div class="muted small">{t.description}</div>{/if}
-							</td>
-							<td>{t.jobType}</td>
-							<td>
-								<code class="command"
-									>{t.jobType === 'container'
-										? t.command.join(' ')
-										: [t.entrypoint, ...t.arguments].join(' ')}</code
-								>
-							</td>
-							<td>
-								<button onclick={() => (launchTemplate = t)}>Launch</button>
-							</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
-		{#if total > templates.length}
-			<p class="muted">Showing {templates.length} of {total}. Narrow the search to see others.</p>
-		{/if}
+	{#if error}
+		<p class="error" role="alert">{error}</p>
 	{/if}
-</section>
+
+	<section class="card">
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if templates.length === 0}
+			<p class="muted">No job templates{search ? ' match' : ' yet'}.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Name</th>
+							<th>Type</th>
+							<th>Runs</th>
+							<th></th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each templates as t (t.id)}
+							<tr>
+								<td>
+									<a href="/templates/{t.id}">{t.name}</a>
+									{#if t.description}<div class="muted small">{t.description}</div>{/if}
+								</td>
+								<td>{t.jobType}</td>
+								<td>
+									<code class="command"
+										>{t.jobType === 'container'
+											? t.command.join(' ')
+											: [t.entrypoint, ...t.arguments].join(' ')}</code
+									>
+								</td>
+								<td>
+									<button onclick={() => (launchTemplate = t)}>Launch</button>
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			{#if total > templates.length}
+				<p class="muted">Showing {templates.length} of {total}. Narrow the search to see others.</p>
+			{/if}
+		{/if}
+	</section>
+{/if}
 
 <style>
 	.search {
 		max-width: 320px;
-	}
-
-	section.card + label.search {
-		margin-top: 1rem;
 	}
 
 	.table-wrap {

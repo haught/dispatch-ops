@@ -12,7 +12,10 @@
 	import GrantForm from '#lib/components/GrantForm.svelte';
 	import GrantTable from '#lib/components/GrantTable.svelte';
 	import { fmtTime } from '#lib/format.js';
+	import TabPanel from '#lib/components/TabPanel.svelte';
+	import Tabs from '#lib/components/Tabs.svelte';
 	import { session } from '#lib/session.svelte.js';
+	import { activeTab, type Tab } from '#lib/tabs.svelte.js';
 
 	const id = $derived(page.params.id ?? '');
 	const isAdmin = $derived(Boolean(session.user?.isAdmin));
@@ -28,6 +31,13 @@
 	let description = $state('');
 	let oidcGroups = $state('');
 	let newMember = $state('');
+
+	const tabs = $derived<Tab[]>([
+		{ id: 'members', label: 'Members', count: members.length },
+		...(canSeeGrants ? [{ id: 'roles', label: 'Roles', count: grants.length }] : []),
+		...(isAdmin ? [{ id: 'settings', label: 'Settings' }] : [])
+	]);
+	const tab = $derived(activeTab(tabs));
 
 	const nonMembers = $derived(users.filter((u) => !members.some((m) => m.user.id === u.id)));
 
@@ -124,95 +134,105 @@
 	<h1>{team.name}</h1>
 	{#if team.description}<p class="muted">{team.description}</p>{/if}
 
-	{#if isAdmin}
-		<section class="card">
-			<h2>Settings</h2>
-			<form onsubmit={save} class="form-grid">
-				<label>Name <input bind:value={name} maxlength="255" required /></label>
-				<label>Description <input bind:value={description} /></label>
-				<label>
-					OIDC groups
-					<input bind:value={oidcGroups} placeholder="Comma-separated" />
-				</label>
-				<label><button type="submit">Save</button></label>
-			</form>
-			<p class="muted small">
-				Group changes apply to each member the next time they sign in.
-				<button class="danger" onclick={remove}>Delete team</button>
-			</p>
-		</section>
-	{/if}
+	<Tabs {tabs} label="Team sections" />
 
-	<section class="card">
-		<h2>Members</h2>
-		{#if members.length === 0}
-			<p class="muted">No members yet.</p>
-		{:else}
-			<div class="table-wrap">
-				<table>
-					<thead>
-						<tr>
-							<th>User</th>
-							<th>Joined through</th>
-							<th>Since</th>
-							{#if isAdmin}<th></th>{/if}
-						</tr>
-					</thead>
-					<tbody>
-						{#each members as m (m.user.id)}
-							<tr>
-								<td>
-									<a href="/users/{m.user.id}">{m.user.username}</a>
-									{#if m.displayName}<span class="muted">({m.displayName})</span>{/if}
-								</td>
-								<td>{m.source === 'oidc' ? 'OIDC group' : 'Added by an administrator'}</td>
-								<td>{fmtTime(m.addedAt)}</td>
-								{#if isAdmin}
-									<td class="row-actions">
-										<button class="danger" onclick={() => removeMember(m)}>Remove</button>
-									</td>
-								{/if}
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		{/if}
-		{#if isAdmin}
-			<form onsubmit={addMember} class="form-grid add">
-				<label>
-					Add a user
-					<select bind:value={newMember} required>
-						<option value="" disabled>Choose…</option>
-						{#each nonMembers as u (u.id)}
-							<option value={u.id}>{u.username}{u.displayName ? ` (${u.displayName})` : ''}</option>
-						{/each}
-					</select>
-				</label>
-				<label><button type="submit">Add</button></label>
-			</form>
-			<p class="muted small">
-				Members added here stay members whatever their OIDC groups. A member who joined through an
-				OIDC group and is removed here joins again at their next sign-in, unless the team's groups
-				change.
-			</p>
-		{/if}
-	</section>
-
-	{#if canSeeGrants}
+	<TabPanel id="members" active={tab}>
 		<section class="card">
-			<h2>Roles</h2>
-			{#if grants.length === 0}
-				<p class="muted">The team holds no roles.</p>
+			<h2>Members</h2>
+			{#if members.length === 0}
+				<p class="muted">No members yet.</p>
 			{:else}
-				<GrantTable {grants} showHolder={false} onrevoke={isAdmin ? revoke : undefined} />
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th>User</th>
+								<th>Joined through</th>
+								<th>Since</th>
+								{#if isAdmin}<th></th>{/if}
+							</tr>
+						</thead>
+						<tbody>
+							{#each members as m (m.user.id)}
+								<tr>
+									<td>
+										<a href="/users/{m.user.id}">{m.user.username}</a>
+										{#if m.displayName}<span class="muted">({m.displayName})</span>{/if}
+									</td>
+									<td>{m.source === 'oidc' ? 'OIDC group' : 'Added by an administrator'}</td>
+									<td>{fmtTime(m.addedAt)}</td>
+									{#if isAdmin}
+										<td class="row-actions">
+											<button class="danger" onclick={() => removeMember(m)}>Remove</button>
+										</td>
+									{/if}
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
 			{/if}
 			{#if isAdmin}
-				<h3>Grant a role</h3>
-				<GrantForm teamId={id} ongranted={load} />
+				<form onsubmit={addMember} class="form-grid add">
+					<label>
+						Add a user
+						<select bind:value={newMember} required>
+							<option value="" disabled>Choose…</option>
+							{#each nonMembers as u (u.id)}
+								<option value={u.id}
+									>{u.username}{u.displayName ? ` (${u.displayName})` : ''}</option
+								>
+							{/each}
+						</select>
+					</label>
+					<label><button type="submit">Add</button></label>
+				</form>
+				<p class="muted small">
+					Members added here stay members whatever their OIDC groups. A member who joined through an
+					OIDC group and is removed here joins again at their next sign-in, unless the team's groups
+					change.
+				</p>
 			{/if}
 		</section>
-	{/if}
+	</TabPanel>
+
+	<TabPanel id="roles" active={tab}>
+		{#if canSeeGrants}
+			<section class="card">
+				<h2>Roles</h2>
+				{#if grants.length === 0}
+					<p class="muted">The team holds no roles.</p>
+				{:else}
+					<GrantTable {grants} showHolder={false} onrevoke={isAdmin ? revoke : undefined} />
+				{/if}
+				{#if isAdmin}
+					<h3>Grant a role</h3>
+					<GrantForm teamId={id} ongranted={load} />
+				{/if}
+			</section>
+		{/if}
+	</TabPanel>
+
+	<TabPanel id="settings" active={tab}>
+		{#if isAdmin}
+			<section class="card">
+				<h2>Settings</h2>
+				<form onsubmit={save} class="form-grid">
+					<label>Name <input bind:value={name} maxlength="255" required /></label>
+					<label>Description <input bind:value={description} /></label>
+					<label>
+						OIDC groups
+						<input bind:value={oidcGroups} placeholder="Comma-separated" />
+					</label>
+					<label><button type="submit">Save</button></label>
+				</form>
+				<p class="muted small">
+					Group changes apply to each member the next time they sign in.
+					<button class="danger" onclick={remove}>Delete team</button>
+				</p>
+			</section>
+		{/if}
+	</TabPanel>
 {/if}
 
 <style>

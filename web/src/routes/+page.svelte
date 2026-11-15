@@ -20,10 +20,13 @@
 	import RunningJobs from '#lib/components/dashboard/RunningJobs.svelte';
 	import SyncHealth from '#lib/components/dashboard/SyncHealth.svelte';
 	import SystemCard from '#lib/components/dashboard/SystemCard.svelte';
+	import TabPanel from '#lib/components/TabPanel.svelte';
+	import Tabs from '#lib/components/Tabs.svelte';
 	import TemplateLeaderboard from '#lib/components/dashboard/TemplateLeaderboard.svelte';
 	import UpcomingSchedules from '#lib/components/dashboard/UpcomingSchedules.svelte';
 	import { fmtPercent, fmtSeconds } from '#lib/format.js';
 	import { session } from '#lib/session.svelte.js';
+	import { activeTab, type Tab } from '#lib/tabs.svelte.js';
 
 	const windows: { value: StatsWindow; label: string; period: string; prev: string; ms: number }[] =
 		[
@@ -38,6 +41,13 @@
 			}
 		];
 	const windowKey = 'dashboard.window';
+
+	const tabs: Tab[] = [
+		{ id: 'overview', label: 'Overview' },
+		{ id: 'templates', label: 'Templates & hosts' },
+		{ id: 'health', label: 'Health' }
+	];
+	const tab = $derived(activeTab(tabs));
 	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 	function storedWindow(): StatsWindow {
@@ -177,106 +187,117 @@
 	</div>
 </div>
 
-{#if hasTemplates === false}
-	<section class="card getting-started">
-		<h2>Getting started</h2>
-		<p>
-			Jobs run a playbook, script or command from a <a href="/projects">project</a>, in an
-			<a href="/execution-environments">execution environment</a>, against an
-			<a href="/inventories">inventory</a>, with secrets from
-			<a href="/credentials">credentials</a>.
-		</p>
-		<p class="muted">
-			Set those up, then create a <a href="/templates">job template</a> and launch it. You can
-			follow its output live, run it on a <a href="/schedules">schedule</a>, and get
-			<a href="/notifications">notified</a> when it finishes.
-		</p>
+<Tabs {tabs} label="Dashboard sections" />
+
+<TabPanel id="overview" active={tab}>
+	{#if hasTemplates === false}
+		<section class="card getting-started">
+			<h2>Getting started</h2>
+			<p>
+				Jobs run a playbook, script or command from a <a href="/projects">project</a>, in an
+				<a href="/execution-environments">execution environment</a>, against an
+				<a href="/inventories">inventory</a>, with secrets from
+				<a href="/credentials">credentials</a>.
+			</p>
+			<p class="muted">
+				Set those up, then create a <a href="/templates">job template</a> and launch it. You can
+				follow its output live, run it on a <a href="/schedules">schedule</a>, and get
+				<a href="/notifications">notified</a> when it finishes.
+			</p>
+		</section>
+	{/if}
+
+	<div class="kpis">
+		<KpiTile
+			label="Jobs run"
+			value={t ? String(t.total) : '—'}
+			current={t?.total}
+			previous={p?.total}
+			better="neutral"
+			period={win.prev}
+		/>
+		<KpiTile
+			label="Success rate"
+			value={fmtPercent(t?.successRate)}
+			current={t?.successRate}
+			previous={p?.successRate}
+			points
+			period={win.prev}
+		/>
+		<KpiTile
+			label="Median run time"
+			value={secs(t?.p50DurationSeconds)}
+			current={t?.p50DurationSeconds}
+			previous={p?.p50DurationSeconds}
+			better="down"
+			period={win.prev}
+		/>
+		<KpiTile
+			label="p95 run time"
+			value={secs(t?.p95DurationSeconds)}
+			current={t?.p95DurationSeconds}
+			previous={p?.p95DurationSeconds}
+			better="down"
+			period={win.prev}
+		/>
+		<KpiTile
+			label="Median queue wait"
+			value={secs(t?.p50QueueWaitSeconds)}
+			current={t?.p50QueueWaitSeconds}
+			previous={p?.p50QueueWaitSeconds}
+			better="down"
+			period={win.prev}
+		/>
+	</div>
+
+	<section class="card chart-card">
+		<h2>
+			Activity <span class="muted sub">· jobs per {stats?.bucket ?? 'day'}, {win.period}</span>
+		</h2>
+		{#if statsError}
+			<p class="error" role="alert">{statsError}</p>
+		{:else if stats}
+			<ActivityChart series={stats.series} bucket={stats.bucket} />
+		{:else}
+			<p class="muted">Loading…</p>
+		{/if}
 	</section>
-{/if}
 
-<div class="kpis">
-	<KpiTile
-		label="Jobs run"
-		value={t ? String(t.total) : '—'}
-		current={t?.total}
-		previous={p?.total}
-		better="neutral"
-		period={win.prev}
-	/>
-	<KpiTile
-		label="Success rate"
-		value={fmtPercent(t?.successRate)}
-		current={t?.successRate}
-		previous={p?.successRate}
-		points
-		period={win.prev}
-	/>
-	<KpiTile
-		label="Median run time"
-		value={secs(t?.p50DurationSeconds)}
-		current={t?.p50DurationSeconds}
-		previous={p?.p50DurationSeconds}
-		better="down"
-		period={win.prev}
-	/>
-	<KpiTile
-		label="p95 run time"
-		value={secs(t?.p95DurationSeconds)}
-		current={t?.p95DurationSeconds}
-		previous={p?.p95DurationSeconds}
-		better="down"
-		period={win.prev}
-	/>
-	<KpiTile
-		label="Median queue wait"
-		value={secs(t?.p50QueueWaitSeconds)}
-		current={t?.p50QueueWaitSeconds}
-		previous={p?.p50QueueWaitSeconds}
-		better="down"
-		period={win.prev}
-	/>
-</div>
+	<div class="grid">
+		<RunningJobs jobs={active} {now} />
+		<NeedsAttention jobs={attention} {now} period={win.period} />
+		<RecentJobs jobs={recent} {now} />
+		<UpcomingSchedules {schedules} {now} />
+	</div>
+</TabPanel>
 
-<section class="card chart-card">
-	<h2>Activity <span class="muted sub">· jobs per {stats?.bucket ?? 'day'}, {win.period}</span></h2>
+<TabPanel id="templates" active={tab}>
 	{#if statsError}
 		<p class="error" role="alert">{statsError}</p>
 	{:else if stats}
-		<ActivityChart series={stats.series} bucket={stats.bucket} />
+		<div class="grid wide-first">
+			<TemplateLeaderboard templates={stats.templates} period={win.period} />
+			<ProblemHosts hosts={stats.problemHosts} {now} period={win.period} />
+		</div>
 	{:else}
 		<p class="muted">Loading…</p>
 	{/if}
-</section>
+</TabPanel>
 
-<h2 class="group">Now</h2>
-<div class="grid">
-	<RunningJobs jobs={active} {now} />
-	<NeedsAttention jobs={attention} {now} period={win.period} />
-	<RecentJobs jobs={recent} {now} />
-	<UpcomingSchedules {schedules} {now} />
-</div>
-
-{#if stats}
-	<h2 class="group">Templates &amp; hosts <span class="muted sub">· {win.period}</span></h2>
-	<div class="grid wide-first">
-		<TemplateLeaderboard templates={stats.templates} period={win.period} />
-		<ProblemHosts hosts={stats.problemHosts} {now} period={win.period} />
-	</div>
-{/if}
-
-<h2 class="group">Health</h2>
-<div class="grid">
-	<SystemCard {health} queue={stats?.queue} />
-	{#if stats}
-		<SyncHealth syncs={stats.inventorySyncs} {now} />
-		{#if stats.notifications}
-			<NotificationHealth stats={stats.notifications} {now} period={win.period} />
+<TabPanel id="health" active={tab}>
+	<div class="grid">
+		<SystemCard {health} queue={stats?.queue} />
+		{#if stats}
+			<SyncHealth syncs={stats.inventorySyncs} {now} />
+			{#if stats.notifications}
+				<NotificationHealth stats={stats.notifications} {now} period={win.period} />
+			{/if}
 		{/if}
-	{/if}
-	{#if canAudit}
-		<RecentChanges entries={audit} {now} />
-	{/if}
-</div>
+		{#if canAudit}
+			<RecentChanges entries={audit} {now} />
+		{/if}
+	</div>
+</TabPanel>
 
 <style>
 	.header {
@@ -285,7 +306,6 @@
 		align-items: center;
 		flex-wrap: wrap;
 		gap: 0.5rem 1rem;
-		margin-bottom: 1rem;
 	}
 
 	.header h1 {
@@ -336,25 +356,12 @@
 	}
 
 	.chart-card {
-		margin-bottom: 0.5rem;
+		margin-bottom: 1rem;
 	}
 
 	.sub {
 		font-weight: normal;
 		font-size: 0.9rem;
-	}
-
-	h2.group {
-		margin: 1.5rem 0 0.75rem;
-		font-size: 0.85rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--muted);
-	}
-
-	h2.group .sub {
-		text-transform: none;
-		letter-spacing: normal;
 	}
 
 	.grid {

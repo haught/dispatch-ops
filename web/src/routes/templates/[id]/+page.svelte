@@ -15,9 +15,12 @@
 	import ResourceAccess from '#lib/components/ResourceAccess.svelte';
 	import Schedules from '#lib/components/Schedules.svelte';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
+	import TabPanel from '#lib/components/TabPanel.svelte';
+	import Tabs from '#lib/components/Tabs.svelte';
 	import TemplateForm from '#lib/components/TemplateForm.svelte';
 	import { fmtDuration, fmtSeconds, fmtTime, fmtVars } from '#lib/format.js';
-	import { can, loadMyGrants } from '#lib/permissions.svelte.js';
+	import { can, canSeeAccess, loadMyGrants } from '#lib/permissions.svelte.js';
+	import { activeTab, selectTab, type Tab } from '#lib/tabs.svelte.js';
 	import { loadTemplateRefs, noRefs, type Ref, type TemplateRefs } from '#lib/templateRefs.js';
 
 	let template = $state<JobTemplate | null>(null);
@@ -39,6 +42,20 @@
 	const id = $derived(page.params.id ?? '');
 	const canAdmin = $derived(can('job_template', id, 'admin'));
 	const prompts = (f: OverridableField) => Boolean(template?.allowOverrides.includes(f));
+
+	const tabs = $derived<Tab[]>([
+		{ id: 'details', label: 'Details' },
+		{ id: 'schedules', label: 'Schedules' },
+		{ id: 'notifications', label: 'Notifications' },
+		{ id: 'jobs', label: 'Jobs' },
+		...(canSeeAccess('job_template', id) ? [{ id: 'access', label: 'Access' }] : [])
+	]);
+	const tab = $derived(activeTab(tabs));
+
+	function edit() {
+		editing = true;
+		selectTab(tabs, 'details');
+	}
 
 	$effect(() => {
 		loadMyGrants();
@@ -151,7 +168,7 @@
 		<span class="badge">{template.jobType}</span>
 		<span class="spacer"></span>
 		{#if canAdmin && !editing}
-			<button class="secondary" onclick={() => (editing = true)}>Edit</button>
+			<button class="secondary" onclick={edit}>Edit</button>
 			<button class="danger" onclick={remove}>Delete</button>
 		{/if}
 		<button onclick={() => (launchOpen = true)}>Launch</button>
@@ -162,159 +179,174 @@
 	{#if template.description}<p class="muted">{template.description}</p>{/if}
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 
-	{#if editing}
-		<section class="card">
-			<h2>Edit job template</h2>
-			{#key template.id}
-				<TemplateForm {template} onsaved={saved} oncancel={() => (editing = false)} />
-			{/key}
-		</section>
-	{:else}
-		<section class="card">
-			<dl>
-				<dt>Execution environment</dt>
-				<dd>{@render link('/execution-environments', uses.ee)}</dd>
-				{#if template.projectId}
-					<dt>Project</dt>
-					<dd>{@render link(`/projects/${template.projectId}`, uses.project)}</dd>
-				{/if}
-				{#if template.inventoryId || prompts('inventory')}
-					<dt>Inventory {@render prompt('inventory')}</dt>
-					<dd>
-						{#if template.inventoryId}
-							{@render link(`/inventories/${template.inventoryId}`, uses.inventory)}
-						{:else}<span class="muted">none</span>{/if}
-					</dd>
-				{/if}
-				{#if template.credentialIds.length}
-					<dt>Credentials</dt>
-					<dd>
-						{#each uses.credentials as c, i (c.id)}{#if i},
-							{/if}{@render link(`/credentials/${c.id}`, c)}{/each}
-					</dd>
-				{/if}
-				<dt>Runs {@render prompt('command')}</dt>
-				<dd>
-					<code
-						>{template.jobType === 'container'
-							? template.command.join(' ')
-							: [template.entrypoint, ...template.arguments].join(' ')}</code
-					>
-				</dd>
-				{#if template.limit || prompts('limit')}
-					<dt>Limit {@render prompt('limit')}</dt>
-					<dd>{@render value(template.limit, 'all hosts')}</dd>
-				{/if}
-				{#if template.tags || prompts('tags')}
-					<dt>Tags {@render prompt('tags')}</dt>
-					<dd>{@render value(template.tags, 'all tasks')}</dd>
-				{/if}
-				{#if template.skipTags || prompts('skipTags')}
-					<dt>Skip tags {@render prompt('skipTags')}</dt>
-					<dd>{@render value(template.skipTags, 'none')}</dd>
-				{/if}
-				{#if template.verbosity}
-					<dt>Verbosity</dt>
-					<dd><code>-{'v'.repeat(template.verbosity)}</code></dd>
-				{/if}
-				{#if fmtVars(template.extraVars) || prompts('extraVars')}
-					<dt>Extra variables {@render prompt('extraVars')}</dt>
-					<dd>
-						{#if fmtVars(template.extraVars)}
-							<pre class="code">{fmtVars(template.extraVars)}</pre>
-						{:else}<span class="muted">none</span>{/if}
-					</dd>
-				{/if}
-				<dt>Timeout</dt>
-				<dd>{fmtSeconds(template.timeoutSeconds)}</dd>
-			</dl>
-		</section>
-	{/if}
+	<Tabs {tabs} label="Job template sections" />
 
-	<section class="card">
-		<h2>Schedules</h2>
-		<Schedules jobTemplateId={template.id} allowLimit={template.allowOverrides.includes('limit')} />
-	</section>
-
-	<section class="card">
-		<h2>Notifications</h2>
-		{#if targets.length === 0}
-			<p class="muted">
-				No notification targets yet. System administrators set them up under Notifications.
-			</p>
+	<TabPanel id="details" active={tab}>
+		{#if editing}
+			<section class="card">
+				<h2>Edit job template</h2>
+				{#key template.id}
+					<TemplateForm {template} onsaved={saved} oncancel={() => (editing = false)} />
+				{/key}
+			</section>
 		{:else}
-			<div class="table-wrap">
-				<table>
-					<thead>
-						<tr>
-							<th>Target</th>
-							{#each notificationEvents as e (e.event)}<th>{e.label}</th>{/each}
-						</tr>
-					</thead>
-					<tbody>
-						{#each targets as t (t.id)}
+			<section class="card">
+				<dl>
+					<dt>Execution environment</dt>
+					<dd>{@render link('/execution-environments', uses.ee)}</dd>
+					{#if template.projectId}
+						<dt>Project</dt>
+						<dd>{@render link(`/projects/${template.projectId}`, uses.project)}</dd>
+					{/if}
+					{#if template.inventoryId || prompts('inventory')}
+						<dt>Inventory {@render prompt('inventory')}</dt>
+						<dd>
+							{#if template.inventoryId}
+								{@render link(`/inventories/${template.inventoryId}`, uses.inventory)}
+							{:else}<span class="muted">none</span>{/if}
+						</dd>
+					{/if}
+					{#if template.credentialIds.length}
+						<dt>Credentials</dt>
+						<dd>
+							{#each uses.credentials as c, i (c.id)}{#if i},
+								{/if}{@render link(`/credentials/${c.id}`, c)}{/each}
+						</dd>
+					{/if}
+					<dt>Runs {@render prompt('command')}</dt>
+					<dd>
+						<code
+							>{template.jobType === 'container'
+								? template.command.join(' ')
+								: [template.entrypoint, ...template.arguments].join(' ')}</code
+						>
+					</dd>
+					{#if template.limit || prompts('limit')}
+						<dt>Limit {@render prompt('limit')}</dt>
+						<dd>{@render value(template.limit, 'all hosts')}</dd>
+					{/if}
+					{#if template.tags || prompts('tags')}
+						<dt>Tags {@render prompt('tags')}</dt>
+						<dd>{@render value(template.tags, 'all tasks')}</dd>
+					{/if}
+					{#if template.skipTags || prompts('skipTags')}
+						<dt>Skip tags {@render prompt('skipTags')}</dt>
+						<dd>{@render value(template.skipTags, 'none')}</dd>
+					{/if}
+					{#if template.verbosity}
+						<dt>Verbosity</dt>
+						<dd><code>-{'v'.repeat(template.verbosity)}</code></dd>
+					{/if}
+					{#if fmtVars(template.extraVars) || prompts('extraVars')}
+						<dt>Extra variables {@render prompt('extraVars')}</dt>
+						<dd>
+							{#if fmtVars(template.extraVars)}
+								<pre class="code">{fmtVars(template.extraVars)}</pre>
+							{:else}<span class="muted">none</span>{/if}
+						</dd>
+					{/if}
+					<dt>Timeout</dt>
+					<dd>{fmtSeconds(template.timeoutSeconds)}</dd>
+				</dl>
+			</section>
+		{/if}
+	</TabPanel>
+
+	<TabPanel id="schedules" active={tab}>
+		<section class="card">
+			<h2>Schedules</h2>
+			<Schedules
+				jobTemplateId={template.id}
+				allowLimit={template.allowOverrides.includes('limit')}
+			/>
+		</section>
+	</TabPanel>
+
+	<TabPanel id="notifications" active={tab}>
+		<section class="card">
+			<h2>Notifications</h2>
+			{#if targets.length === 0}
+				<p class="muted">
+					No notification targets yet. System administrators set them up under Notifications.
+				</p>
+			{:else}
+				<div class="table-wrap">
+					<table>
+						<thead>
 							<tr>
-								<td>{t.name} <span class="muted small">{t.kind}</span></td>
-								{#each notificationEvents as e (e.event)}
+								<th>Target</th>
+								{#each notificationEvents as e (e.event)}<th>{e.label}</th>{/each}
+							</tr>
+						</thead>
+						<tbody>
+							{#each targets as t (t.id)}
+								<tr>
+									<td>{t.name} <span class="muted small">{t.kind}</span></td>
+									{#each notificationEvents as e (e.event)}
+										<td>
+											<input
+												type="checkbox"
+												aria-label="{t.name}: {e.label}"
+												checked={chosen[t.id]?.includes(e.event)}
+												onchange={(ev) => toggleEvent(t.id, e.event, ev.currentTarget.checked)}
+											/>
+										</td>
+									{/each}
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+				<p>
+					<button onclick={saveNotifications} disabled={notifSaving}>
+						{notifSaving ? 'Saving…' : 'Save notifications'}
+					</button>
+					{#if notifMessage}<span class="muted">{notifMessage}</span>{/if}
+					{#if notifError}<span class="error">{notifError}</span>{/if}
+				</p>
+			{/if}
+		</section>
+	</TabPanel>
+
+	<TabPanel id="jobs" active={tab}>
+		<section class="card">
+			<h2>Recent jobs</h2>
+			{#if jobs.length === 0}
+				<p class="muted">No jobs yet.</p>
+			{:else}
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th>Status</th>
+								<th>Launched</th>
+								<th>By</th>
+								<th>Duration</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each jobs as j (j.id)}
+								<tr>
+									<td><a href="/jobs/{j.id}"><StatusBadge status={j.status} /></a></td>
+									<td><a href="/jobs/{j.id}">{fmtTime(j.createdAt)}</a></td>
 									<td>
-										<input
-											type="checkbox"
-											aria-label="{t.name}: {e.label}"
-											checked={chosen[t.id]?.includes(e.event)}
-											onchange={(ev) => toggleEvent(t.id, e.event, ev.currentTarget.checked)}
-										/>
+										{j.schedule ? `schedule ${j.schedule.name}` : (j.launchedBy?.username ?? '—')}
+										<span class="muted small">{j.launchType}</span>
 									</td>
-								{/each}
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-			<p>
-				<button onclick={saveNotifications} disabled={notifSaving}>
-					{notifSaving ? 'Saving…' : 'Save notifications'}
-				</button>
-				{#if notifMessage}<span class="muted">{notifMessage}</span>{/if}
-				{#if notifError}<span class="error">{notifError}</span>{/if}
-			</p>
-		{/if}
-	</section>
+									<td>{fmtDuration(j.startedAt, j.finishedAt)}</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+				<p><a href="/jobs?jobTemplateId={template.id}">All jobs</a></p>
+			{/if}
+		</section>
+	</TabPanel>
 
-	<section class="card">
-		<h2>Recent jobs</h2>
-		{#if jobs.length === 0}
-			<p class="muted">No jobs yet.</p>
-		{:else}
-			<div class="table-wrap">
-				<table>
-					<thead>
-						<tr>
-							<th>Status</th>
-							<th>Launched</th>
-							<th>By</th>
-							<th>Duration</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each jobs as j (j.id)}
-							<tr>
-								<td><a href="/jobs/{j.id}"><StatusBadge status={j.status} /></a></td>
-								<td><a href="/jobs/{j.id}">{fmtTime(j.createdAt)}</a></td>
-								<td>
-									{j.schedule ? `schedule ${j.schedule.name}` : (j.launchedBy?.username ?? '—')}
-									<span class="muted small">{j.launchType}</span>
-								</td>
-								<td>{fmtDuration(j.startedAt, j.finishedAt)}</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-			<p><a href="/jobs?jobTemplateId={template.id}">All jobs</a></p>
-		{/if}
-	</section>
-
-	<ResourceAccess type="job_template" id={template.id} />
+	<TabPanel id="access" active={tab}>
+		<ResourceAccess type="job_template" id={template.id} />
+	</TabPanel>
 {:else if error}
 	<p class="error" role="alert">{error}</p>
 	<p><a href="/templates">Back to job templates</a></p>

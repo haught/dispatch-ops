@@ -17,6 +17,8 @@
 	let creating = $state(false);
 	let created = $state<CreatedApiToken | null>(null);
 	let copied = $state(false);
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	async function load() {
 		const { data, error: err } = await api.GET('/api/v1/tokens');
@@ -44,6 +46,7 @@
 		created = data;
 		copied = false;
 		name = '';
+		adding = false;
 		await load();
 	}
 
@@ -70,7 +73,13 @@
 	}
 </script>
 
-<h1>API tokens</h1>
+<div class="page-header">
+	<h1>API tokens</h1>
+	<span class="spacer"></span>
+	{#if !adding}
+		<button onclick={() => (adding = true)}>New token</button>
+	{/if}
+</div>
 <p class="muted">
 	Use a token from scripts and CI by sending <code>Authorization: Bearer &lt;token&gt;</code>. A
 	token can do what you can; a read-only one only GET requests.
@@ -91,65 +100,71 @@
 	</section>
 {/if}
 
-<section class="card">
-	<h2>New token</h2>
-	<form onsubmit={create} class="new">
-		<label>
-			Name
-			<input bind:value={name} maxlength="100" placeholder="e.g. ci-pipeline" required />
-		</label>
-		<label>
-			Access
-			<select bind:value={scope}>
-				<option value="write">Read and write</option>
-				<option value="read">Read only (GET requests)</option>
-			</select>
-		</label>
-		<label>
-			Expires in (days)
-			<input type="number" bind:value={expiresInDays} min="1" max="3650" placeholder="Never" />
-		</label>
-		<button type="submit" disabled={creating}>Create token</button>
-	</form>
-</section>
-
-<section class="card">
-	<h2>Your tokens</h2>
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if tokens.length === 0}
-		<p class="muted">You have no API tokens.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>Token</th>
-						<th>Access</th>
-						<th>Created</th>
-						<th>Expires</th>
-						<th>Last used</th>
-						<th></th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each tokens as token (token.id)}
-						<tr>
-							<td>{token.name}</td>
-							<td><code>{token.prefix}…</code></td>
-							<td>{token.scope === 'read' ? 'Read only' : 'Read and write'}</td>
-							<td>{fmt(token.createdAt)}</td>
-							<td>{token.expiresAt ? fmt(token.expiresAt) : 'Never'}</td>
-							<td>{fmt(token.lastUsedAt)}</td>
-							<td><button class="danger" onclick={() => revoke(token)}>Revoke</button></td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
+{#if adding}
+	<section class="card">
+		<div class="page-header">
+			<h2>New token</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={() => (adding = false)}>Cancel</button>
 		</div>
-	{/if}
-</section>
+		<form onsubmit={create} class="new">
+			<label>
+				Name
+				<input bind:value={name} maxlength="100" placeholder="e.g. ci-pipeline" required />
+			</label>
+			<label>
+				Access
+				<select bind:value={scope}>
+					<option value="write">Read and write</option>
+					<option value="read">Read only (GET requests)</option>
+				</select>
+			</label>
+			<label>
+				Expires in (days)
+				<input type="number" bind:value={expiresInDays} min="1" max="3650" placeholder="Never" />
+			</label>
+			<button type="submit" disabled={creating}>Create token</button>
+		</form>
+	</section>
+{:else}
+	<section class="card">
+		<h2>Your tokens</h2>
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if tokens.length === 0}
+			<p class="muted">You have no API tokens.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Name</th>
+							<th>Token</th>
+							<th>Access</th>
+							<th>Created</th>
+							<th>Expires</th>
+							<th>Last used</th>
+							<th></th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each tokens as token (token.id)}
+							<tr>
+								<td>{token.name}</td>
+								<td><code>{token.prefix}…</code></td>
+								<td>{token.scope === 'read' ? 'Read only' : 'Read and write'}</td>
+								<td>{fmt(token.createdAt)}</td>
+								<td>{token.expiresAt ? fmt(token.expiresAt) : 'Never'}</td>
+								<td>{fmt(token.lastUsedAt)}</td>
+								<td><button class="danger" onclick={() => revoke(token)}>Revoke</button></td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+	</section>
+{/if}
 
 <style>
 	section {

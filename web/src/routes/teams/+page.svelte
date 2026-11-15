@@ -9,6 +9,8 @@
 	let name = $state('');
 	let description = $state('');
 	let oidcGroups = $state('');
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	const isAdmin = $derived(Boolean(session.user?.isAdmin));
 
@@ -36,6 +38,7 @@
 			return;
 		}
 		name = description = oidcGroups = '';
+		adding = false;
 		await load();
 	}
 
@@ -47,7 +50,13 @@
 	}
 </script>
 
-<h1>Teams</h1>
+<div class="page-header">
+	<h1>Teams</h1>
+	<span class="spacer"></span>
+	{#if isAdmin && !adding}
+		<button onclick={() => (adding = true)}>New team</button>
+	{/if}
+</div>
 <p class="muted">
 	Roles granted to a team apply to its members. Single sign-on users join the teams that list one of
 	their provider groups whenever they sign in, and leave them when they no longer have it.
@@ -57,9 +66,13 @@
 	<p class="error" role="alert">{error}</p>
 {/if}
 
-{#if isAdmin}
+{#if isAdmin && adding}
 	<section class="card">
-		<h2>New team</h2>
+		<div class="page-header">
+			<h2>New team</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={() => (adding = false)}>Cancel</button>
+		</div>
 		<form onsubmit={create} class="form-grid">
 			<label>Name <input bind:value={name} maxlength="255" required /></label>
 			<label>Description <input bind:value={description} /></label>
@@ -72,37 +85,39 @@
 	</section>
 {/if}
 
-<section class="card">
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if teams.length === 0}
-		<p class="muted">No teams yet.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>OIDC groups</th>
-						<th>Members</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each teams as t (t.id)}
+{#if !adding}
+	<section class="card">
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if teams.length === 0}
+			<p class="muted">No teams yet.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
 						<tr>
-							<td>
-								<a href="/teams/{t.id}">{t.name}</a>
-								{#if t.description}<div class="muted small">{t.description}</div>{/if}
-							</td>
-							<td>
-								{#each t.oidcGroups as g (g)}<span class="badge">{g}</span>
-								{/each}
-							</td>
-							<td>{t.memberCount}</td>
+							<th>Name</th>
+							<th>OIDC groups</th>
+							<th>Members</th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
-	{/if}
-</section>
+					</thead>
+					<tbody>
+						{#each teams as t (t.id)}
+							<tr>
+								<td>
+									<a href="/teams/{t.id}">{t.name}</a>
+									{#if t.description}<div class="muted small">{t.description}</div>{/if}
+								</td>
+								<td>
+									{#each t.oidcGroups as g (g)}<span class="badge">{g}</span>
+									{/each}
+								</td>
+								<td>{t.memberCount}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+	</section>
+{/if}

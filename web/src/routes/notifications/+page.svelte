@@ -33,6 +33,8 @@
 	let from = $state('');
 	let to = $state('');
 	let formError = $state('');
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	async function load() {
 		const { data, error: err } = await api.GET('/api/v1/notification-targets', {
@@ -49,6 +51,7 @@
 
 	function reset() {
 		editing = null;
+		adding = false;
 		name = description = url = authorization = signingSecret = slackUrl = googleChatUrl = '';
 		host = port = username = password = from = to = '';
 		security = 'starttls';
@@ -157,7 +160,13 @@
 	const secretHint = $derived(editing ? 'Leave blank to keep the current value' : '');
 </script>
 
-<h1>Notifications</h1>
+<div class="page-header">
+	<h1>Notifications</h1>
+	<span class="spacer"></span>
+	{#if isAdmin && !(adding || editing)}
+		<button onclick={() => (adding = true)}>New notification target</button>
+	{/if}
+</div>
 <p class="muted">
 	Targets receive notifications about jobs. Choose which targets a job template notifies, and on
 	which events, on the template's page.
@@ -167,58 +176,64 @@
 	<p class="error" role="alert">{error}</p>
 {/if}
 
-<section class="card">
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if targets.length === 0}
-		<p class="muted">No notification targets yet.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>Kind</th>
-						<th>Sends to</th>
-						<th></th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each targets as t (t.id)}
-						<tr>
-							<td>
-								{t.name}
-								{#if t.description}<div class="muted small">{t.description}</div>{/if}
-							</td>
-							<td>{t.kind}</td>
-							<td class="small">
-								<code>{summary(t)}</code>
-								{#if tested[t.id]}
-									<div class:error={!tested[t.id].ok} class:ok={tested[t.id].ok}>
-										{tested[t.id].ok ? 'Test sent.' : tested[t.id].error}
-									</div>
-								{/if}
-							</td>
-							<td>
-								{#if isAdmin}
-									<div class="row-actions">
-										<button class="secondary" onclick={() => test(t)}>Test</button>
-										<button class="secondary" onclick={() => edit(t)}>Edit</button>
-										<button class="danger" onclick={() => remove(t)}>Delete</button>
-									</div>
-								{/if}
-							</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
-	{/if}
-</section>
-
-{#if isAdmin}
+{#if !(adding || editing)}
 	<section class="card">
-		<h2>{editing ? `Edit ${editing.name}` : 'New notification target'}</h2>
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if targets.length === 0}
+			<p class="muted">No notification targets yet.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Name</th>
+							<th>Kind</th>
+							<th>Sends to</th>
+							<th></th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each targets as t (t.id)}
+							<tr>
+								<td>
+									{t.name}
+									{#if t.description}<div class="muted small">{t.description}</div>{/if}
+								</td>
+								<td>{t.kind}</td>
+								<td class="small">
+									<code>{summary(t)}</code>
+									{#if tested[t.id]}
+										<div class:error={!tested[t.id].ok} class:ok={tested[t.id].ok}>
+											{tested[t.id].ok ? 'Test sent.' : tested[t.id].error}
+										</div>
+									{/if}
+								</td>
+								<td>
+									{#if isAdmin}
+										<div class="row-actions">
+											<button class="secondary" onclick={() => test(t)}>Test</button>
+											<button class="secondary" onclick={() => edit(t)}>Edit</button>
+											<button class="danger" onclick={() => remove(t)}>Delete</button>
+										</div>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+	</section>
+{/if}
+
+{#if isAdmin && (adding || editing)}
+	<section class="card">
+		<div class="page-header">
+			<h2>{editing ? `Edit ${editing.name}` : 'New notification target'}</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={reset}>Cancel</button>
+		</div>
 		{#if formError}<p class="error" role="alert">{formError}</p>{/if}
 		<form onsubmit={save}>
 			<div class="form-grid">
@@ -323,7 +338,6 @@
 
 			<div class="actions">
 				<button type="submit">{editing ? 'Save' : 'Create target'}</button>
-				{#if editing}<button type="button" class="secondary" onclick={reset}>Cancel</button>{/if}
 			</div>
 		</form>
 	</section>

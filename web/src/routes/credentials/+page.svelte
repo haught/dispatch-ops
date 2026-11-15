@@ -26,6 +26,8 @@
 	let inputsEl = $state<CredentialInputs>();
 	let formError = $state('');
 	let saving = $state(false);
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	const kindInfo = $derived(kinds.find((k) => k.kind === kind));
 	const mayCreate = $derived(canCreate('credential'));
@@ -77,72 +79,86 @@
 	}
 </script>
 
-<h1>Credentials</h1>
+<div class="page-header">
+	<h1>Credentials</h1>
+	<span class="spacer"></span>
+	{#if mayCreate && !adding}
+		<button onclick={() => (adding = true)}>New credential</button>
+	{/if}
+</div>
 <p class="muted">
 	Secrets jobs use: SSH keys, passwords, tokens, registry and source control logins. Secret values
 	are encrypted and can't be read back; only job runners receive them.
 </p>
 
-<div class="filters">
-	<label>
-		Search
-		<input bind:value={search} placeholder="Name contains…" />
-	</label>
-	<label>
-		Kind
-		<select bind:value={kindFilter}>
-			<option value="">All kinds</option>
-			{#each kinds as k (k.kind)}
-				<option value={k.kind}>{k.label}</option>
-			{/each}
-		</select>
-	</label>
-</div>
+{#if !adding}
+	<div class="filters">
+		<label>
+			Search
+			<input bind:value={search} placeholder="Name contains…" />
+		</label>
+		<label>
+			Kind
+			<select bind:value={kindFilter}>
+				<option value="">All kinds</option>
+				{#each kinds as k (k.kind)}
+					<option value={k.kind}>{k.label}</option>
+				{/each}
+			</select>
+		</label>
+	</div>
 
-{#if error}
-	<p class="error" role="alert">{error}</p>
+	{#if error}
+		<p class="error" role="alert">{error}</p>
+	{/if}
+
+	<section class="card">
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if credentials.length === 0}
+			<p class="muted">No credentials{search || kindFilter ? ' match' : ' yet'}.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Name</th>
+							<th>Kind</th>
+							<th>Details</th>
+							<th>Updated</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each credentials as c (c.id)}
+							<tr>
+								<td>
+									<a href="/credentials/{c.id}">{c.name}</a>
+									{#if c.description}<div class="muted small">{c.description}</div>{/if}
+								</td>
+								<td>{kindLabel(c.kind)}</td>
+								<td class="small"><code>{summary(c)}</code></td>
+								<td class="small">{fmtTime(c.updatedAt)}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			{#if total > credentials.length}
+				<p class="muted">
+					Showing {credentials.length} of {total}. Narrow the search to see others.
+				</p>
+			{/if}
+		{/if}
+	</section>
 {/if}
 
-<section class="card">
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if credentials.length === 0}
-		<p class="muted">No credentials{search || kindFilter ? ' match' : ' yet'}.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>Kind</th>
-						<th>Details</th>
-						<th>Updated</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each credentials as c (c.id)}
-						<tr>
-							<td>
-								<a href="/credentials/{c.id}">{c.name}</a>
-								{#if c.description}<div class="muted small">{c.description}</div>{/if}
-							</td>
-							<td>{kindLabel(c.kind)}</td>
-							<td class="small"><code>{summary(c)}</code></td>
-							<td class="small">{fmtTime(c.updatedAt)}</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
-		{#if total > credentials.length}
-			<p class="muted">Showing {credentials.length} of {total}. Narrow the search to see others.</p>
-		{/if}
-	{/if}
-</section>
-
-{#if mayCreate}
+{#if mayCreate && adding}
 	<section class="card">
-		<h2>New credential</h2>
+		<div class="page-header">
+			<h2>New credential</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={() => (adding = false)}>Cancel</button>
+		</div>
 		{#if formError}<p class="error" role="alert">{formError}</p>{/if}
 		<form onsubmit={create}>
 			<div class="form-grid">

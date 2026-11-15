@@ -14,7 +14,10 @@
 	} from '#lib/api/client.js';
 	import { parseAnsi } from '#lib/ansi.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
+	import TabPanel from '#lib/components/TabPanel.svelte';
+	import Tabs from '#lib/components/Tabs.svelte';
 	import { fmtDuration, fmtTime } from '#lib/format.js';
+	import { activeTab, type Tab } from '#lib/tabs.svelte.js';
 
 	let job = $state<Job | null>(null);
 	// Raw: the log can be long, and lines never change once added.
@@ -39,6 +42,18 @@
 
 	const finished = $derived(job ? finishedStatuses.includes(job.status) : false);
 	const failedHosts = $derived(hosts.filter((h) => h.failed > 0 || h.unreachable > 0).length);
+
+	const tabs = $derived<Tab[]>([
+		{ id: 'output', label: 'Output' },
+		...(job?.config.jobType === 'ansible'
+			? [{ id: 'hosts', label: 'Hosts', count: hosts.length || undefined }]
+			: []),
+		{ id: 'details', label: 'Details' },
+		...(deliveries.length > 0
+			? [{ id: 'notifications', label: 'Notifications', count: deliveries.length }]
+			: [])
+	]);
+	const tab = $derived(activeTab(tabs));
 
 	async function loadDeliveries(id: string) {
 		const { data } = await api.GET('/api/v1/jobs/{jobId}/notifications', {
@@ -202,8 +217,13 @@
 		logEl?.scrollTo({ top: logEl.scrollHeight });
 	}
 
+	// The log can't scroll while its tab is hidden; catch up when it shows.
+	$effect(() => {
+		if (tab === 'output') scrollIfFollowing();
+	});
+
 	function onScroll() {
-		if (!logEl) return;
+		if (!logEl || tab !== 'output') return;
 		follow = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
 	}
 
@@ -266,234 +286,261 @@
 		<p class="error" role="alert">{error}</p>
 	{/if}
 
-	<section class="card details">
-		<dl>
-			<dt>Type</dt>
-			<dd>{job.config.jobType}</dd>
-			{#if job.config.project}
-				<dt>Project</dt>
-				<dd>
-					{job.config.project.name}
-					<span class="muted">
-						(<code>{job.config.project.scmUrl}</code> at <code>{job.config.project.scmRef}</code>)
-					</span>
-				</dd>
-				<dt>
-					{job.config.jobType === 'ansible'
-						? 'Playbook'
-						: job.config.jobType === 'inventory_sync'
-							? 'Inventory source'
-							: 'Script'}
-				</dt>
-				<dd><code>{[job.config.entrypoint, ...job.config.arguments].join(' ')}</code></dd>
-				<dt>Revision</dt>
-				<dd>
-					{#if job.scmRevision}<code title={job.scmRevision}>{job.scmRevision.slice(0, 12)}</code
-						>{:else}—{/if}
-				</dd>
+	<p class="summary muted">
+		{#if job.jobTemplateId}
+			<span>Template <a href="/templates/{job.jobTemplateId}">{job.name}</a></span>
+		{/if}
+		<span>
+			{#if job.schedule}
+				Launched by schedule {job.schedule.name}
 			{:else}
-				<dt>Command</dt>
-				<dd><code>{job.config.command.join(' ')}</code></dd>
+				Launched by {job.launchedBy?.username ?? '—'} ({job.launchType})
 			{/if}
-			<dt>Image</dt>
-			<dd><code>{job.config.executionEnvironment.image}</code></dd>
-			{#if job.config.limit}
-				<dt>Limit</dt>
-				<dd><code>{job.config.limit}</code></dd>
-			{/if}
-			{#if job.config.tags}
-				<dt>Tags</dt>
-				<dd><code>{job.config.tags}</code></dd>
-			{/if}
-			{#if job.config.skipTags}
-				<dt>Skip tags</dt>
-				<dd><code>{job.config.skipTags}</code></dd>
-			{/if}
-			<dt>Launched by</dt>
-			<dd>
-				{#if job.schedule}
-					schedule <strong>{job.schedule.name}</strong>
-				{:else}
-					{job.launchedBy?.username ?? '—'} ({job.launchType})
-				{/if}
-				{#if job.relaunchOf}
-					<span class="muted">· rerun of <a href="/jobs/{job.relaunchOf}">an earlier job</a></span>
-				{/if}
-			</dd>
-			{#if job.jobTemplateId}
-				<dt>Template</dt>
-				<dd><a href="/templates/{job.jobTemplateId}">{job.name}</a></dd>
-			{/if}
-			{#if job.syncInventoryId}
-				<dt>Syncs</dt>
-				<dd><a href="/inventories/{job.syncInventoryId}">the inventory</a></dd>
-			{/if}
-			<dt>Created</dt>
-			<dd>{fmtTime(job.createdAt)}</dd>
-			<dt>Started</dt>
-			<dd>{fmtTime(job.startedAt)}</dd>
-			<dt>Duration</dt>
-			<dd>{duration(job)}</dd>
-			{#if job.exitCode !== null}
-				<dt>Exit code</dt>
-				<dd>{job.exitCode}</dd>
-			{/if}
-		</dl>
-	</section>
+		</span>
+		{#if job.startedAt}<span>Started {fmtTime(job.startedAt)}</span>{/if}
+		<span>Duration {duration(job)}</span>
+	</p>
 
-	{#if job.config.jobType === 'ansible'}
-		<section class="card hosts">
-			<h2>Hosts</h2>
-			{#if hosts.length === 0}
-				<p class="muted">{finished ? 'No host results.' : 'No host results yet.'}</p>
-			{:else}
+	<Tabs {tabs} label="Job sections" />
+
+	<TabPanel id="output" active={tab}>
+		<section class="card log-card">
+			<pre class="log" bind:this={logEl} onscroll={onScroll}>{#each lines as line (line.seq)}<span
+						class="line {line.type}"
+						>{#each parseAnsi(line.stdout) as seg, i (i)}<span class={seg.cls}>{seg.text}</span
+							>{/each}</span
+					>{'\n'}{:else}<span class="muted">{finished ? 'No output.' : 'Waiting for output…'}</span
+					>{/each}</pre>
+			{#if !follow && live}
+				<button class="secondary jump" onclick={() => ((follow = true), scrollIfFollowing())}>
+					Follow output ↓
+				</button>
+			{/if}
+		</section>
+	</TabPanel>
+
+	<TabPanel id="hosts" active={tab}>
+		{#if job.config.jobType === 'ansible'}
+			<section class="card">
+				<h2>Hosts</h2>
+				{#if hosts.length === 0}
+					<p class="muted">{finished ? 'No host results.' : 'No host results yet.'}</p>
+				{:else}
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr>
+									<th>Host</th>
+									<th>Result</th>
+									<th class="num">OK</th>
+									<th class="num">Changed</th>
+									<th class="num">Failed</th>
+									<th class="num">Unreachable</th>
+									<th class="num">Skipped</th>
+									{#if hostExtras}
+										<th class="num">Rescued</th>
+										<th class="num">Ignored</th>
+									{/if}
+								</tr>
+							</thead>
+							<tbody>
+								{#each hosts as h (h.hostName)}
+									<tr class:selected={selectedHost === h.hostName}>
+										<td>
+											<button
+												class="link"
+												aria-expanded={selectedHost === h.hostName}
+												onclick={() => selectHost(h.hostName)}>{h.hostName}</button
+											>
+										</td>
+										<td><StatusBadge status={h.status} /></td>
+										<td class="num">{h.ok}</td>
+										<td class="num">{h.changed}</td>
+										<td class="num">{h.failed}</td>
+										<td class="num">{h.unreachable}</td>
+										<td class="num">{h.skipped}</td>
+										{#if hostExtras}
+											<td class="num">{h.rescued}</td>
+											<td class="num">{h.ignored}</td>
+										{/if}
+									</tr>
+									{#if selectedHost === h.hostName}
+										<tr class="host-detail">
+											<td colspan={hostExtras ? 9 : 7}>
+												{#if hostEventsError}
+													<p class="error">{hostEventsError}</p>
+												{:else if hostEvents.length === 0}
+													<p class="muted">No task results.</p>
+												{:else}
+													<table class="tasks">
+														<thead>
+															<tr>
+																<th>Task</th>
+																<th>Result</th>
+																<th>Message</th>
+															</tr>
+														</thead>
+														<tbody>
+															{#each hostEvents as e (e.seq)}
+																<tr>
+																	<td>
+																		{e.data?.task ?? ''}
+																		{#if e.data?.play}<div class="muted small">
+																				{e.data.play}
+																			</div>{/if}
+																	</td>
+																	<td>
+																		<StatusBadge status={outcome(e)} />
+																		{#if e.data?.ignored}<span class="muted small">ignored</span
+																			>{/if}
+																	</td>
+																	<td class="msg"
+																		>{#each parseAnsi(String(e.data?.msg ?? e.data?.stderr ?? '')) as seg, i (i)}<span
+																				class={seg.cls}>{seg.text}</span
+																			>{/each}</td
+																	>
+																</tr>
+															{/each}
+														</tbody>
+													</table>
+												{/if}
+											</td>
+										</tr>
+									{/if}
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			</section>
+		{/if}
+	</TabPanel>
+
+	<TabPanel id="details" active={tab}>
+		<section class="card">
+			<dl>
+				<dt>Type</dt>
+				<dd>{job.config.jobType}</dd>
+				{#if job.config.project}
+					<dt>Project</dt>
+					<dd>
+						{job.config.project.name}
+						<span class="muted">
+							(<code>{job.config.project.scmUrl}</code> at <code>{job.config.project.scmRef}</code>)
+						</span>
+					</dd>
+					<dt>
+						{job.config.jobType === 'ansible'
+							? 'Playbook'
+							: job.config.jobType === 'inventory_sync'
+								? 'Inventory source'
+								: 'Script'}
+					</dt>
+					<dd><code>{[job.config.entrypoint, ...job.config.arguments].join(' ')}</code></dd>
+					<dt>Revision</dt>
+					<dd>
+						{#if job.scmRevision}<code title={job.scmRevision}>{job.scmRevision.slice(0, 12)}</code
+							>{:else}—{/if}
+					</dd>
+				{:else}
+					<dt>Command</dt>
+					<dd><code>{job.config.command.join(' ')}</code></dd>
+				{/if}
+				<dt>Image</dt>
+				<dd><code>{job.config.executionEnvironment.image}</code></dd>
+				{#if job.config.limit}
+					<dt>Limit</dt>
+					<dd><code>{job.config.limit}</code></dd>
+				{/if}
+				{#if job.config.tags}
+					<dt>Tags</dt>
+					<dd><code>{job.config.tags}</code></dd>
+				{/if}
+				{#if job.config.skipTags}
+					<dt>Skip tags</dt>
+					<dd><code>{job.config.skipTags}</code></dd>
+				{/if}
+				<dt>Launched by</dt>
+				<dd>
+					{#if job.schedule}
+						schedule <strong>{job.schedule.name}</strong>
+					{:else}
+						{job.launchedBy?.username ?? '—'} ({job.launchType})
+					{/if}
+					{#if job.relaunchOf}
+						<span class="muted">· rerun of <a href="/jobs/{job.relaunchOf}">an earlier job</a></span
+						>
+					{/if}
+				</dd>
+				{#if job.jobTemplateId}
+					<dt>Template</dt>
+					<dd><a href="/templates/{job.jobTemplateId}">{job.name}</a></dd>
+				{/if}
+				{#if job.syncInventoryId}
+					<dt>Syncs</dt>
+					<dd><a href="/inventories/{job.syncInventoryId}">the inventory</a></dd>
+				{/if}
+				<dt>Created</dt>
+				<dd>{fmtTime(job.createdAt)}</dd>
+				<dt>Started</dt>
+				<dd>{fmtTime(job.startedAt)}</dd>
+				<dt>Duration</dt>
+				<dd>{duration(job)}</dd>
+				{#if job.exitCode !== null}
+					<dt>Exit code</dt>
+					<dd>{job.exitCode}</dd>
+				{/if}
+			</dl>
+		</section>
+	</TabPanel>
+
+	<TabPanel id="notifications" active={tab}>
+		{#if deliveries.length > 0}
+			<section class="card">
+				<h2>Notifications</h2>
 				<div class="table-wrap">
 					<table>
 						<thead>
 							<tr>
-								<th>Host</th>
-								<th>Result</th>
-								<th class="num">OK</th>
-								<th class="num">Changed</th>
-								<th class="num">Failed</th>
-								<th class="num">Unreachable</th>
-								<th class="num">Skipped</th>
-								{#if hostExtras}
-									<th class="num">Rescued</th>
-									<th class="num">Ignored</th>
-								{/if}
+								<th>Target</th>
+								<th>Event</th>
+								<th>Status</th>
+								<th>Details</th>
 							</tr>
 						</thead>
 						<tbody>
-							{#each hosts as h (h.hostName)}
-								<tr class:selected={selectedHost === h.hostName}>
+							{#each deliveries as d (d.id)}
+								<tr>
+									<td>{d.targetName} <span class="muted small">{d.targetKind}</span></td>
+									<td>{d.event}</td>
 									<td>
-										<button
-											class="link"
-											aria-expanded={selectedHost === h.hostName}
-											onclick={() => selectHost(h.hostName)}>{h.hostName}</button
+										<span
+											class="badge"
+											class:accent={d.status === 'sent'}
+											class:warn={d.status !== 'sent'}>{d.status}</span
 										>
 									</td>
-									<td><StatusBadge status={h.status} /></td>
-									<td class="num">{h.ok}</td>
-									<td class="num">{h.changed}</td>
-									<td class="num">{h.failed}</td>
-									<td class="num">{h.unreachable}</td>
-									<td class="num">{h.skipped}</td>
-									{#if hostExtras}
-										<td class="num">{h.rescued}</td>
-										<td class="num">{h.ignored}</td>
-									{/if}
+									<td class="small">
+										{#if d.status === 'sent'}
+											{fmtTime(d.sentAt)}
+										{:else if d.status === 'pending' && d.attempts > 0}
+											Attempt {d.attempts} failed: {d.lastError}. Retrying at {fmtTime(
+												d.nextAttemptAt
+											)}.
+										{:else if d.status === 'failed'}
+											<span class="error">{d.lastError}</span>
+										{:else}
+											<span class="muted">Sending…</span>
+										{/if}
+									</td>
 								</tr>
-								{#if selectedHost === h.hostName}
-									<tr class="host-detail">
-										<td colspan={hostExtras ? 9 : 7}>
-											{#if hostEventsError}
-												<p class="error">{hostEventsError}</p>
-											{:else if hostEvents.length === 0}
-												<p class="muted">No task results.</p>
-											{:else}
-												<table class="tasks">
-													<thead>
-														<tr>
-															<th>Task</th>
-															<th>Result</th>
-															<th>Message</th>
-														</tr>
-													</thead>
-													<tbody>
-														{#each hostEvents as e (e.seq)}
-															<tr>
-																<td>
-																	{e.data?.task ?? ''}
-																	{#if e.data?.play}<div class="muted small">
-																			{e.data.play}
-																		</div>{/if}
-																</td>
-																<td>
-																	<StatusBadge status={outcome(e)} />
-																	{#if e.data?.ignored}<span class="muted small">ignored</span>{/if}
-																</td>
-																<td class="msg"
-																	>{#each parseAnsi(String(e.data?.msg ?? e.data?.stderr ?? '')) as seg, i (i)}<span
-																			class={seg.cls}>{seg.text}</span
-																		>{/each}</td
-																>
-															</tr>
-														{/each}
-													</tbody>
-												</table>
-											{/if}
-										</td>
-									</tr>
-								{/if}
 							{/each}
 						</tbody>
 					</table>
 				</div>
-			{/if}
-		</section>
-	{/if}
-
-	{#if deliveries.length > 0}
-		<section class="card notifications">
-			<h2>Notifications</h2>
-			<div class="table-wrap">
-				<table>
-					<thead>
-						<tr>
-							<th>Target</th>
-							<th>Event</th>
-							<th>Status</th>
-							<th>Details</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each deliveries as d (d.id)}
-							<tr>
-								<td>{d.targetName} <span class="muted small">{d.targetKind}</span></td>
-								<td>{d.event}</td>
-								<td>
-									<span
-										class="badge"
-										class:accent={d.status === 'sent'}
-										class:warn={d.status !== 'sent'}>{d.status}</span
-									>
-								</td>
-								<td class="small">
-									{#if d.status === 'sent'}
-										{fmtTime(d.sentAt)}
-									{:else if d.status === 'pending' && d.attempts > 0}
-										Attempt {d.attempts} failed: {d.lastError}. Retrying at {fmtTime(
-											d.nextAttemptAt
-										)}.
-									{:else if d.status === 'failed'}
-										<span class="error">{d.lastError}</span>
-									{:else}
-										<span class="muted">Sending…</span>
-									{/if}
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		</section>
-	{/if}
-
-	<section class="card log-card">
-		<pre class="log" bind:this={logEl} onscroll={onScroll}>{#each lines as line (line.seq)}<span
-					class="line {line.type}"
-					>{#each parseAnsi(line.stdout) as seg, i (i)}<span class={seg.cls}>{seg.text}</span
-						>{/each}</span
-				>{'\n'}{:else}<span class="muted">{finished ? 'No output.' : 'Waiting for output…'}</span
-				>{/each}</pre>
-		{#if !follow && live}
-			<button class="secondary jump" onclick={() => ((follow = true), scrollIfFollowing())}>
-				Follow output ↓
-			</button>
+			</section>
 		{/if}
-	</section>
+	</TabPanel>
 {:else if error}
 	<p class="error" role="alert">{error}</p>
 	<p><a href="/jobs">Back to jobs</a></p>
@@ -506,7 +553,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.75rem;
-		margin-bottom: 1rem;
+		margin-bottom: 0.5rem;
 	}
 
 	.header h1 {
@@ -526,8 +573,12 @@
 		margin-top: 0;
 	}
 
-	.details {
-		margin-bottom: 1rem;
+	.summary {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem 1.5rem;
+		margin: 0;
+		font-size: 0.9rem;
 	}
 
 	dl {
@@ -544,11 +595,6 @@
 	dd {
 		margin: 0;
 		overflow-wrap: anywhere;
-	}
-
-	.hosts,
-	.notifications {
-		margin-bottom: 1rem;
 	}
 
 	.table-wrap {

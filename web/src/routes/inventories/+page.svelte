@@ -16,6 +16,8 @@
 	let vars = $state('');
 	let formError = $state('');
 	let saving = $state(false);
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	const mayCreate = $derived(canCreate('inventory'));
 
@@ -55,65 +57,79 @@
 	}
 </script>
 
-<h1>Inventories</h1>
+<div class="page-header">
+	<h1>Inventories</h1>
+	<span class="spacer"></span>
+	{#if mayCreate && !adding}
+		<button onclick={() => (adding = true)}>New inventory</button>
+	{/if}
+</div>
 <p class="muted">
 	Hosts and host groups jobs run against, with variables at the inventory, group and host level.
 </p>
 
-<label class="search">
-	Search
-	<input bind:value={search} placeholder="Name contains…" />
-</label>
+{#if !adding}
+	<label class="search">
+		Search
+		<input bind:value={search} placeholder="Name contains…" />
+	</label>
 
-{#if error}
-	<p class="error" role="alert">{error}</p>
+	{#if error}
+		<p class="error" role="alert">{error}</p>
+	{/if}
+
+	<section class="card">
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if inventories.length === 0}
+			<p class="muted">No inventories{search ? ' match' : ' yet'}.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Name</th>
+							<th>Hosts</th>
+							<th>Groups</th>
+							<th>Updated</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each inventories as inv (inv.id)}
+							<tr>
+								<td>
+									<a href="/inventories/{inv.id}">{inv.name}</a>
+									{#if inv.source}<span
+											class="badge accent"
+											title="Synced from {inv.source.sourcePath} in {inv.source.projectName}"
+											>synced</span
+										>{/if}
+									{#if inv.description}<div class="muted small">{inv.description}</div>{/if}
+								</td>
+								<td>{inv.hostCount}</td>
+								<td>{inv.groupCount}</td>
+								<td class="small">{fmtTime(inv.updatedAt)}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			{#if total > inventories.length}
+				<p class="muted">
+					Showing {inventories.length} of {total}. Narrow the search to see others.
+				</p>
+			{/if}
+		{/if}
+	</section>
 {/if}
 
-<section class="card">
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if inventories.length === 0}
-		<p class="muted">No inventories{search ? ' match' : ' yet'}.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>Hosts</th>
-						<th>Groups</th>
-						<th>Updated</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each inventories as inv (inv.id)}
-						<tr>
-							<td>
-								<a href="/inventories/{inv.id}">{inv.name}</a>
-								{#if inv.source}<span
-										class="badge accent"
-										title="Synced from {inv.source.sourcePath} in {inv.source.projectName}"
-										>synced</span
-									>{/if}
-								{#if inv.description}<div class="muted small">{inv.description}</div>{/if}
-							</td>
-							<td>{inv.hostCount}</td>
-							<td>{inv.groupCount}</td>
-							<td class="small">{fmtTime(inv.updatedAt)}</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
-		{#if total > inventories.length}
-			<p class="muted">Showing {inventories.length} of {total}. Narrow the search to see others.</p>
-		{/if}
-	{/if}
-</section>
-
-{#if mayCreate}
+{#if mayCreate && adding}
 	<section class="card">
-		<h2>New inventory</h2>
+		<div class="page-header">
+			<h2>New inventory</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={() => (adding = false)}>Cancel</button>
+		</div>
 		{#if formError}<p class="error" role="alert">{formError}</p>{/if}
 		<form onsubmit={create}>
 			<div class="form-grid">

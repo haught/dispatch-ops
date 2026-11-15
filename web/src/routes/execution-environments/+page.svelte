@@ -30,6 +30,8 @@
 	let registryCredentialId = $state('');
 	let formError = $state('');
 	let saving = $state(false);
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	async function load() {
 		const { data, error: err } = await api.GET('/api/v1/execution-environments', {
@@ -66,6 +68,7 @@
 
 	function reset() {
 		editing = null;
+		adding = false;
 		name = description = image = registryCredentialId = '';
 		pullPolicy = 'IfNotPresent';
 		formError = '';
@@ -127,80 +130,92 @@
 	}
 </script>
 
-<h1>Execution environments</h1>
+<div class="page-header">
+	<h1>Execution environments</h1>
+	<span class="spacer"></span>
+	{#if isAdmin && !(adding || editing)}
+		<button onclick={() => (adding = true)}>New execution environment</button>
+	{/if}
+</div>
 <p class="muted">
 	The container images jobs run in. Each is built with the Dispatch Ops runner as its entrypoint,
 	plus the tools its jobs need. Job templates choose one.
 </p>
 
-<label class="search">
-	Search
-	<input bind:value={search} placeholder="Name contains…" />
-</label>
+{#if !(adding || editing)}
+	<label class="search">
+		Search
+		<input bind:value={search} placeholder="Name contains…" />
+	</label>
 
-{#if error}
-	<p class="error" role="alert">{error}</p>
+	{#if error}
+		<p class="error" role="alert">{error}</p>
+	{/if}
+
+	<section class="card">
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if images.length === 0}
+			<p class="muted">No execution environments{search ? ' match' : ' yet'}.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Name</th>
+							<th>Image</th>
+							<th>Pull</th>
+							<th>Templates</th>
+							<th></th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each images as e (e.id)}
+							<tr>
+								<td>
+									{e.name}
+									{#if e.description}<div class="muted small">{e.description}</div>{/if}
+								</td>
+								<td class="small">
+									<code>{e.image}</code>
+									{#if e.registryCredentialId}
+										<div class="muted">
+											pulled with
+											<a href="/credentials/{e.registryCredentialId}"
+												>{credentialName(e.registryCredentialId)}</a
+											>
+										</div>
+									{/if}
+								</td>
+								<td class="small">{e.pullPolicy}</td>
+								<td>{usedBy(e)}</td>
+								<td>
+									{#if isAdmin}
+										<div class="row-actions">
+											<button class="secondary" onclick={() => edit(e)}>Edit</button>
+											<button class="danger" onclick={() => remove(e)}>Delete</button>
+										</div>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			{#if total > images.length}
+				<p class="muted">Showing {images.length} of {total}. Narrow the search to see others.</p>
+			{/if}
+		{/if}
+	</section>
 {/if}
 
-<section class="card">
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if images.length === 0}
-		<p class="muted">No execution environments{search ? ' match' : ' yet'}.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>Image</th>
-						<th>Pull</th>
-						<th>Templates</th>
-						<th></th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each images as e (e.id)}
-						<tr class:editing={editing?.id === e.id}>
-							<td>
-								{e.name}
-								{#if e.description}<div class="muted small">{e.description}</div>{/if}
-							</td>
-							<td class="small">
-								<code>{e.image}</code>
-								{#if e.registryCredentialId}
-									<div class="muted">
-										pulled with
-										<a href="/credentials/{e.registryCredentialId}"
-											>{credentialName(e.registryCredentialId)}</a
-										>
-									</div>
-								{/if}
-							</td>
-							<td class="small">{e.pullPolicy}</td>
-							<td>{usedBy(e)}</td>
-							<td>
-								{#if isAdmin}
-									<div class="row-actions">
-										<button class="secondary" onclick={() => edit(e)}>Edit</button>
-										<button class="danger" onclick={() => remove(e)}>Delete</button>
-									</div>
-								{/if}
-							</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
-		{#if total > images.length}
-			<p class="muted">Showing {images.length} of {total}. Narrow the search to see others.</p>
-		{/if}
-	{/if}
-</section>
-
-{#if isAdmin}
+{#if isAdmin && (adding || editing)}
 	<section class="card">
-		<h2>{editing ? `Edit ${editing.name}` : 'New execution environment'}</h2>
+		<div class="page-header">
+			<h2>{editing ? `Edit ${editing.name}` : 'New execution environment'}</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={reset}>Cancel</button>
+		</div>
 		{#if formError}<p class="error" role="alert">{formError}</p>{/if}
 		<form onsubmit={save}>
 			<div class="form-grid">
@@ -248,7 +263,6 @@
 				<button type="submit" disabled={saving}>
 					{editing ? 'Save' : 'Add execution environment'}
 				</button>
-				{#if editing}<button type="button" class="secondary" onclick={reset}>Cancel</button>{/if}
 			</div>
 		</form>
 	</section>
@@ -257,9 +271,5 @@
 <style>
 	.search {
 		max-width: 320px;
-	}
-
-	tr.editing td {
-		background: var(--bg);
 	}
 </style>

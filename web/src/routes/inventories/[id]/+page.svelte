@@ -15,10 +15,13 @@
 	import HostForm from '#lib/components/HostForm.svelte';
 	import InventorySourceCard from '#lib/components/InventorySourceCard.svelte';
 	import ResourceAccess from '#lib/components/ResourceAccess.svelte';
+	import TabPanel from '#lib/components/TabPanel.svelte';
+	import Tabs from '#lib/components/Tabs.svelte';
 	import UsedBy from '#lib/components/UsedBy.svelte';
 	import VarsField from '#lib/components/VarsField.svelte';
 	import { fmtTime, fmtVars, parseVars, varsError } from '#lib/format.js';
-	import { can, loadMyGrants } from '#lib/permissions.svelte.js';
+	import { can, canSeeAccess, loadMyGrants } from '#lib/permissions.svelte.js';
+	import { activeTab, selectTab, type Tab } from '#lib/tabs.svelte.js';
 
 	const id = $derived(page.params.id ?? '');
 
@@ -51,6 +54,15 @@
 	const synced = $derived(Boolean(inventory?.source));
 	const canEditHosts = $derived(canAdmin && !synced);
 	const groupName = $derived(new Map(groups.map((g) => [g.id, g.name])));
+
+	const tabs = $derived<Tab[]>([
+		{ id: 'hosts', label: 'Hosts', count: inventory?.hostCount },
+		{ id: 'groups', label: 'Groups', count: inventory?.groupCount },
+		{ id: 'source', label: 'Source' },
+		{ id: 'settings', label: 'Settings' },
+		...(canSeeAccess('inventory', id) ? [{ id: 'access', label: 'Access' }] : [])
+	]);
+	const tab = $derived(activeTab(tabs));
 
 	function fill(inv: Inventory) {
 		inventory = inv;
@@ -214,6 +226,12 @@
 		URL.revokeObjectURL(url);
 	}
 
+	/** Shows the hosts of one group. */
+	function showHosts(g: Group) {
+		hostGroup = g.id;
+		selectTab(tabs, 'hosts');
+	}
+
 	function parentsOf(g: Group): string[] {
 		return groups.filter((p) => p.childIds.includes(g.id)).map((p) => p.name);
 	}
@@ -222,7 +240,6 @@
 {#if inventory}
 	<div class="page-header">
 		<h1>{inventory.name}</h1>
-		<span class="muted">{inventory.hostCount} hosts · {inventory.groupCount} groups</span>
 		<span class="spacer"></span>
 		<button class="secondary" onclick={toggleExport}>
 			{exported === null ? 'Ansible inventory' : 'Hide Ansible inventory'}
@@ -244,182 +261,200 @@
 		</section>
 	{/if}
 
-	<section class="card">
-		{#if canAdmin}
-			{#if formError}<p class="error" role="alert">{formError}</p>{/if}
-			<form onsubmit={save}>
-				<div class="form-grid">
-					<label>Name <input bind:value={name} maxlength="255" required /></label>
-					<label>Description <input bind:value={description} maxlength="4096" /></label>
-				</div>
-				<VarsField bind:value={vars} label="Inventory variables" />
-				<div class="form-actions">
-					<button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
-					{#if message}<span class="muted">{message}</span>{/if}
-				</div>
-			</form>
-		{:else}
-			<h2>Inventory variables</h2>
-			{#if vars}<pre class="code">{vars}</pre>{:else}<p class="muted">None.</p>{/if}
-		{/if}
-		<p class="muted small">Updated {fmtTime(inventory.updatedAt)}</p>
-	</section>
+	<Tabs {tabs} label="Inventory sections" />
 
-	<InventorySourceCard {inventory} {canAdmin} onchanged={refresh} />
-
-	<section class="card">
-		<div class="page-header">
-			<h2>Hosts</h2>
-			<span class="spacer"></span>
-			{#if canEditHosts}<button onclick={() => openHost('new')}>Add host</button>{/if}
-		</div>
-		{#if synced}
-			<p class="muted small">
-				Synced from <code>{inventory.source?.sourcePath}</code>: each sync replaces these hosts and
-				groups, so they can't be edited here.
-			</p>
-		{/if}
-		<div class="filters">
-			<label>Search <input bind:value={hostSearch} placeholder="Name contains…" /></label>
-			<label>
-				Group
-				<select bind:value={hostGroup}>
-					<option value="">Any group</option>
-					{#each groups as g (g.id)}
-						<option value={g.id}>{g.name}</option>
-					{/each}
-				</select>
-			</label>
-		</div>
-		{#if hostError}<p class="error" role="alert">{hostError}</p>{/if}
-		{#if hosts.length === 0}
-			<p class="muted">
-				{hostSearch || hostGroup ? 'No hosts match.' : 'No hosts yet.'}
-			</p>
-		{:else}
-			<div class="table-wrap">
-				<table>
-					<thead>
-						<tr>
-							<th>Host</th>
-							<th>Groups</th>
-							<th>Variables</th>
-							<th></th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each hosts as h (h.id)}
-							<tr class:disabled={!h.enabled}>
-								<td>
-									<code>{h.name}</code>
-									{#if !h.enabled}<span class="badge warn">disabled</span>{/if}
-									{#if h.description}<div class="muted small">{h.description}</div>{/if}
-								</td>
-								<td class="small">
-									{h.groupIds.map((g) => groupName.get(g) ?? '?').join(', ')}
-								</td>
-								<td class="small muted"
-									>{Object.keys(h.variables).length
-										? `${Object.keys(h.variables).length} set`
-										: ''}</td
-								>
-								<td>
-									<div class="row-actions">
-										<button class="secondary" onclick={() => openHost(h)}>
-											{canEditHosts ? 'Edit' : 'View'}
-										</button>
-										{#if canEditHosts}
-											<button class="danger" onclick={() => removeHost(h)}>Delete</button>
-										{/if}
-									</div>
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
+	<TabPanel id="hosts" active={tab}>
+		<section class="card">
+			<div class="page-header">
+				<h2>Hosts</h2>
+				<span class="spacer"></span>
+				{#if canEditHosts && !hostOpen}<button onclick={() => openHost('new')}>Add host</button
+					>{/if}
 			</div>
-			{#if hostTotal > hosts.length}
-				<p class="muted">Showing {hosts.length} of {hostTotal}. Narrow the search to see others.</p>
+			{#if synced}
+				<p class="muted small">
+					Synced from <code>{inventory.source?.sourcePath}</code>: each sync replaces these hosts
+					and groups, so they can't be edited here.
+				</p>
 			{/if}
-		{/if}
-		{#if hostOpen}
-			{#key hostOpen === 'new' ? 'new' : hostOpen.id}
-				<HostForm
-					inventoryId={inventory.id}
-					host={hostOpen === 'new' ? null : hostOpen}
-					{groups}
-					readonly={!canEditHosts}
-					onsaved={hostSaved}
-					oncancel={() => (hostOpen = null)}
-				/>
-			{/key}
-		{/if}
-	</section>
+			{#if hostOpen}
+				{#key hostOpen === 'new' ? 'new' : hostOpen.id}
+					<HostForm
+						inventoryId={inventory.id}
+						host={hostOpen === 'new' ? null : hostOpen}
+						{groups}
+						readonly={!canEditHosts}
+						onsaved={hostSaved}
+						oncancel={() => (hostOpen = null)}
+					/>
+				{/key}
+			{:else}
+				<div class="filters">
+					<label>Search <input bind:value={hostSearch} placeholder="Name contains…" /></label>
+					<label>
+						Group
+						<select bind:value={hostGroup}>
+							<option value="">Any group</option>
+							{#each groups as g (g.id)}
+								<option value={g.id}>{g.name}</option>
+							{/each}
+						</select>
+					</label>
+				</div>
+				{#if hostError}<p class="error" role="alert">{hostError}</p>{/if}
+				{#if hosts.length === 0}
+					<p class="muted">
+						{hostSearch || hostGroup ? 'No hosts match.' : 'No hosts yet.'}
+					</p>
+				{:else}
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr>
+									<th>Host</th>
+									<th>Groups</th>
+									<th>Variables</th>
+									<th></th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each hosts as h (h.id)}
+									<tr class:disabled={!h.enabled}>
+										<td>
+											<code>{h.name}</code>
+											{#if !h.enabled}<span class="badge warn">disabled</span>{/if}
+											{#if h.description}<div class="muted small">{h.description}</div>{/if}
+										</td>
+										<td class="small">
+											{h.groupIds.map((g) => groupName.get(g) ?? '?').join(', ')}
+										</td>
+										<td class="small muted"
+											>{Object.keys(h.variables).length
+												? `${Object.keys(h.variables).length} set`
+												: ''}</td
+										>
+										<td>
+											<div class="row-actions">
+												<button class="secondary" onclick={() => openHost(h)}>
+													{canEditHosts ? 'Edit' : 'View'}
+												</button>
+												{#if canEditHosts}
+													<button class="danger" onclick={() => removeHost(h)}>Delete</button>
+												{/if}
+											</div>
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+					{#if hostTotal > hosts.length}
+						<p class="muted">
+							Showing {hosts.length} of {hostTotal}. Narrow the search to see others.
+						</p>
+					{/if}
+				{/if}
+			{/if}
+		</section>
+	</TabPanel>
 
-	<section class="card">
-		<div class="page-header">
-			<h2>Groups</h2>
-			<span class="spacer"></span>
-			{#if canEditHosts}<button onclick={() => openGroup('new')}>Add group</button>{/if}
-		</div>
-		{#if groupError}<p class="error" role="alert">{groupError}</p>{/if}
-		{#if groups.length === 0}
-			<p class="muted">No groups yet. Every host is in Ansible's <code>all</code> group.</p>
-		{:else}
-			<div class="table-wrap">
-				<table>
-					<thead>
-						<tr>
-							<th>Group</th>
-							<th>Children</th>
-							<th>Member of</th>
-							<th></th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each groups as g (g.id)}
-							<tr>
-								<td>
-									<code>{g.name}</code>
-									{#if g.description}<div class="muted small">{g.description}</div>{/if}
-								</td>
-								<td class="small">
-									{g.childIds.map((c) => groupName.get(c) ?? '?').join(', ')}
-								</td>
-								<td class="small">{parentsOf(g).join(', ')}</td>
-								<td>
-									<div class="row-actions">
-										<button class="secondary" onclick={() => (hostGroup = g.id)}>Hosts</button>
-										<button class="secondary" onclick={() => openGroup(g)}>
-											{canEditHosts ? 'Edit' : 'View'}
-										</button>
-										{#if canEditHosts}
-											<button class="danger" onclick={() => removeGroup(g)}>Delete</button>
-										{/if}
-									</div>
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
+	<TabPanel id="groups" active={tab}>
+		<section class="card">
+			<div class="page-header">
+				<h2>Groups</h2>
+				<span class="spacer"></span>
+				{#if canEditHosts && !groupOpen}<button onclick={() => openGroup('new')}>Add group</button
+					>{/if}
 			</div>
-		{/if}
-		{#if groupOpen}
-			{#key groupOpen === 'new' ? 'new' : groupOpen.id}
-				<GroupForm
-					inventoryId={inventory.id}
-					group={groupOpen === 'new' ? null : groupOpen}
-					{groups}
-					readonly={!canEditHosts}
-					onsaved={groupSaved}
-					oncancel={() => (groupOpen = null)}
-				/>
-			{/key}
-		{/if}
-	</section>
+			{#if groupOpen}
+				{#key groupOpen === 'new' ? 'new' : groupOpen.id}
+					<GroupForm
+						inventoryId={inventory.id}
+						group={groupOpen === 'new' ? null : groupOpen}
+						{groups}
+						readonly={!canEditHosts}
+						onsaved={groupSaved}
+						oncancel={() => (groupOpen = null)}
+					/>
+				{/key}
+			{:else}
+				{#if groupError}<p class="error" role="alert">{groupError}</p>{/if}
+				{#if groups.length === 0}
+					<p class="muted">No groups yet. Every host is in Ansible's <code>all</code> group.</p>
+				{:else}
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr>
+									<th>Group</th>
+									<th>Children</th>
+									<th>Member of</th>
+									<th></th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each groups as g (g.id)}
+									<tr>
+										<td>
+											<code>{g.name}</code>
+											{#if g.description}<div class="muted small">{g.description}</div>{/if}
+										</td>
+										<td class="small">
+											{g.childIds.map((c) => groupName.get(c) ?? '?').join(', ')}
+										</td>
+										<td class="small">{parentsOf(g).join(', ')}</td>
+										<td>
+											<div class="row-actions">
+												<button class="secondary" onclick={() => showHosts(g)}>Hosts</button>
+												<button class="secondary" onclick={() => openGroup(g)}>
+													{canEditHosts ? 'Edit' : 'View'}
+												</button>
+												{#if canEditHosts}
+													<button class="danger" onclick={() => removeGroup(g)}>Delete</button>
+												{/if}
+											</div>
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			{/if}
+		</section>
+	</TabPanel>
 
-	<UsedBy {templates} what="inventory" />
-	<ResourceAccess type="inventory" id={inventory.id} />
+	<TabPanel id="source" active={tab}>
+		<InventorySourceCard {inventory} {canAdmin} onchanged={refresh} />
+	</TabPanel>
+
+	<TabPanel id="settings" active={tab}>
+		<section class="card">
+			{#if canAdmin}
+				{#if formError}<p class="error" role="alert">{formError}</p>{/if}
+				<form onsubmit={save}>
+					<div class="form-grid">
+						<label>Name <input bind:value={name} maxlength="255" required /></label>
+						<label>Description <input bind:value={description} maxlength="4096" /></label>
+					</div>
+					<VarsField bind:value={vars} label="Inventory variables" />
+					<div class="form-actions">
+						<button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+						{#if message}<span class="muted">{message}</span>{/if}
+					</div>
+				</form>
+			{:else}
+				<h2>Inventory variables</h2>
+				{#if vars}<pre class="code">{vars}</pre>{:else}<p class="muted">None.</p>{/if}
+			{/if}
+			<p class="muted small">Updated {fmtTime(inventory.updatedAt)}</p>
+		</section>
+		<UsedBy {templates} what="inventory" />
+	</TabPanel>
+
+	<TabPanel id="access" active={tab}>
+		<ResourceAccess type="inventory" id={inventory.id} />
+	</TabPanel>
 {:else if error}
 	<p class="error" role="alert">{error}</p>
 	<p><a href="/inventories">Back to inventories</a></p>

@@ -17,6 +17,8 @@
 	let credentialId = $state('');
 	let formError = $state('');
 	let saving = $state(false);
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	const mayCreate = $derived(canCreate('project'));
 
@@ -69,65 +71,77 @@
 	}
 </script>
 
-<h1>Projects</h1>
+<div class="page-header">
+	<h1>Projects</h1>
+	<span class="spacer"></span>
+	{#if mayCreate && !adding}
+		<button onclick={() => (adding = true)}>New project</button>
+	{/if}
+</div>
 <p class="muted">
 	Git repositories holding playbooks and scripts. Ansible and script jobs clone their project when
 	they start.
 </p>
 
-<label class="search">
-	Search
-	<input bind:value={search} placeholder="Name contains…" />
-</label>
+{#if !adding}
+	<label class="search">
+		Search
+		<input bind:value={search} placeholder="Name contains…" />
+	</label>
 
-{#if error}
-	<p class="error" role="alert">{error}</p>
+	{#if error}
+		<p class="error" role="alert">{error}</p>
+	{/if}
+
+	<section class="card">
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if projects.length === 0}
+			<p class="muted">No projects{search ? ' match' : ' yet'}.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Name</th>
+							<th>Repository</th>
+							<th>Ref</th>
+							<th>Credential</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each projects as p (p.id)}
+							<tr>
+								<td>
+									<a href="/projects/{p.id}">{p.name}</a>
+									{#if p.description}<div class="muted small">{p.description}</div>{/if}
+								</td>
+								<td class="small"><code>{p.scmUrl}</code></td>
+								<td><code>{p.scmRef}</code></td>
+								<td class="small">
+									{#if p.credentialId}
+										<a href="/credentials/{p.credentialId}">{credentialName(p.credentialId)}</a>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			{#if total > projects.length}
+				<p class="muted">Showing {projects.length} of {total}. Narrow the search to see others.</p>
+			{/if}
+		{/if}
+	</section>
 {/if}
 
-<section class="card">
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if projects.length === 0}
-		<p class="muted">No projects{search ? ' match' : ' yet'}.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>Repository</th>
-						<th>Ref</th>
-						<th>Credential</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each projects as p (p.id)}
-						<tr>
-							<td>
-								<a href="/projects/{p.id}">{p.name}</a>
-								{#if p.description}<div class="muted small">{p.description}</div>{/if}
-							</td>
-							<td class="small"><code>{p.scmUrl}</code></td>
-							<td><code>{p.scmRef}</code></td>
-							<td class="small">
-								{#if p.credentialId}
-									<a href="/credentials/{p.credentialId}">{credentialName(p.credentialId)}</a>
-								{/if}
-							</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
-		{#if total > projects.length}
-			<p class="muted">Showing {projects.length} of {total}. Narrow the search to see others.</p>
-		{/if}
-	{/if}
-</section>
-
-{#if mayCreate}
+{#if mayCreate && adding}
 	<section class="card">
-		<h2>New project</h2>
+		<div class="page-header">
+			<h2>New project</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={() => (adding = false)}>Cancel</button>
+		</div>
 		{#if formError}<p class="error" role="alert">{formError}</p>{/if}
 		<form onsubmit={create}>
 			<div class="form-grid">

@@ -226,8 +226,8 @@ The runner adds a callback plugin, `dispatch_events`, through
 `ANSIBLE_CALLBACK_PLUGINS` (this replaces a `callback_plugins` setting in the
 project's `ansible.cfg`; Ansible's default directories stay on the path). It
 reports each play, task and host result as a structured event, without the
-output of `no_log` tasks. The job page shows a per-host summary and each
-host's task results.
+output of `no_log` tasks. The job page's *Hosts* tab shows a per-host summary
+and each host's task results.
 
 ### Roles and collections
 
@@ -279,7 +279,7 @@ directly.
 
 An inventory can be synced from a project instead of edited by hand: a static
 inventory file or directory, an inventory script, or the YAML configuration
-of an inventory plugin. Set it on the inventory's page with a project, a
+of an inventory plugin. Set it on the *Source* tab of the inventory's page with a project, a
 path in it, an execution environment and optional credentials.
 
 A sync (*Sync now*, a schedule, or relaunching an earlier sync) is an
@@ -383,8 +383,8 @@ the template's Renovate config opens that pull request for you.
 A schedule launches a job template on a cron expression, read in an IANA
 time zone (default UTC): five fields (`30 2 * * 1-5`) or `@daily`,
 `@hourly`, `@every 6h` and the like, at most once a minute. A schedule may
-carry launch overrides, which the template must allow. Add schedules on a
-template's page; the form previews the next run times.
+carry launch overrides, which the template must allow. Add schedules on the
+*Schedules* tab of a template's page; the form previews the next run times.
 
 A schedule that was due several times while no task manager ran launches
 once, then carries on. If a launch fails (say the template no longer allows
@@ -394,7 +394,7 @@ schedules needs a role on the template; creating one needs `execute` (and
 on the template, or having created it.
 
 A schedule can instead sync an inventory from its source. Those are managed
-on the inventory's page by its admins. A run while the last sync is still
+on the *Source* tab of the inventory's page by its admins. A run while the last sync is still
 going launches nothing and says why.
 
 ## Relaunching
@@ -415,8 +415,8 @@ to the hosts that failed or were unreachable.
 ## Notifications
 
 System administrators set up notification targets on the *Notifications*
-page; template admins then choose, on the template's page, which targets its
-jobs notify and on which events: `started`, `succeeded`, `failed` (which
+page; template admins then choose, on the *Notifications* tab of the template's
+page, which targets its jobs notify and on which events: `started`, `succeeded`, `failed` (which
 includes `error`) and `canceled`.
 
 | Kind | Config | Secrets |
@@ -435,6 +435,7 @@ Google Chat gets a card with the job's status and an *Open job* button, and
 a job's messages share one thread in the space.
 
 Failures are retried after 30 seconds, 2, 10 and 30 minutes; 4xx responses
-and SMTP 5xx replies are not retried. A job's page shows what was sent.
+and SMTP 5xx replies are not retried. The *Notifications*
+tab of a job's page shows what was sent.
 *Test* on a target sends a test message at once. Links to jobs need
 `spec.externalURL`.

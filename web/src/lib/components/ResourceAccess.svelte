@@ -6,8 +6,7 @@
 		type ResourceType,
 		type RoleGrant
 	} from '#lib/api/client.js';
-	import { can } from '#lib/permissions.svelte.js';
-	import { session } from '#lib/session.svelte.js';
+	import { can, canSeeAccess } from '#lib/permissions.svelte.js';
 	import GrantForm from './GrantForm.svelte';
 	import GrantTable from './GrantTable.svelte';
 
@@ -18,8 +17,7 @@
 	let error = $state('');
 
 	const canManage = $derived(can(type, id, 'admin'));
-	// The API lists a resource's grants to its admins, and to auditors.
-	const canSee = $derived(canManage || Boolean(session.user?.isAuditor));
+	const canSee = $derived(canSeeAccess(type, id));
 	const plural = $derived(resourceTypes.find((r) => r.type === type)?.plural ?? type);
 
 	async function load() {

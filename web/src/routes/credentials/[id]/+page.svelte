@@ -14,9 +14,12 @@
 	} from '#lib/api/client.js';
 	import CredentialInputs from '#lib/components/CredentialInputs.svelte';
 	import ResourceAccess from '#lib/components/ResourceAccess.svelte';
+	import TabPanel from '#lib/components/TabPanel.svelte';
+	import Tabs from '#lib/components/Tabs.svelte';
 	import UsedBy from '#lib/components/UsedBy.svelte';
 	import { fmtTime } from '#lib/format.js';
-	import { can, loadMyGrants } from '#lib/permissions.svelte.js';
+	import { can, canSeeAccess, loadMyGrants } from '#lib/permissions.svelte.js';
+	import { activeTab, type Tab } from '#lib/tabs.svelte.js';
 
 	const id = $derived(page.params.id ?? '');
 
@@ -26,6 +29,13 @@
 	let projects = $state<Project[]>([]);
 	let images = $state<ExecutionEnvironment[]>([]);
 	let error = $state('');
+
+	const tabs = $derived<Tab[]>([
+		{ id: 'details', label: 'Details' },
+		{ id: 'used-by', label: 'Used by', count: templates.length + projects.length + images.length },
+		...(canSeeAccess('credential', id) ? [{ id: 'access', label: 'Access' }] : [])
+	]);
+	const tab = $derived(activeTab(tabs));
 
 	let name = $state('');
 	let description = $state('');
@@ -123,67 +133,75 @@
 	{#if credential.description}<p class="muted">{credential.description}</p>{/if}
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 
-	<section class="card">
-		<dl class="details">
-			{#each Object.entries(credential.publicInputs) as [field, value] (field)}
-				<dt>{fieldLabel(field)}</dt>
-				<dd><code>{value}</code></dd>
-			{/each}
-			<dt>Secrets set</dt>
-			<dd>
-				{credential.secretFields.length
-					? credential.secretFields.map(fieldLabel).join(', ')
-					: 'none'}
-			</dd>
-			<dt>Created</dt>
-			<dd>{fmtTime(credential.createdAt)}</dd>
-			<dt>Updated</dt>
-			<dd>{fmtTime(credential.updatedAt)}</dd>
-		</dl>
-	</section>
+	<Tabs {tabs} label="Credential sections" />
 
-	{#if canAdmin && kindInfo}
+	<TabPanel id="details" active={tab}>
 		<section class="card">
-			<h2>Edit</h2>
-			{#if formError}<p class="error" role="alert">{formError}</p>{/if}
-			<form onsubmit={save}>
-				<div class="form-grid">
-					<label>Name <input bind:value={name} maxlength="255" required /></label>
-					<label>Description <input bind:value={description} maxlength="4096" /></label>
-				</div>
-				{#key credential.updatedAt}
-					<CredentialInputs bind:this={inputsEl} kind={kindInfo} {credential} />
-				{/key}
-				<div class="form-actions">
-					<button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
-					{#if message}<span class="muted">{message}</span>{/if}
-				</div>
-			</form>
-		</section>
-	{/if}
-
-	<UsedBy {templates} what="credential" />
-	{#if projects.length || images.length}
-		<section class="card">
-			<h2>Also used by</h2>
-			<ul>
-				{#each projects as p (p.id)}
-					<li>
-						Project <a href="/projects/{p.id}">{p.name}</a>
-						<span class="muted small">to clone</span>
-					</li>
+			<dl class="details">
+				{#each Object.entries(credential.publicInputs) as [field, value] (field)}
+					<dt>{fieldLabel(field)}</dt>
+					<dd><code>{value}</code></dd>
 				{/each}
-				{#each images as e (e.id)}
-					<li>
-						Execution environment <a href="/execution-environments">{e.name}</a>
-						<span class="muted small">to pull <code>{e.image}</code></span>
-					</li>
-				{/each}
-			</ul>
+				<dt>Secrets set</dt>
+				<dd>
+					{credential.secretFields.length
+						? credential.secretFields.map(fieldLabel).join(', ')
+						: 'none'}
+				</dd>
+				<dt>Created</dt>
+				<dd>{fmtTime(credential.createdAt)}</dd>
+				<dt>Updated</dt>
+				<dd>{fmtTime(credential.updatedAt)}</dd>
+			</dl>
 		</section>
-	{/if}
 
-	<ResourceAccess type="credential" id={credential.id} />
+		{#if canAdmin && kindInfo}
+			<section class="card">
+				<h2>Edit</h2>
+				{#if formError}<p class="error" role="alert">{formError}</p>{/if}
+				<form onsubmit={save}>
+					<div class="form-grid">
+						<label>Name <input bind:value={name} maxlength="255" required /></label>
+						<label>Description <input bind:value={description} maxlength="4096" /></label>
+					</div>
+					{#key credential.updatedAt}
+						<CredentialInputs bind:this={inputsEl} kind={kindInfo} {credential} />
+					{/key}
+					<div class="form-actions">
+						<button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+						{#if message}<span class="muted">{message}</span>{/if}
+					</div>
+				</form>
+			</section>
+		{/if}
+	</TabPanel>
+
+	<TabPanel id="used-by" active={tab}>
+		<UsedBy {templates} what="credential" />
+		{#if projects.length || images.length}
+			<section class="card">
+				<h2>Also used by</h2>
+				<ul>
+					{#each projects as p (p.id)}
+						<li>
+							Project <a href="/projects/{p.id}">{p.name}</a>
+							<span class="muted small">to clone</span>
+						</li>
+					{/each}
+					{#each images as e (e.id)}
+						<li>
+							Execution environment <a href="/execution-environments">{e.name}</a>
+							<span class="muted small">to pull <code>{e.image}</code></span>
+						</li>
+					{/each}
+				</ul>
+			</section>
+		{/if}
+	</TabPanel>
+
+	<TabPanel id="access" active={tab}>
+		<ResourceAccess type="credential" id={credential.id} />
+	</TabPanel>
 {:else if error}
 	<p class="error" role="alert">{error}</p>
 	<p><a href="/credentials">Back to credentials</a></p>

@@ -10,9 +10,12 @@
 		type Project
 	} from '#lib/api/client.js';
 	import ResourceAccess from '#lib/components/ResourceAccess.svelte';
+	import TabPanel from '#lib/components/TabPanel.svelte';
+	import Tabs from '#lib/components/Tabs.svelte';
 	import UsedBy from '#lib/components/UsedBy.svelte';
 	import { fmtTime } from '#lib/format.js';
-	import { can, loadMyGrants } from '#lib/permissions.svelte.js';
+	import { can, canSeeAccess, loadMyGrants } from '#lib/permissions.svelte.js';
+	import { activeTab, type Tab } from '#lib/tabs.svelte.js';
 
 	const id = $derived(page.params.id ?? '');
 
@@ -20,6 +23,13 @@
 	let credentials = $state<Credential[]>([]);
 	let templates = $state<JobTemplate[]>([]);
 	let error = $state('');
+
+	const tabs = $derived<Tab[]>([
+		{ id: 'details', label: 'Details' },
+		{ id: 'used-by', label: 'Used by', count: templates.length },
+		...(canSeeAccess('project', id) ? [{ id: 'access', label: 'Access' }] : [])
+	]);
+	const tab = $derived(activeTab(tabs));
 
 	let name = $state('');
 	let description = $state('');
@@ -110,64 +120,73 @@
 	{#if project.description}<p class="muted">{project.description}</p>{/if}
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 
-	{#if canAdmin}
-		<section class="card">
-			{#if formError}<p class="error" role="alert">{formError}</p>{/if}
-			<form onsubmit={save}>
-				<div class="form-grid">
-					<label>Name <input bind:value={name} maxlength="255" required /></label>
-					<label>Description <input bind:value={description} maxlength="4096" /></label>
-				</div>
-				<div class="form-grid">
-					<label class="wide">
-						Repository URL <input bind:value={scmUrl} required maxlength="2048" />
-					</label>
-					<label>
-						Branch, tag or commit <input bind:value={scmRef} required maxlength="255" />
-					</label>
-					<label>
-						Credential
-						<select bind:value={credentialId}>
-							<option value="">None (public repository)</option>
-							{#if project.credentialId && !credential}
-								<option value={project.credentialId}>(a credential you can't see)</option>
-							{/if}
-							{#each credentials as c (c.id)}
-								<option value={c.id}>{c.name}</option>
-							{/each}
-						</select>
-					</label>
-				</div>
-				<div class="form-actions">
-					<button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
-					{#if message}<span class="muted small">{message}</span>{/if}
-				</div>
-			</form>
-			<p class="muted small">
-				Created {fmtTime(project.createdAt)} · updated {fmtTime(project.updatedAt)}
-			</p>
-		</section>
-	{:else}
-		<section class="card">
-			<dl class="details">
-				<dt>Repository</dt>
-				<dd><code>{project.scmUrl}</code></dd>
-				<dt>Ref</dt>
-				<dd><code>{project.scmRef}</code></dd>
-				<dt>Credential</dt>
-				<dd>
-					{#if credential}<a href="/credentials/{credential.id}">{credential.name}</a>
-					{:else if project.credentialId}a credential you can't see
-					{:else}none{/if}
-				</dd>
-				<dt>Updated</dt>
-				<dd>{fmtTime(project.updatedAt)}</dd>
-			</dl>
-		</section>
-	{/if}
+	<Tabs {tabs} label="Project sections" />
 
-	<UsedBy {templates} what="project" />
-	<ResourceAccess type="project" id={project.id} />
+	<TabPanel id="details" active={tab}>
+		{#if canAdmin}
+			<section class="card">
+				{#if formError}<p class="error" role="alert">{formError}</p>{/if}
+				<form onsubmit={save}>
+					<div class="form-grid">
+						<label>Name <input bind:value={name} maxlength="255" required /></label>
+						<label>Description <input bind:value={description} maxlength="4096" /></label>
+					</div>
+					<div class="form-grid">
+						<label class="wide">
+							Repository URL <input bind:value={scmUrl} required maxlength="2048" />
+						</label>
+						<label>
+							Branch, tag or commit <input bind:value={scmRef} required maxlength="255" />
+						</label>
+						<label>
+							Credential
+							<select bind:value={credentialId}>
+								<option value="">None (public repository)</option>
+								{#if project.credentialId && !credential}
+									<option value={project.credentialId}>(a credential you can't see)</option>
+								{/if}
+								{#each credentials as c (c.id)}
+									<option value={c.id}>{c.name}</option>
+								{/each}
+							</select>
+						</label>
+					</div>
+					<div class="form-actions">
+						<button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+						{#if message}<span class="muted small">{message}</span>{/if}
+					</div>
+				</form>
+				<p class="muted small">
+					Created {fmtTime(project.createdAt)} · updated {fmtTime(project.updatedAt)}
+				</p>
+			</section>
+		{:else}
+			<section class="card">
+				<dl class="details">
+					<dt>Repository</dt>
+					<dd><code>{project.scmUrl}</code></dd>
+					<dt>Ref</dt>
+					<dd><code>{project.scmRef}</code></dd>
+					<dt>Credential</dt>
+					<dd>
+						{#if credential}<a href="/credentials/{credential.id}">{credential.name}</a>
+						{:else if project.credentialId}a credential you can't see
+						{:else}none{/if}
+					</dd>
+					<dt>Updated</dt>
+					<dd>{fmtTime(project.updatedAt)}</dd>
+				</dl>
+			</section>
+		{/if}
+	</TabPanel>
+
+	<TabPanel id="used-by" active={tab}>
+		<UsedBy {templates} what="project" />
+	</TabPanel>
+
+	<TabPanel id="access" active={tab}>
+		<ResourceAccess type="project" id={project.id} />
+	</TabPanel>
 {:else if error}
 	<p class="error" role="alert">{error}</p>
 	<p><a href="/projects">Back to projects</a></p>

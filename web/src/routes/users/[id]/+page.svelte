@@ -13,8 +13,11 @@
 	} from '#lib/api/client.js';
 	import GrantForm from '#lib/components/GrantForm.svelte';
 	import GrantTable from '#lib/components/GrantTable.svelte';
+	import TabPanel from '#lib/components/TabPanel.svelte';
+	import Tabs from '#lib/components/Tabs.svelte';
 	import { fmtTime } from '#lib/format.js';
 	import { session } from '#lib/session.svelte.js';
+	import { activeTab, type Tab } from '#lib/tabs.svelte.js';
 
 	const id = $derived(page.params.id ?? '');
 	const isAdmin = $derived(Boolean(session.user?.isAdmin));
@@ -35,9 +38,18 @@
 	let tokenScope = $state<TokenScope>('write');
 	let tokenDays = $state<number | null>(90);
 	let created = $state<CreatedApiToken | null>(null);
+	// Adding a token shows its form alone, in place of the list.
+	let addingToken = $state(false);
 
 	const directGrants = $derived(grants.filter((g) => g.user));
 	const teamGrants = $derived(grants.filter((g) => g.team));
+
+	const tabs = $derived<Tab[]>([
+		{ id: 'profile', label: 'Profile' },
+		...(canSeeAll || isSelf ? [{ id: 'roles', label: 'Roles', count: grants.length }] : []),
+		...(canSeeAll ? [{ id: 'tokens', label: 'API tokens', count: tokens.length }] : [])
+	]);
+	const tab = $derived(activeTab(tabs));
 
 	async function load() {
 		const path = { params: { path: { userId: id } } };
@@ -127,6 +139,7 @@
 		}
 		created = data;
 		tokenName = '';
+		addingToken = false;
 		await load();
 	}
 
@@ -157,148 +170,169 @@
 		)} · last sign-in {fmtTime(user.lastLoginAt)}
 	</p>
 
-	{#if isAdmin}
-		<section class="card">
-			<h2>Profile</h2>
-			{#if user.authSource === 'oidc'}
-				<p class="muted small">The provider updates these at each sign-in.</p>
-			{/if}
-			<form onsubmit={saveProfile} class="form-grid">
-				<label>Display name <input bind:value={displayName} /></label>
-				<label>Email <input type="email" bind:value={email} /></label>
-				<label><button type="submit">Save</button></label>
-			</form>
-			{#if user.authSource === 'local'}
-				<form onsubmit={setPassword} class="form-grid">
-					<label>
-						New password
-						<input
-							type="password"
-							bind:value={newPassword}
-							minlength="12"
-							required
-							autocomplete="new-password"
-						/>
-					</label>
-					<label><button type="submit" class="secondary">Set password</button></label>
-				</form>
-			{/if}
-			{#if !isSelf}
-				<div class="actions">
-					{#if user.isActive}
-						<button class="secondary" onclick={() => update({ isActive: false })}>Deactivate</button
-						>
-					{:else}
-						<button class="secondary" onclick={() => update({ isActive: true })}>Reactivate</button>
-					{/if}
-					<button class="danger" onclick={remove}>Delete user</button>
-				</div>
-				<p class="muted small">
-					Deactivating ends the user's sessions and stops their API tokens until reactivated.
-				</p>
-			{/if}
-		</section>
-	{/if}
+	<Tabs {tabs} label="User sections" />
 
-	<section class="card">
-		<h2>Teams</h2>
-		{#if teams.length === 0}
-			<p class="muted">Not in any team.</p>
-		{:else}
-			<ul>
-				{#each teams as t (t.id)}
-					<li><a href="/teams/{t.id}">{t.name}</a></li>
-				{/each}
-			</ul>
+	<TabPanel id="profile" active={tab}>
+		{#if isAdmin}
+			<section class="card">
+				<h2>Profile</h2>
+				{#if user.authSource === 'oidc'}
+					<p class="muted small">The provider updates these at each sign-in.</p>
+				{/if}
+				<form onsubmit={saveProfile} class="form-grid">
+					<label>Display name <input bind:value={displayName} /></label>
+					<label>Email <input type="email" bind:value={email} /></label>
+					<label><button type="submit">Save</button></label>
+				</form>
+				{#if user.authSource === 'local'}
+					<form onsubmit={setPassword} class="form-grid">
+						<label>
+							New password
+							<input
+								type="password"
+								bind:value={newPassword}
+								minlength="12"
+								required
+								autocomplete="new-password"
+							/>
+						</label>
+						<label><button type="submit" class="secondary">Set password</button></label>
+					</form>
+				{/if}
+				{#if !isSelf}
+					<div class="actions">
+						{#if user.isActive}
+							<button class="secondary" onclick={() => update({ isActive: false })}
+								>Deactivate</button
+							>
+						{:else}
+							<button class="secondary" onclick={() => update({ isActive: true })}
+								>Reactivate</button
+							>
+						{/if}
+						<button class="danger" onclick={remove}>Delete user</button>
+					</div>
+					<p class="muted small">
+						Deactivating ends the user's sessions and stops their API tokens until reactivated.
+					</p>
+				{/if}
+			</section>
 		{/if}
-	</section>
 
-	{#if canSeeAll || isSelf}
 		<section class="card">
-			<h2>Roles</h2>
-			{#if directGrants.length === 0}
-				<p class="muted">No roles granted directly.</p>
+			<h2>Teams</h2>
+			{#if teams.length === 0}
+				<p class="muted">Not in any team.</p>
 			{:else}
-				<GrantTable
-					grants={directGrants}
-					showHolder={false}
-					onrevoke={isAdmin ? revoke : undefined}
-				/>
-			{/if}
-			{#if teamGrants.length > 0}
-				<h3>Through teams</h3>
-				<GrantTable grants={teamGrants} />
-			{/if}
-			{#if isAdmin}
-				<h3>Grant a role</h3>
-				<GrantForm userId={id} ongranted={load} />
+				<ul>
+					{#each teams as t (t.id)}
+						<li><a href="/teams/{t.id}">{t.name}</a></li>
+					{/each}
+				</ul>
 			{/if}
 		</section>
-	{/if}
+	</TabPanel>
 
-	{#if canSeeAll}
-		<section class="card">
-			<h2>API tokens</h2>
-			{#if created}
-				<div class="created">
-					<p>Token “{created.name}” created. Copy it now; it won't be shown again.</p>
-					<code>{created.token}</code>
-				</div>
-			{/if}
-			{#if tokens.length === 0}
-				<p class="muted">No API tokens.</p>
-			{:else}
-				<div class="table-wrap">
-					<table>
-						<thead>
-							<tr>
-								<th>Name</th>
-								<th>Token</th>
-								<th>Scope</th>
-								<th>Expires</th>
-								<th>Last used</th>
-								{#if isAdmin}<th></th>{/if}
-							</tr>
-						</thead>
-						<tbody>
-							{#each tokens as t (t.id)}
-								<tr>
-									<td>{t.name}</td>
-									<td><code>{t.prefix}…</code></td>
-									<td>{t.scope}</td>
-									<td>{t.expiresAt ? fmtTime(t.expiresAt) : 'Never'}</td>
-									<td>{fmtTime(t.lastUsedAt)}</td>
-									{#if isAdmin}
-										<td class="row-actions">
-											<button class="danger" onclick={() => revokeToken(t)}>Revoke</button>
-										</td>
-									{/if}
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{/if}
-			{#if isAdmin && user.isActive}
-				<h3>New token for {user.username}</h3>
-				<form onsubmit={createToken} class="form-grid">
-					<label>Name <input bind:value={tokenName} maxlength="100" required /></label>
-					<label>
-						Scope
-						<select bind:value={tokenScope}>
-							<option value="write">Read and write</option>
-							<option value="read">Read only</option>
-						</select>
-					</label>
-					<label>
-						Expires in (days)
-						<input type="number" bind:value={tokenDays} min="1" max="3650" placeholder="Never" />
-					</label>
-					<label><button type="submit">Create token</button></label>
-				</form>
-			{/if}
-		</section>
-	{/if}
+	<TabPanel id="roles" active={tab}>
+		{#if canSeeAll || isSelf}
+			<section class="card">
+				<h2>Roles</h2>
+				{#if directGrants.length === 0}
+					<p class="muted">No roles granted directly.</p>
+				{:else}
+					<GrantTable
+						grants={directGrants}
+						showHolder={false}
+						onrevoke={isAdmin ? revoke : undefined}
+					/>
+				{/if}
+				{#if teamGrants.length > 0}
+					<h3>Through teams</h3>
+					<GrantTable grants={teamGrants} />
+				{/if}
+				{#if isAdmin}
+					<h3>Grant a role</h3>
+					<GrantForm userId={id} ongranted={load} />
+				{/if}
+			</section>
+		{/if}
+	</TabPanel>
+
+	<TabPanel id="tokens" active={tab}>
+		{#if canSeeAll}
+			<section class="card">
+				<h2>API tokens</h2>
+				{#if created}
+					<div class="created">
+						<p>Token “{created.name}” created. Copy it now; it won't be shown again.</p>
+						<code>{created.token}</code>
+					</div>
+				{/if}
+				{#if addingToken}
+					<div class="page-header">
+						<h3>New token for {user.username}</h3>
+						<span class="spacer"></span>
+						<button type="button" class="secondary" onclick={() => (addingToken = false)}
+							>Cancel</button
+						>
+					</div>
+					<form onsubmit={createToken} class="form-grid">
+						<label>Name <input bind:value={tokenName} maxlength="100" required /></label>
+						<label>
+							Scope
+							<select bind:value={tokenScope}>
+								<option value="write">Read and write</option>
+								<option value="read">Read only</option>
+							</select>
+						</label>
+						<label>
+							Expires in (days)
+							<input type="number" bind:value={tokenDays} min="1" max="3650" placeholder="Never" />
+						</label>
+						<label><button type="submit">Create token</button></label>
+					</form>
+				{:else}
+					{#if tokens.length === 0}
+						<p class="muted">No API tokens.</p>
+					{:else}
+						<div class="table-wrap">
+							<table>
+								<thead>
+									<tr>
+										<th>Name</th>
+										<th>Token</th>
+										<th>Scope</th>
+										<th>Expires</th>
+										<th>Last used</th>
+										{#if isAdmin}<th></th>{/if}
+									</tr>
+								</thead>
+								<tbody>
+									{#each tokens as t (t.id)}
+										<tr>
+											<td>{t.name}</td>
+											<td><code>{t.prefix}…</code></td>
+											<td>{t.scope}</td>
+											<td>{t.expiresAt ? fmtTime(t.expiresAt) : 'Never'}</td>
+											<td>{fmtTime(t.lastUsedAt)}</td>
+											{#if isAdmin}
+												<td class="row-actions">
+													<button class="danger" onclick={() => revokeToken(t)}>Revoke</button>
+												</td>
+											{/if}
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					{/if}
+					{#if isAdmin && user.isActive}
+						<p><button onclick={() => (addingToken = true)}>New token</button></p>
+					{/if}
+				{/if}
+			</section>
+		{/if}
+	</TabPanel>
 {/if}
 
 <style>
@@ -309,6 +343,10 @@
 	h3 {
 		font-size: 1rem;
 		margin: 1.25rem 0 0.5rem;
+	}
+
+	.page-header h3 {
+		margin: 0;
 	}
 
 	.actions {

@@ -14,6 +14,8 @@
 	let email = $state('');
 	let password = $state('');
 	let creating = $state(false);
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	const isAdmin = $derived(Boolean(session.user?.isAdmin));
 
@@ -48,11 +50,18 @@
 			return;
 		}
 		username = displayName = email = password = '';
+		adding = false;
 		await load();
 	}
 </script>
 
-<h1>Users</h1>
+<div class="page-header">
+	<h1>Users</h1>
+	<span class="spacer"></span>
+	{#if isAdmin && !adding}
+		<button onclick={() => (adding = true)}>New local user</button>
+	{/if}
+</div>
 <p class="muted">
 	Single sign-on users appear when they first sign in. Local users sign in with a password and are
 	meant for automation (service accounts).
@@ -62,9 +71,13 @@
 	<p class="error" role="alert">{error}</p>
 {/if}
 
-{#if isAdmin}
+{#if isAdmin && adding}
 	<section class="card">
-		<h2>New local user</h2>
+		<div class="page-header">
+			<h2>New local user</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={() => (adding = false)}>Cancel</button>
+		</div>
 		<form onsubmit={create} class="form-grid">
 			<label>
 				Username
@@ -93,51 +106,53 @@
 	</section>
 {/if}
 
-<section class="card">
-	<label class="search">
-		Search
-		<input bind:value={search} placeholder="Username, name or email…" />
-	</label>
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if users.length === 0}
-		<p class="muted">No users match.</p>
-	{:else}
-		<div class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Username</th>
-						<th>Name</th>
-						<th>Sign-in</th>
-						<th>Global role</th>
-						<th>Last sign-in</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each users as u (u.id)}
-						<tr class:inactive={!u.isActive}>
-							<td>
-								<a href="/users/{u.id}">{u.username}</a>
-								{#if !u.isActive}<span class="badge warn">deactivated</span>{/if}
-							</td>
-							<td>{u.displayName}</td>
-							<td>{u.authSource === 'oidc' ? 'Single sign-on' : 'Local'}</td>
-							<td>
-								{#if u.isAdmin}<span class="badge accent">system_admin</span>{/if}
-								{#if u.isAuditor}<span class="badge">auditor</span>{/if}
-							</td>
-							<td>{fmtTime(u.lastLoginAt)}</td>
+{#if !adding}
+	<section class="card">
+		<label class="search">
+			Search
+			<input bind:value={search} placeholder="Username, name or email…" />
+		</label>
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if users.length === 0}
+			<p class="muted">No users match.</p>
+		{:else}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th>Username</th>
+							<th>Name</th>
+							<th>Sign-in</th>
+							<th>Global role</th>
+							<th>Last sign-in</th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
-		{#if total > users.length}
-			<p class="muted">Showing {users.length} of {total}. Narrow the search to see others.</p>
+					</thead>
+					<tbody>
+						{#each users as u (u.id)}
+							<tr class:inactive={!u.isActive}>
+								<td>
+									<a href="/users/{u.id}">{u.username}</a>
+									{#if !u.isActive}<span class="badge warn">deactivated</span>{/if}
+								</td>
+								<td>{u.displayName}</td>
+								<td>{u.authSource === 'oidc' ? 'Single sign-on' : 'Local'}</td>
+								<td>
+									{#if u.isAdmin}<span class="badge accent">system_admin</span>{/if}
+									{#if u.isAuditor}<span class="badge">auditor</span>{/if}
+								</td>
+								<td>{fmtTime(u.lastLoginAt)}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			{#if total > users.length}
+				<p class="muted">Showing {users.length} of {total}. Narrow the search to see others.</p>
+			{/if}
 		{/if}
-	{/if}
-</section>
+	</section>
+{/if}
 
 <style>
 	.search {

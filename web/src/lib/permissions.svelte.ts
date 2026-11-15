@@ -48,3 +48,11 @@ export function can(type: ResourceType, id: string | null, want: Role): boolean 
 export function canCreate(type: ResourceType): boolean {
 	return can(type, null, 'admin');
 }
+
+/**
+ * Whether the signed-in user may see who holds roles on a resource: the API
+ * lists a resource's grants to its admins, and to auditors.
+ */
+export function canSeeAccess(type: ResourceType, id: string): boolean {
+	return can(type, id, 'admin') || Boolean(session.user?.isAuditor);
+}

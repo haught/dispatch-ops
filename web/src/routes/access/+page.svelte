@@ -19,6 +19,8 @@
 	let error = $state('');
 
 	const isAdmin = $derived(Boolean(session.user?.isAdmin));
+	// Adding shows the form alone, in place of the list.
+	let adding = $state(false);
 
 	async function load() {
 		const { data, error: err } = await api.GET('/api/v1/role-grants', {
@@ -39,6 +41,11 @@
 		load();
 	});
 
+	async function granted() {
+		adding = false;
+		await load();
+	}
+
 	async function revoke(g: RoleGrant) {
 		const { error: err } = await api.DELETE('/api/v1/role-grants/{grantId}', {
 			params: { path: { grantId: g.id } }
@@ -48,7 +55,13 @@
 	}
 </script>
 
-<h1>Access</h1>
+<div class="page-header">
+	<h1>Access</h1>
+	<span class="spacer"></span>
+	{#if isAdmin && !adding}
+		<button onclick={() => (adding = true)}>Grant a role</button>
+	{/if}
+</div>
 <p class="muted">
 	Who holds which role. Roles are granted to users or teams, on one resource, on every resource of a
 	type, or globally: <strong>system_admin</strong> can do everything, and
@@ -59,35 +72,41 @@
 	<p class="error" role="alert">{error}</p>
 {/if}
 
-{#if isAdmin}
+{#if isAdmin && adding}
 	<section class="card">
-		<h2>Grant a role</h2>
-		<GrantForm ongranted={load} />
+		<div class="page-header">
+			<h2>Grant a role</h2>
+			<span class="spacer"></span>
+			<button type="button" class="secondary" onclick={() => (adding = false)}>Cancel</button>
+		</div>
+		<GrantForm ongranted={granted} />
 	</section>
 {/if}
 
-<section class="card">
-	<label class="filter">
-		Show
-		<select bind:value={filter}>
-			<option value="">All roles</option>
-			<option value="global">Global roles</option>
-			{#each resourceTypes as rt (rt.type)}
-				<option value={rt.type}>Roles on {rt.plural}</option>
-			{/each}
-		</select>
-	</label>
-	{#if loading}
-		<p class="muted">Loading…</p>
-	{:else if grants.length === 0}
-		<p class="muted">No roles granted.</p>
-	{:else}
-		<GrantTable {grants} onrevoke={isAdmin ? revoke : undefined} />
-		{#if total > grants.length}
-			<p class="muted">Showing {grants.length} of {total}.</p>
+{#if !adding}
+	<section class="card">
+		<label class="filter">
+			Show
+			<select bind:value={filter}>
+				<option value="">All roles</option>
+				<option value="global">Global roles</option>
+				{#each resourceTypes as rt (rt.type)}
+					<option value={rt.type}>Roles on {rt.plural}</option>
+				{/each}
+			</select>
+		</label>
+		{#if loading}
+			<p class="muted">Loading…</p>
+		{:else if grants.length === 0}
+			<p class="muted">No roles granted.</p>
+		{:else}
+			<GrantTable {grants} onrevoke={isAdmin ? revoke : undefined} />
+			{#if total > grants.length}
+				<p class="muted">Showing {grants.length} of {total}.</p>
+			{/if}
 		{/if}
-	{/if}
-</section>
+	</section>
+{/if}
 
 <style>
 	.filter {
