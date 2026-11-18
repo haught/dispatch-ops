@@ -6,6 +6,7 @@ package v1alpha1
 
 import (
 	"k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
@@ -346,6 +347,13 @@ func (in *NetworkPolicySpec) DeepCopyInto(out *NetworkPolicySpec) {
 		in, out := &in.JobEgressExcept, &out.JobEgressExcept
 		*out = make([]string, len(*in))
 		copy(*out, *in)
+	}
+	if in.JobEgressAllow != nil {
+		in, out := &in.JobEgressAllow, &out.JobEgressAllow
+		*out = make([]networkingv1.NetworkPolicyEgressRule, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 }
 

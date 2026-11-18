@@ -7,6 +7,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -136,7 +137,8 @@ type DispatchOpsSpec struct {
 //     it is), and any address outside 169.254.0.0/16 (link-local, where
 //     most cloud metadata services are), 100.100.100.200/32 (Alibaba
 //     Cloud's), fe80::/10, fd00:ec2::254/128 (AWS's), fd20:ce::254/128
-//     (Google Cloud's) and JobEgressExcept.
+//     (Google Cloud's) and JobEgressExcept, plus whatever JobEgressAllow
+//     allows.
 type NetworkPolicySpec struct {
 	// +kubebuilder:default=true
 	// +optional
@@ -147,6 +149,20 @@ type NetworkPolicySpec struct {
 	// reaching.
 	// +optional
 	JobEgressExcept []string `json:"jobEgressExcept,omitempty"`
+	// JobEgressAllow are more egress rules for job pods, as in a
+	// NetworkPolicy, added to the job pods' policy. Use them for pods in
+	// the cluster that jobs should reach, such as an ingress controller
+	// serving internal URLs: some network plugins (Cilium) never match
+	// pods with an ipBlock, so "any address" covers only addresses outside
+	// the cluster, and a Service's or load balancer's address that resolves
+	// to a pod is dropped. A peer with a podSelector and no
+	// namespaceSelector selects pods in the job namespace. Each rule needs
+	// a "to", so a rule can't open a port to every address, cloud metadata
+	// services included.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:XValidation:rule="self.all(r, has(r.to) && size(r.to) > 0)",message="every rule needs a to"
+	// +optional
+	JobEgressAllow []networkingv1.NetworkPolicyEgressRule `json:"jobEgressAllow,omitempty"`
 }
 
 // RetentionSpec is how long old data is kept. The task manager deletes

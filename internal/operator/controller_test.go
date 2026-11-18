@@ -970,7 +970,16 @@ func TestNetworkPolicies(t *testing.T) {
 			Name: "dops", UID: "uid-1", Controller: new(true)}},
 	}}
 	e := newEnv(t, &v1alpha1.DispatchOps{Spec: v1alpha1.DispatchOpsSpec{
-		NetworkPolicy: v1alpha1.NetworkPolicySpec{JobEgressExcept: []string{"10.96.0.0/12", "fd00:10:96::/112"}},
+		NetworkPolicy: v1alpha1.NetworkPolicySpec{
+			JobEgressExcept: []string{"10.96.0.0/12", "fd00:10:96::/112"},
+			JobEgressAllow: []networkingv1.NetworkPolicyEgressRule{{
+				To: []networkingv1.NetworkPolicyPeer{{
+					NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: "traefik"}},
+					PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": "traefik"}},
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8443)},
+			}},
+		},
 	}}, old)
 	e.deploy()
 
@@ -1036,6 +1045,11 @@ func TestNetworkPolicies(t *testing.T) {
 		v6.CIDR != "::/0" || strings.Join(v6.Except, ",") != "fe80::/10,fd00:ec2::254/128,fd00:ec2::23/128,fd20:ce::254/128,fd00:10:96::/112" {
 		t.Errorf("job egress = %+v / %+v", v4, v6)
 	}
+	// jobEgressAllow's rules come after the built-in ones, as given.
+	if len(s.Egress) != 4 || s.Egress[3].To[0].NamespaceSelector.MatchLabels[corev1.LabelMetadataName] != "traefik" ||
+		s.Egress[3].To[0].PodSelector.MatchLabels["app.kubernetes.io/name"] != "traefik" || s.Egress[3].Ports[0].Port.IntVal != 8443 {
+		t.Errorf("job egress allowed = %+v", s.Egress[3:])
+	}
 
 	// A bad CIDR is an error, not a policy that lets everything through.
 	cr := e.cr()
@@ -1045,6 +1059,18 @@ func TestNetworkPolicies(t *testing.T) {
 	}
 	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err == nil {
 		t.Error("an invalid CIDR reconciled")
+	}
+
+	// So is an allowed rule without a "to", which would open its ports
+	// to every address.
+	cr = e.cr()
+	cr.Spec.NetworkPolicy.JobEgressExcept = nil
+	cr.Spec.NetworkPolicy.JobEgressAllow = []networkingv1.NetworkPolicyEgressRule{{Ports: []networkingv1.NetworkPolicyPort{tcpPort(80)}}}
+	if err := e.c.Update(e.ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: e.key}); err == nil {
+		t.Error("an allowed rule without a to reconciled")
 	}
 
 	// Turned off, they are deleted.

@@ -105,6 +105,26 @@ cluster's network plugin enforces NetworkPolicy:
   keep jobs away from the rest of the cluster too, add its pod and service
   CIDRs (and any internal networks jobs shouldn't reach) to
   `spec.networkPolicy.jobEgressExcept`.
+- To let jobs reach pods in the cluster, add NetworkPolicy egress rules to
+  `spec.networkPolicy.jobEgressAllow`, for example an ingress controller
+  serving internal URLs once `jobEgressExcept` covers the pod CIDR. Some
+  network plugins (Cilium) never match pods with an address range, so
+  "any address" covers only addresses outside the cluster. A Service's or
+  load balancer's address that leads to a pod is then dropped, and only a
+  rule like this lets it through. Each rule needs a `to`. A `podSelector`
+  without a `namespaceSelector` selects pods in the job namespace:
+
+  ```yaml
+  networkPolicy:
+    jobEgressAllow:
+      - to:
+          - namespaceSelector:
+              matchLabels: {kubernetes.io/metadata.name: traefik}
+            podSelector:
+              matchLabels: {app.kubernetes.io/name: traefik}
+        ports:
+          - {protocol: TCP, port: 8443}
+  ```
 - DNS is allowed only to the cluster DNS pods: by default `k8s-app=kube-dns`
   pods in `kube-system` (CoreDNS on most distributions), so port 53 isn't a
   way around `jobEgressExcept`. Elsewhere, set the chart's `jobDNS` values

@@ -33,6 +33,16 @@ spec:
   # this cluster's pod and service CIDRs.
   networkPolicy:
     jobEgressExcept: [10.244.0.0/16, 10.96.0.0/12]
+    # Pods in the cluster that jobs may still reach, such as an ingress
+    # controller serving internal URLs.
+    # jobEgressAllow:
+    #   - to:
+    #       - namespaceSelector:
+    #           matchLabels: {kubernetes.io/metadata.name: traefik}
+    #         podSelector:
+    #           matchLabels: {app.kubernetes.io/name: traefik}
+    #     ports:
+    #       - {protocol: TCP, port: 8443}
   database:
     external:
       urlSecret:

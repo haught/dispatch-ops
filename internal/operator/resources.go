@@ -1218,8 +1218,9 @@ func jobPodLabels() map[string]string {
 func (in install) jobPodSelector() map[string]string { return jobPodLabels() }
 
 // jobNetworkPolicy, in the job namespace, lets job pods connect only to
-// this installation's API server, DNS (see JobDNS), and addresses outside
-// the excepted ranges; nothing may connect to them.
+// this installation's API server, DNS (see JobDNS), addresses outside
+// the excepted ranges, and what jobEgressAllow allows; nothing may connect
+// to them.
 func (in install) jobNetworkPolicy(dns *JobDNS) (*networkingv1.NetworkPolicy, error) {
 	v4, v6 := jobEgressExceptV4, jobEgressExceptV6
 	for _, s := range in.Spec.NetworkPolicy.JobEgressExcept {
@@ -1245,6 +1246,14 @@ func (in install) jobNetworkPolicy(dns *JobDNS) (*networkingv1.NetworkPolicy, er
 	if dns.PodSelector != nil {
 		dnsPorts = append(dnsPorts, networkingv1.NetworkPolicyPort{Protocol: &udp, Port: new(intstr.FromInt32(5353))}, tcpPort(5353))
 	}
+	// The CRD requires a "to" too; checked again here, since a rule without
+	// one would open its ports to every address, metadata services
+	// included.
+	for i, r := range in.Spec.NetworkPolicy.JobEgressAllow {
+		if len(r.To) == 0 {
+			return nil, fmt.Errorf("networkPolicy.jobEgressAllow[%d]: no to", i)
+		}
+	}
 	m := in.meta(componentJobs, in.jobObjectName(componentJobs))
 	m.Namespace = in.jobNamespace()
 	return &networkingv1.NetworkPolicy{
@@ -1252,7 +1261,7 @@ func (in install) jobNetworkPolicy(dns *JobDNS) (*networkingv1.NetworkPolicy, er
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: in.jobPodSelector()},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
-			Egress: []networkingv1.NetworkPolicyEgressRule{
+			Egress: append([]networkingv1.NetworkPolicyEgressRule{
 				{
 					To: []networkingv1.NetworkPolicyPeer{{
 						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: in.Namespace}},
@@ -1267,7 +1276,7 @@ func (in install) jobNetworkPolicy(dns *JobDNS) (*networkingv1.NetworkPolicy, er
 					{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: v4}},
 					{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: v6}},
 				}},
-			},
+			}, in.Spec.NetworkPolicy.JobEgressAllow...),
 		},
 	}, nil
 }
