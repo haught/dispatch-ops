@@ -301,7 +301,7 @@ spec:
                     properties:
                       image:
                         description: |-
-                          Image defaults to a digest-pinned PostgreSQL 17 image, which the
+                          Image defaults to a digest-pinned PostgreSQL 18 image, which the
                           operator's releases update. Another image must be Debian-based
                           (postgres is UID 999), not the Alpine variant.
                         type: string

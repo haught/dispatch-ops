@@ -68,10 +68,10 @@ const (
 	// DispatchOps resources in the namespace it names.
 	AllowJobsFromLabel = "dispatch-ops.io/allow-jobs-from"
 	// DefaultPostgresImage is the managed database's image when its spec
-	// names none: postgres:17.11, pinned to the digest of its multi-arch
+	// names none: postgres:18.7, pinned to the digest of its multi-arch
 	// index. Dependabot doesn't track images named in Go source: bump it by
 	// hand (with the CI service container in .github/workflows/ci.yml).
-	DefaultPostgresImage = "postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f"
+	DefaultPostgresImage = "postgres:18.7@sha256:e754b839f447639b7004895f4d8a4bfcb4e9dbe3a1bc035f27f646562a16fd61"
 	// postgresUID is the postgres user of the Debian-based images.
 	postgresUID = 999
 	// Where PostgreSQL reads its certificate and key: a copy of the Secret

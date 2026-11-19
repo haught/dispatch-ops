@@ -80,7 +80,7 @@ defaults.
 | `DISPATCH_JOB_CPU_LIMIT`, `DISPATCH_JOB_MEMORY_LIMIT` | `2`, `2Gi` | Job pods' limits; `0` for none |
 | `DISPATCH_JOB_WORK_SIZE_LIMIT` | `4Gi` | Cap on a job pod's working directory; `0` for none |
 | `DISPATCH_LEADER_ELECTION` | `true` | Elect one active task manager with a Lease |
-| `DISPATCH_JOB_RETENTION` | `90d` | Delete finished jobs this long after they finish; `0` keeps them |
+| `DISPATCH_JOB_RETENTION` | `90d` | Delete finished jobs this long after they finish (a whole day at a time, so up to a day later); `0` keeps them |
 | `DISPATCH_AUDIT_RETENTION` | `0` | Delete audit log entries this old; `0` keeps them |
 
 ## Command line

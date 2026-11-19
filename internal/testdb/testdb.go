@@ -55,6 +55,11 @@ func Open(t *testing.T, suffix string) (*pgxpool.Pool, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Test databases outlive the week of job output partitions their
+	// migration created; the task manager would normally keep them coming.
+	if _, err := pool.Exec(ctx, `SELECT ensure_job_partitions((now() AT TIME ZONE 'UTC')::date - 1, (now() AT TIME ZONE 'UTC')::date + 7)`); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(pool.Close)
 	return pool, dsn
 }

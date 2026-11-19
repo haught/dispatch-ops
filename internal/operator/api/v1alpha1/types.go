@@ -351,7 +351,7 @@ type ExternalDatabase struct {
 // <name>-postgres-tls, and runs as UID 999 (the Debian-based postgres
 // images' postgres user) with a read-only root filesystem.
 type ManagedDatabase struct {
-	// Image defaults to a digest-pinned PostgreSQL 17 image, which the
+	// Image defaults to a digest-pinned PostgreSQL 18 image, which the
 	// operator's releases update. Another image must be Debian-based
 	// (postgres is UID 999), not the Alpine variant.
 	// +optional

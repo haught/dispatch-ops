@@ -23,7 +23,7 @@ production. For a first installation, start with the
 |---|---|---|
 | **Operator** | Deployment, installed with Helm | Reconciles each `DispatchOps` resource: deploys the API server and task manager, optionally a PostgreSQL, generates secrets and certificates, runs database migrations before every upgrade |
 | **API server** | Deployment, scales horizontally | REST API, authentication, access control, the web UI, and the endpoints job pods report to. Fans live output out to browsers |
-| **Task manager** | Deployment, one active leader elected with a Kubernetes Lease (extra replicas are standbys) | Takes queued jobs within the concurrency limit, creates a Kubernetes Job for each, watches them, enforces timeouts, fires schedules, sends notifications, applies retention |
+| **Task manager** | Deployment, one active leader elected with a Kubernetes Lease (extra replicas are standbys) | Takes queued jobs within the concurrency limit, creates a Kubernetes Job for each, watches them, enforces timeouts, fires schedules, sends notifications, creates job output partitions, applies retention |
 | **Runner** | The entrypoint of every execution environment image | Fetches its job's spec, clones the project, writes inventory, variables and credentials, runs the command, streams output and reports the result |
 | **PostgreSQL** | External, or a single instance the operator runs | All state. Also the job queue (`FOR UPDATE SKIP LOCKED`) and change notifications (`LISTEN/NOTIFY`), so no message broker is needed |
 
@@ -60,7 +60,7 @@ finished Kubernetes Jobs after a TTL (1 hour by default).
 | | Requirement |
 |---|---|
 | **Kubernetes** | A cluster you can install a CRD and the operator into. Job pods run in a namespace you choose. A network plugin that enforces NetworkPolicy (Calico, Cilium and so on) for the isolation described under [Network paths and isolation](#network-paths-and-isolation). |
-| **PostgreSQL** | 15 or later. Use an external, backed-up database for production. The operator can run one for you (PostgreSQL 17, digest-pinned, on a 10 Gi PersistentVolume by default, as a non-root user with a read-only root filesystem, serving TLS), but it has no backups or replication. |
+| **PostgreSQL** | 18. Use an external, backed-up database for production. The operator can run one for you (PostgreSQL 18, digest-pinned, on a 10 Gi PersistentVolume by default, as a non-root user with a read-only root filesystem, serving TLS), but it has no backups or replication. |
 | **Container registry** | Access to `ghcr.io`, where releases publish the server, operator, runner and starter execution environment images (`ghcr.io/haught/dispatch-ops/<name>`, amd64 and arm64) that the Helm chart uses by default. Without it, mirror them, or build your own (see [Building images and releases](../DEVELOP.md#building-images-and-releases)), into a registry your cluster can pull from and set `image.repository` and `serverImage.repository`. Your own execution environments go in a registry too. |
 | **Ingress** | An ingress controller and a DNS name for the UI and API. The API server speaks HTTPS to the ingress controller too. |
 | **TLS certificate** | Optional. Without one, the operator generates a self-signed certificate for the API server. cert-manager works well. |
@@ -556,7 +556,8 @@ else depends on it, so delete it after the first sign-in.
   of memory and a 4Gi working directory; change that with
   `spec.taskManager.jobResources` and `jobWorkSizeLimit`.
 - **Database:** job output is the bulk of the data. Retention
-  (`spec.retention.jobs`, 90 days by default) keeps it bounded.
+  (`spec.retention.jobs`, 90 days by default) keeps it bounded, and each job
+  stores at most `DISPATCH_JOB_MAX_OUTPUT` of it.
 
 ## TLS
 
@@ -725,16 +726,18 @@ the Prometheus Operator, use a PodMonitor selecting
 | `dispatch_taskmanager_jobs_dispatched_total{result}`, `dispatch_taskmanager_jobs_ended_total{status}` | Kubernetes Jobs created; jobs the task manager ended (timeouts, lost pods) |
 | `dispatch_schedule_runs_total{result}` | Schedule firings |
 | `dispatch_notifications_total{kind,result}`, `dispatch_notification_send_duration_seconds{kind}` | Notification attempts (`sent`, `retry`, `failed`) |
-| `dispatch_retention_deleted_total{kind}` | Rows deleted by retention |
+| `dispatch_retention_deleted_total{kind}` | Deleted by retention: `jobs`, `job_partitions` (whole days of output), `audit_log` |
 | `dispatch_taskmanager_tick_duration_seconds` | Task manager passes |
 | `dispatch_taskmanager_leader` | 1 on the leading task manager |
-| `dispatch_jobs{status}`, `dispatch_job_queue_oldest_pending_seconds`, `dispatch_notifications_pending` | From the database, reported by the leader only |
+| `dispatch_jobs{status}`, `dispatch_job_queue_oldest_pending_seconds`, `dispatch_notifications_pending`, `dispatch_job_partitions_ahead_days` | From the database, reported by the leader only |
 
 Counters are per process; sum them across replicas. Useful alerts:
 
 - `dispatch_job_queue_oldest_pending_seconds` growing: jobs aren't starting.
 - `sum(dispatch_taskmanager_leader) == 0`: no task manager is running.
 - A rising rate of `dispatch_notifications_total{result="failed"}`.
+- `dispatch_job_partitions_ahead_days < 3`: job output partitions aren't
+  being created (see [Data retention](#data-retention)).
 
 Health probes are `/healthz` (liveness) and `/readyz` (checks the database).
 
@@ -745,3 +748,15 @@ The task manager deletes finished jobs, with their output and notifications,
 and audit log entries older than `spec.retention.auditLog` (default `0`,
 kept forever). It checks hourly. Periods take days (`90d`) or Go durations
 (`2160h`).
+
+Job output is stored in one database partition per day (UTC) of job
+creation, and jobs are deleted a whole day at a time: once every job created
+that day finished more than the retention period ago, the day's partition is
+dropped and its jobs deleted. So a job is kept at least the retention
+period and up to a day longer, and a day with a job that never finished is
+kept until it does. Dropping a partition doesn't hold locks that block jobs,
+and frees its disk space at once.
+
+The task manager creates partitions a week ahead, when it starts and then
+hourly. A job can't store output without its day's partition, so alert if
+`dispatch_job_partitions_ahead_days` drops below a few days.

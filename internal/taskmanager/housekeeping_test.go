@@ -238,28 +238,122 @@ func (e *env) launchFrom(tmpl store.JobTemplate) store.Job {
 	return j
 }
 
-func TestCleanUpDeletesOldJobs(t *testing.T) {
+// backdate gives job j the ID it would have had if created days ago, with
+// that day's partition, and returns it.
+func (e *env) backdate(j store.Job, days int) store.Job {
+	e.t.Helper()
+	if _, err := e.pool.Exec(e.ctx, `SELECT ensure_job_partitions(
+		(now() AT TIME ZONE 'UTC')::date - $1::int, (now() AT TIME ZONE 'UTC')::date - $1::int)`, days); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.pool.QueryRow(e.ctx, `
+		UPDATE jobs SET id = uuidv7(make_interval(days => -$2::int)), created_at = now() - make_interval(days => $2::int)
+		WHERE id = $1 RETURNING id`, j.ID, days).Scan(&j.ID); err != nil {
+		e.t.Fatal(err)
+	}
+	return j
+}
+
+func (e *env) finish(j store.Job, daysAgo int) {
+	e.t.Helper()
+	if _, err := e.pool.Exec(e.ctx, `UPDATE jobs SET status = 'successful', finished_at = now() - make_interval(days => $2::int) WHERE id = $1`,
+		j.ID, daysAgo); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *env) output(j store.Job) int {
+	e.t.Helper()
+	var n int
+	if err := e.pool.QueryRow(e.ctx, `SELECT count(*) FROM job_events WHERE job_id = $1`, j.ID).Scan(&n); err != nil {
+		e.t.Fatal(err)
+	}
+	return n
+}
+
+func (e *env) partitionExists(daysAgo int) bool {
+	e.t.Helper()
+	var ok bool
+	if err := e.pool.QueryRow(e.ctx, `SELECT to_regclass('job_events_p' || to_char((now() AT TIME ZONE 'UTC')::date - $1::int, 'YYYYMMDD')) IS NOT NULL`,
+		daysAgo).Scan(&ok); err != nil {
+		e.t.Fatal(err)
+	}
+	return ok
+}
+
+func TestCleanUpDropsExpiredDays(t *testing.T) {
 	e := newEnv(t)
 	e.m.Config.JobRetention = 30 * 24 * time.Hour
-	old, recent, running := e.launch(60), e.launch(60), e.launch(60)
-	for _, j := range []store.Job{old, recent} {
-		if _, err := e.st.CancelJob(e.ctx, j.ID); err != nil {
+
+	// A day whose jobs all finished long enough ago goes, with its output.
+	old := e.backdate(e.launch(60), 40)
+	e.finish(old, 39)
+	// A day with a job that finished recently stays, all of it.
+	mixedOld, mixedNew := e.backdate(e.launch(60), 45), e.backdate(e.launch(60), 45)
+	e.finish(mixedOld, 44)
+	e.finish(mixedNew, 1)
+	// So does a day with a job that hasn't finished, whatever its age.
+	running := e.backdate(e.launch(60), 60)
+	// And anything recent.
+	recent := e.launch(60)
+	e.finish(recent, 0)
+
+	for _, j := range []store.Job{old, mixedOld, running} {
+		if _, err := e.pool.Exec(e.ctx, `INSERT INTO job_events (job_id, seq, stdout) VALUES ($1, 1, 'hi')`, j.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := e.pool.Exec(e.ctx, `UPDATE jobs SET finished_at = now() - interval '31 days' WHERE id = $1`, old.ID); err != nil {
-		t.Fatal(err)
-	}
-	// An old job that hasn't finished is kept, whatever its age.
-	if _, err := e.pool.Exec(e.ctx, `UPDATE jobs SET created_at = now() - interval '60 days' WHERE id = $1`, running.ID); err != nil {
-		t.Fatal(err)
-	}
+
 	if err := e.m.CleanUp(e.ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.st.GetJob(e.ctx, old.ID); err != store.ErrNotFound {
 		t.Errorf("old job: %v, want deleted", err)
 	}
-	e.job(recent.ID)
-	e.job(running.ID)
+	if e.partitionExists(40) {
+		t.Error("the old day's partition was not dropped")
+	}
+	for _, j := range []store.Job{mixedOld, mixedNew, running, recent} {
+		e.job(j.ID)
+	}
+	if e.output(mixedOld) != 1 || e.output(running) != 1 {
+		t.Error("output of a kept day was deleted")
+	}
+	if !e.partitionExists(45) || !e.partitionExists(60) {
+		t.Error("a kept day's partition was dropped")
+	}
+}
+
+func TestCleanUpFinishesInterruptedDays(t *testing.T) {
+	e := newEnv(t)
+	e.m.Config.JobRetention = 30 * 24 * time.Hour
+	j := e.backdate(e.launch(60), 50)
+	e.finish(j, 49)
+	// A run that dropped the day's partition, but not yet its jobs.
+	part := `job_events_p` + time.Now().UTC().AddDate(0, 0, -50).Format("20060102")
+	for _, sql := range []string{`ALTER TABLE job_events DETACH PARTITION ` + part, `DROP TABLE ` + part} {
+		if _, err := e.pool.Exec(e.ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.m.CleanUp(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.GetJob(e.ctx, j.ID); err != store.ErrNotFound {
+		t.Errorf("job: %v, want deleted", err)
+	}
+}
+
+func TestCleanUpCreatesPartitionsAhead(t *testing.T) {
+	e := newEnv(t)
+	if err := e.m.CleanUp(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	ahead, err := e.st.JobPartitionsAhead(e.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ahead < partitionsAhead {
+		t.Errorf("partitions ahead = %d, want %d", ahead, partitionsAhead)
+	}
 }

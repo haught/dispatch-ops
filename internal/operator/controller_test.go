@@ -1142,7 +1142,7 @@ func TestManagedDatabaseIsHardened(t *testing.T) {
 	// Resources and image can be overridden.
 	cr := e.cr()
 	cr.Spec.Database.Managed = &v1alpha1.ManagedDatabase{
-		Image:     "postgres:17.11",
+		Image:     "postgres:18.7",
 		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")}},
 	}
 	if err := e.c.Update(e.ctx, cr); err != nil {
@@ -1151,7 +1151,7 @@ func TestManagedDatabaseIsHardened(t *testing.T) {
 	e.reconcile()
 	e.get("dops-postgres", &sts)
 	c = sts.Spec.Template.Spec.Containers[0]
-	if c.Image != "postgres:17.11" || c.Resources.Limits.Memory().String() != "4Gi" || len(c.Resources.Requests) != 0 {
+	if c.Image != "postgres:18.7" || c.Resources.Limits.Memory().String() != "4Gi" || len(c.Resources.Requests) != 0 {
 		t.Errorf("overridden: image %s resources %+v", c.Image, c.Resources)
 	}
 }

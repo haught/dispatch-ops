@@ -49,8 +49,8 @@ The Makefile expects a container named `postgresql` with the superuser
 ```sh
 docker run -d --name postgresql --restart unless-stopped \
   -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
-  -v dispatch-ops-pg:/var/lib/postgresql/data \
-  postgres:17
+  -v dispatch-ops-pg:/var/lib/postgresql \
+  postgres:18
 ```
 
 It runs on your machine's Docker, next to the dev container, so it survives
