@@ -1,6 +1,6 @@
 <script lang="ts">
 	import '../app.css';
-	import favicon from '#lib/assets/favicon.svg';
+	import logo from '#lib/assets/logo.svg';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onUnauthorized } from '#lib/api/client.js';
@@ -57,7 +57,7 @@
 </script>
 
 <svelte:head>
-	<link rel="icon" href={favicon} />
+	<link rel="icon" type="image/svg+xml" href={logo} />
 	<title>Dispatch Ops</title>
 </svelte:head>
 
@@ -66,7 +66,7 @@
 {:else if session.user}
 	<div class="shell">
 		<aside>
-			<div class="brand">Dispatch Ops</div>
+			<div class="brand"><img src={logo} alt="" width="24" height="24" />Dispatch Ops</div>
 			<nav>
 				{#each nav as item (item.href)}
 					<a href={item.href} class:active={isActive(item.href)}>{item.label}</a>
@@ -109,6 +109,9 @@
 	}
 
 	.brand {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
 		font-weight: 700;
 		font-size: 1.1rem;
 		padding: 0 0.5rem 1rem;

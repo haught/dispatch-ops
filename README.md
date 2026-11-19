@@ -1,3 +1,5 @@
+<img src="web/src/lib/assets/logo.svg" width="72" alt="">
+
 # Dispatch Ops
 
 A Kubernetes-native automation platform for running Ansible playbooks,

@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { api, errorMessage } from '#lib/api/client.js';
 	import { session } from '#lib/session.svelte.js';
+	import logo from '#lib/assets/logo.svg';
 
 	let username = $state('');
 	let password = $state('');
@@ -88,7 +89,7 @@
 
 <div class="wrap">
 	<div class="card">
-		<h1>Dispatch Ops</h1>
+		<h1><img src={logo} alt="" width="36" height="36" />Dispatch Ops</h1>
 		{#if error}
 			<p class="error" role="alert">{error}</p>
 		{/if}
@@ -118,6 +119,14 @@
 		display: grid;
 		place-items: center;
 		padding: 1rem;
+	}
+
+	h1 {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.6rem;
+		margin-bottom: 2rem;
 	}
 
 	.card {
