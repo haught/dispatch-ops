@@ -165,7 +165,8 @@ arrives with a node's or the load balancer's address.
 
 Each job may store at most 256 MiB of output, so one runaway job can't fill
 the database. Past the cap the job keeps running, its log says the output was
-cut, and only its Ansible recap is still kept. Change it with
+cut, and its per-host results are still complete (a job records results for
+at most 100,000 hosts). Change it with
 `spec.api.maxJobOutput` (e.g. `1Gi`, or `0` for no cap).
 
 The API server sends a strict `Content-Security-Policy` on every response,

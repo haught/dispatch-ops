@@ -9,6 +9,7 @@
 		hostEventTypes,
 		type Job,
 		type JobEvent,
+		type JobHostCounts,
 		type JobHostSummary,
 		type NotificationDelivery
 	} from '#lib/api/client.js';
@@ -31,6 +32,7 @@
 	// Per-host results (Ansible jobs), and the task results of the host
 	// picked in the table.
 	let hosts = $state<JobHostSummary[]>([]);
+	let hostCounts = $state<JobHostCounts | null>(null);
 	let selectedHost = $state<string | null>(null);
 	let hostEvents = $state<JobEvent[]>([]);
 	let hostEventsError = $state('');
@@ -41,12 +43,15 @@
 	let now = $state(Date.now());
 
 	const finished = $derived(job ? finishedStatuses.includes(job.status) : false);
-	const failedHosts = $derived(hosts.filter((h) => h.failed > 0 || h.unreachable > 0).length);
+	const failedHosts = $derived(hostCounts ? hostCounts.failed + hostCounts.unreachable : 0);
+	const hostTotal = $derived(
+		hostCounts ? Object.values(hostCounts).reduce((sum, n) => sum + n, 0) : 0
+	);
 
 	const tabs = $derived<Tab[]>([
 		{ id: 'output', label: 'Output' },
 		...(job?.config.jobType === 'ansible'
-			? [{ id: 'hosts', label: 'Hosts', count: hosts.length || undefined }]
+			? [{ id: 'hosts', label: 'Hosts', count: hostTotal || undefined }]
 			: []),
 		{ id: 'details', label: 'Details' },
 		...(deliveries.length > 0
@@ -79,6 +84,7 @@
 		lines = [];
 		error = '';
 		hosts = [];
+		hostCounts = null;
 		deliveries = [];
 		selectedHost = null;
 		let source: EventSource | null = null;
@@ -91,7 +97,10 @@
 			const { data } = await api.GET('/api/v1/jobs/{jobId}/hosts', {
 				params: { path: { jobId: id } }
 			});
-			if (data && !closed) hosts = data.items;
+			if (data && !closed) {
+				hosts = data.items;
+				hostCounts = data.counts;
+			}
 		};
 		// Host results change with every task; refresh them at most every 1.5s.
 		const scheduleHosts = () => {

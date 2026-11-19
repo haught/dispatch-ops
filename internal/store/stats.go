@@ -191,18 +191,18 @@ type ProblemHost struct {
 func (s *Store) ListProblemHosts(ctx context.Context, sc StatsScope, limit int) ([]ProblemHost, error) {
 	where, args := sc.where("j")
 	args = append(args, limit)
+	// The scope's time range, on job IDs too, skips older partitions.
 	rows, err := s.pool.Query(ctx, `
-		SELECT e.host_name,
-			count(DISTINCT e.job_id) FILTER (WHERE e.event_type = 'host_failed'),
-			count(DISTINCT e.job_id) FILTER (WHERE e.event_type = 'host_unreachable'),
-			max(e.created_at),
-			(array_agg(e.job_id ORDER BY e.created_at DESC))[1]
-		FROM jobs j JOIN job_events e ON e.job_id = j.id
-		WHERE `+where+` AND e.host_name IS NOT NULL
-			AND (e.event_type = 'host_unreachable'
-				OR (e.event_type = 'host_failed' AND coalesce(e.data->>'ignored' = 'true', false) = false))
-		GROUP BY e.host_name
-		ORDER BY count(DISTINCT e.job_id) DESC, max(e.created_at) DESC, e.host_name
+		SELECT h.host_name,
+			count(*) FILTER (WHERE h.failed > 0),
+			count(*) FILTER (WHERE h.unreachable > 0),
+			max(j.created_at),
+			(array_agg(j.id ORDER BY j.created_at DESC))[1]
+		FROM jobs j JOIN job_host_results h ON h.job_id = j.id
+		WHERE `+where+` AND (h.failed > 0 OR h.unreachable > 0)
+			AND h.job_id >= job_id_floor($1 - interval '1 minute') AND h.job_id < job_id_floor($2 + interval '1 minute')
+		GROUP BY h.host_name
+		ORDER BY count(*) DESC, max(j.created_at) DESC, h.host_name
 		LIMIT $`+strconv.Itoa(len(args)), args...)
 	if err != nil {
 		return nil, err

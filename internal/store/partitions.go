@@ -15,7 +15,7 @@ import (
 // expired.
 
 // jobPartitioned are the tables partitioned by job.
-var jobPartitioned = []string{"job_events"}
+var jobPartitioned = []string{"job_events", "job_host_results"}
 
 // JobPartition is one day's partition of a job-partitioned table.
 type JobPartition struct {

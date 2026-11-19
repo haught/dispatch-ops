@@ -2095,10 +2095,30 @@ paths:
       tags: [jobs]
       summary: Per-host results of an Ansible job
       description: |
-        One entry per host the playbook ran against, by host name. While the
-        job runs, the counts come from the task results received so far; once
-        the playbook finishes they are Ansible's own recap. Jobs of other
-        types have no entries.
+        One entry per host the playbook ran against, by host name, a page at
+        a time. While the job runs, the counts come from the task results
+        received so far; once the playbook finishes they are Ansible's own
+        recap. Results are kept even when the job's output was cut at the
+        output limit. Jobs of other types have no entries.
+      parameters:
+        - name: status
+          in: query
+          description: Only hosts with one of these overall results
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/JobHostStatus"
+          style: form
+          explode: true
+        - $ref: "#/components/parameters/Search"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 500
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: Host results
@@ -4856,9 +4876,7 @@ components:
         hostName:
           type: string
         status:
-          type: string
-          description: The host's overall result, the worst of its task results
-          enum: [ok, changed, failed, unreachable, skipped]
+          $ref: "#/components/schemas/JobHostStatus"
         ok:
           type: integer
           description: Tasks that succeeded, including changed ones
@@ -4876,14 +4894,37 @@ components:
           type: integer
           description: Failed tasks with `ignore_errors`
 
+    JobHostStatus:
+      type: string
+      description: A host's overall result, the worst of its task results
+      enum: [ok, changed, failed, unreachable, skipped]
+
     JobHostSummaryList:
       type: object
-      required: [items]
+      required: [items, total, counts]
       properties:
         items:
           type: array
           items:
             $ref: "#/components/schemas/JobHostSummary"
+        total:
+          type: integer
+          description: Hosts matching the filter
+        counts:
+          type: object
+          description: All of the job's hosts, by overall result
+          required: [ok, changed, failed, unreachable, skipped]
+          properties:
+            ok:
+              type: integer
+            changed:
+              type: integer
+            failed:
+              type: integer
+            unreachable:
+              type: integer
+            skipped:
+              type: integer
 
     RelaunchRequest:
       type: object

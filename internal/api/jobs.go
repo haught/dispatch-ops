@@ -90,14 +90,24 @@ func (h *Handlers) ListJobHosts(ctx context.Context, req apigen.ListJobHostsRequ
 	if _, err := h.getJob(ctx, req.JobId); err != nil {
 		return nil, err
 	}
-	hosts, err := h.Store.ListJobHostSummaries(ctx, req.JobId)
+	p := req.Params
+	f := store.JobHostFilter{Search: deref(p.Search)}
+	for _, st := range deref(p.Status) {
+		f.Statuses = append(f.Statuses, string(st))
+	}
+	page := store.Page{Limit: 500, Offset: deref(p.Offset)}
+	setIf(&page.Limit, p.Limit)
+	hosts, err := h.Store.ListJobHostSummaries(ctx, req.JobId, f, page)
 	if err != nil {
 		return nil, orNotFound(err, "Job")
 	}
-	out := apigen.ListJobHosts200JSONResponse{Items: make([]apigen.JobHostSummary, 0, len(hosts))}
-	for _, s := range hosts {
+	out := apigen.ListJobHosts200JSONResponse{Items: make([]apigen.JobHostSummary, 0, len(hosts.Items)), Total: hosts.Total}
+	c := &out.Counts
+	c.Ok, c.Changed, c.Failed = hosts.ByStatus[store.HostOK], hosts.ByStatus[store.HostChanged], hosts.ByStatus[store.HostFailed]
+	c.Unreachable, c.Skipped = hosts.ByStatus[store.HostUnreachable], hosts.ByStatus[store.HostSkipped]
+	for _, s := range hosts.Items {
 		out.Items = append(out.Items, apigen.JobHostSummary{
-			HostName: s.HostName, Status: apigen.JobHostSummaryStatus(s.Status()), Ok: s.OK, Changed: s.Changed,
+			HostName: s.HostName, Status: apigen.JobHostStatus(s.Status()), Ok: s.OK, Changed: s.Changed,
 			Failed: s.Failed, Unreachable: s.Unreachable, Skipped: s.Skipped, Rescued: s.Rescued, Ignored: s.Ignored,
 		})
 	}
@@ -418,21 +428,20 @@ func (h *Handlers) failedHostsLimit(ctx context.Context, j store.Job) (string, e
 	if !store.JobFinished(j.Status) {
 		return "", conflict("the job has not finished, so it is not known which hosts failed")
 	}
-	summaries, err := h.Store.ListJobHostSummaries(ctx, j.ID)
+	hosts, err := h.Store.ListJobHostSummaries(ctx, j.ID,
+		store.JobHostFilter{Statuses: []string{store.HostFailed, store.HostUnreachable}}, store.Page{})
 	if err != nil {
 		return "", err
 	}
 	var failed []string
-	for _, s := range summaries {
-		if s.Failed > 0 || s.Unreachable > 0 {
-			// Host names come from the job's events, which the job itself
-			// could have written; one such as @/path would make the limit
-			// read that file.
-			if err := hostpattern.CheckHostName(s.HostName); err != nil {
-				return "", badRequest("the job can't be relaunched on its failed hosts: %s", err)
-			}
-			failed = append(failed, s.HostName)
+	for _, s := range hosts.Items {
+		// Host names come from the job's events, which the job itself
+		// could have written; one such as @/path would make the limit
+		// read that file.
+		if err := hostpattern.CheckHostName(s.HostName); err != nil {
+			return "", badRequest("the job can't be relaunched on its failed hosts: %s", err)
 		}
+		failed = append(failed, s.HostName)
 	}
 	if len(failed) == 0 {
 		return "", badRequest("no hosts failed or were unreachable in this job")

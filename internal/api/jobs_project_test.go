@@ -300,7 +300,7 @@ func TestAnsibleJob(t *testing.T) {
 	for _, it := range all {
 		seen[it.(map[string]any)["type"].(string)] = true
 	}
-	for _, typ := range []string{"playbook_start", "play_start", "task_start", "host_skipped", "playbook_stats", "runner", "stdout"} {
+	for _, typ := range []string{"playbook_start", "play_start", "task_start", "host_skipped", "runner", "stdout"} {
 		if !seen[typ] {
 			t.Errorf("no %s event", typ)
 		}

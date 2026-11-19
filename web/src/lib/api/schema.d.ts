@@ -1049,10 +1049,11 @@ export interface paths {
         };
         /**
          * Per-host results of an Ansible job
-         * @description One entry per host the playbook ran against, by host name. While the
-         *     job runs, the counts come from the task results received so far; once
-         *     the playbook finishes they are Ansible's own recap. Jobs of other
-         *     types have no entries.
+         * @description One entry per host the playbook ran against, by host name, a page at
+         *     a time. While the job runs, the counts come from the task results
+         *     received so far; once the playbook finishes they are Ansible's own
+         *     recap. Results are kept even when the job's output was cut at the
+         *     output limit. Jobs of other types have no entries.
          */
         get: operations["listJobHosts"];
         put?: never;
@@ -2389,11 +2390,7 @@ export interface components {
         };
         JobHostSummary: {
             hostName: string;
-            /**
-             * @description The host's overall result, the worst of its task results
-             * @enum {string}
-             */
-            status: "ok" | "changed" | "failed" | "unreachable" | "skipped";
+            status: components["schemas"]["JobHostStatus"];
             /** @description Tasks that succeeded, including changed ones */
             ok: number;
             changed: number;
@@ -2404,8 +2401,23 @@ export interface components {
             /** @description Failed tasks with `ignore_errors` */
             ignored: number;
         };
+        /**
+         * @description A host's overall result, the worst of its task results
+         * @enum {string}
+         */
+        JobHostStatus: "ok" | "changed" | "failed" | "unreachable" | "skipped";
         JobHostSummaryList: {
             items: components["schemas"]["JobHostSummary"][];
+            /** @description Hosts matching the filter */
+            total: number;
+            /** @description All of the job's hosts, by overall result */
+            counts: {
+                ok: number;
+                changed: number;
+                failed: number;
+                unreachable: number;
+                skipped: number;
+            };
         };
         RelaunchRequest: {
             /**
@@ -4975,7 +4987,14 @@ export interface operations {
     };
     listJobHosts: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Only hosts with one of these overall results */
+                status?: components["schemas"]["JobHostStatus"][];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+                limit?: number;
+                offset?: components["parameters"]["Offset"];
+            };
             header?: never;
             path: {
                 jobId: components["parameters"]["JobId"];

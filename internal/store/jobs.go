@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -493,22 +491,22 @@ type JobEvent struct {
 	Data     map[string]any
 }
 
-// recapAllowance is how far past the output cap a job's Ansible recap
-// (playbook_stats events) may still be stored, in all, so its per-host
-// results survive a truncated log without letting a job bypass the cap:
-// the runner could send any number of such events. The recap comes in
-// events of 50 hosts (a few KiB each), so 1 MiB keeps it for several thousand
-// hosts.
-const recapAllowance = 1 << 20
-
-// AppendJobEvents stores events for a running job, skipping any whose seq is
-// already stored, and notifies stream listeners. It also counts as a
-// heartbeat, and reports whether the job should be canceled.
+// AppendJobEvents stores a batch of events for a running job and notifies
+// stream listeners. It also counts as a heartbeat, and reports whether the
+// job should be canceled.
+//
+// The runner sends batches in seq order, one at a time, retrying a batch
+// until it is acknowledged; so events at or below the job's last_event_seq
+// are from a retried batch already stored, and are skipped.
+//
+// Host results (host_* events and the recap) are added to
+// job_host_results, whatever the output cap. The recap (playbook_stats) is
+// not stored as an event.
 //
 // maxOutput, if positive, caps the bytes of output a job may store (stdout,
 // host name and data of its events). The event that would cross it is
-// replaced by a runner event saying so; later events are dropped, except
-// the recap, within recapAllowance. The job keeps running.
+// replaced by a runner event saying so, and later events are dropped. The
+// job keeps running.
 func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobEvent, maxOutput int64) (cancelRequested bool, err error) {
 	type row struct {
 		seq    int64
@@ -542,11 +540,13 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 	}
 
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
-		var used int64
+		var used, lastSeq, hostsSeq int64
+		var hostCount int
 		var truncated bool
 		err := tx.QueryRow(ctx, `
 			UPDATE jobs SET last_heartbeat_at = now() WHERE id = $1 AND status = 'running'
-			RETURNING cancel_requested, output_bytes, output_truncated`, id).Scan(&cancelRequested, &used, &truncated)
+			RETURNING cancel_requested, output_bytes, output_truncated, last_event_seq, host_results_seq, host_count`, id).
+			Scan(&cancelRequested, &used, &truncated, &lastSeq, &hostsSeq, &hostCount)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrJobState
 		}
@@ -554,60 +554,56 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 			return err
 		}
 
-		keep := all
-		if maxOutput > 0 {
-			// A retried batch's events are already stored; don't count them twice.
-			seqs := make([]int64, len(all))
-			for i, r := range all {
-				seqs[i] = r.seq
+		var tally hostTally
+		keep := make([]row, 0, len(all))
+		maxSeq := lastSeq
+		for _, r := range all {
+			if r.seq <= lastSeq {
+				continue
 			}
-			rows, err := tx.Query(ctx, `SELECT seq FROM job_events WHERE job_id = $1 AND seq = ANY($2)`, id, seqs)
-			if err != nil {
-				return err
-			}
-			stored, err := pgx.CollectRows(rows, pgx.RowTo[int64])
-			if err != nil {
-				return err
-			}
-			wasTruncated := truncated
-			keep = make([]row, 0, len(all))
-			for _, r := range all {
-				switch {
-				case slices.Contains(stored, r.seq):
-				case r.typ == "playbook_stats" && used+r.size <= maxOutput+recapAllowance:
-					keep, used = append(keep, r), used+r.size
-				case truncated:
-				case used+r.size > maxOutput:
-					truncated = true
-					keep = append(keep, row{seq: r.seq, at: r.at, typ: "runner", stdout: fmt.Sprintf(
-						"This job's output reached the limit of %s; later output is not kept (the job keeps running)", formatBytes(maxOutput))})
-				default:
-					keep, used = append(keep, r), used+r.size
-				}
-			}
-			if _, err := tx.Exec(ctx, `UPDATE jobs SET output_bytes = $2, output_truncated = $3 WHERE id = $1`,
-				id, used, truncated || wasTruncated); err != nil {
-				return err
+			maxSeq = max(maxSeq, r.seq)
+			tally.add(r.typ, r.host, r.data)
+			switch {
+			case r.typ == "playbook_stats":
+			case truncated && maxOutput > 0:
+			case maxOutput > 0 && used+r.size > maxOutput:
+				truncated = true
+				keep = append(keep, row{seq: r.seq, at: r.at, typ: "runner", stdout: fmt.Sprintf(
+					"This job's output reached the limit of %s; later output is not kept (the job keeps running)", formatBytes(maxOutput))})
+			default:
+				keep, used = append(keep, r), used+r.size
 			}
 		}
-		if len(keep) == 0 {
+		if maxSeq == lastSeq {
 			return nil
 		}
-
-		n := len(keep)
-		seqs, times := make([]int64, n), make([]time.Time, n)
-		types, hosts, stdouts, data := make([]string, n), make([]*string, n), make([]string, n), make([]*string, n)
-		for i, r := range keep {
-			seqs[i], times[i], types[i], hosts[i], stdouts[i], data[i] = r.seq, r.at, r.typ, r.host, r.stdout, r.data
+		if !tally.empty() {
+			hostsSeq = maxSeq
+		}
+		if hostCount, err = tally.save(ctx, tx, id, hostCount); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO job_events (job_id, seq, created_at, event_type, host_name, stdout, data)
-			SELECT $1, e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data::jsonb
-			FROM unnest($2::bigint[], $3::timestamptz[], $4::text[], $5::text[], $6::text[], $7::text[])
-				AS e(seq, created_at, event_type, host_name, stdout, data)
-			ON CONFLICT (job_id, seq) DO NOTHING`,
-			id, seqs, times, types, hosts, stdouts, data); err != nil {
+			UPDATE jobs SET last_event_seq = $2, output_bytes = $3, output_truncated = $4, host_results_seq = $5, host_count = $6
+			WHERE id = $1`, id, maxSeq, used, truncated, hostsSeq, hostCount); err != nil {
 			return err
+		}
+
+		if len(keep) > 0 {
+			n := len(keep)
+			seqs, times := make([]int64, n), make([]time.Time, n)
+			types, hosts, stdouts, data := make([]string, n), make([]*string, n), make([]string, n), make([]*string, n)
+			for i, r := range keep {
+				seqs[i], times[i], types[i], hosts[i], stdouts[i], data[i] = r.seq, r.at, r.typ, r.host, r.stdout, r.data
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO job_events (job_id, seq, created_at, event_type, host_name, stdout, data)
+				SELECT $1, e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data::jsonb
+				FROM unnest($2::bigint[], $3::timestamptz[], $4::text[], $5::text[], $6::text[], $7::text[])
+					AS e(seq, created_at, event_type, host_name, stdout, data)`,
+				id, seqs, times, types, hosts, stdouts, data); err != nil {
+				return err
+			}
 		}
 		_, err = tx.Exec(ctx, `SELECT pg_notify('dispatch_job_events', $1)`, id.String())
 		return err
@@ -675,122 +671,4 @@ func (s *Store) ListJobEvents(ctx context.Context, jobID uuid.UUID, f JobEventFi
 		}
 	}
 	return events, nil
-}
-
-// JobHostSummary is one host's task results in an Ansible job.
-type JobHostSummary struct {
-	HostName    string
-	OK          int
-	Changed     int
-	Failed      int
-	Unreachable int
-	Skipped     int
-	Rescued     int
-	Ignored     int
-}
-
-// Status is the host's overall result: the worst of its task results.
-func (h JobHostSummary) Status() string {
-	switch {
-	case h.Unreachable > 0:
-		return "unreachable"
-	case h.Failed > 0:
-		return "failed"
-	case h.Changed > 0:
-		return "changed"
-	case h.OK > 0:
-		return "ok"
-	}
-	return "skipped"
-}
-
-// ListJobHostSummaries returns a job's per-host results, by host name.
-// They are counted from the host_* events received so far; once the
-// playbook_stats event arrives, its numbers (Ansible's own recap, which
-// also knows about rescued tasks) replace the counts for the hosts it lists.
-// It returns ErrNotFound if the job does not exist.
-func (s *Store) ListJobHostSummaries(ctx context.Context, jobID uuid.UUID) ([]JobHostSummary, error) {
-	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE id = $1)`, jobID).Scan(&exists); err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, ErrNotFound
-	}
-
-	rows, err := s.pool.Query(ctx, `
-		SELECT host_name,
-			-- Like Ansible's recap, failures with ignore_errors count as ok too.
-			count(*) FILTER (WHERE succeeded),
-			count(*) FILTER (WHERE succeeded AND changed),
-			count(*) FILTER (WHERE event_type = 'host_failed' AND NOT ignored),
-			count(*) FILTER (WHERE event_type = 'host_unreachable'),
-			count(*) FILTER (WHERE event_type = 'host_skipped'),
-			count(*) FILTER (WHERE event_type = 'host_failed' AND ignored)
-		FROM (
-			SELECT host_name, event_type,
-				coalesce(data->>'changed' = 'true', false) AS changed,
-				coalesce(data->>'ignored' = 'true', false) AS ignored,
-				event_type = 'host_ok' OR (event_type = 'host_failed' AND coalesce(data->>'ignored' = 'true', false)) AS succeeded
-			FROM job_events
-			WHERE job_id = $1 AND host_name IS NOT NULL
-				AND event_type IN ('host_ok', 'host_failed', 'host_unreachable', 'host_skipped')
-		) e
-		GROUP BY host_name ORDER BY host_name`, jobID)
-	if err != nil {
-		return nil, err
-	}
-	hosts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (JobHostSummary, error) {
-		var h JobHostSummary
-		err := row.Scan(&h.HostName, &h.OK, &h.Changed, &h.Failed, &h.Unreachable, &h.Skipped, &h.Ignored)
-		return h, err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// The recap comes in chunks of hosts.
-	rows, err = s.pool.Query(ctx, `
-		SELECT data FROM job_events WHERE job_id = $1 AND event_type = 'playbook_stats' ORDER BY seq`, jobID)
-	if err != nil {
-		return nil, err
-	}
-	type hostStats struct {
-		OK          int `json:"ok"`
-		Changed     int `json:"changed"`
-		Failures    int `json:"failures"`
-		Unreachable int `json:"unreachable"`
-		Skipped     int `json:"skipped"`
-		Rescued     int `json:"rescued"`
-		Ignored     int `json:"ignored"`
-	}
-	recap := map[string]hostStats{}
-	var chunk struct {
-		Hosts map[string]hostStats `json:"hosts"`
-	}
-	_, err = pgx.ForEachRow(rows, []any{&chunk}, func() error {
-		maps.Copy(recap, chunk.Hosts)
-		chunk.Hosts = nil
-		return nil
-	})
-	if err != nil || len(recap) == 0 {
-		return hosts, err
-	}
-	byName := map[string]int{}
-	for i, h := range hosts {
-		byName[h.HostName] = i
-	}
-	for name, st := range recap {
-		h := JobHostSummary{
-			HostName: name, OK: st.OK, Changed: st.Changed, Failed: st.Failures, Unreachable: st.Unreachable,
-			Skipped: st.Skipped, Rescued: st.Rescued, Ignored: st.Ignored,
-		}
-		if i, ok := byName[name]; ok {
-			hosts[i] = h
-		} else {
-			hosts = append(hosts, h)
-		}
-	}
-	slices.SortFunc(hosts, func(a, b JobHostSummary) int { return strings.Compare(a.HostName, b.HostName) })
-	return hosts, nil
 }

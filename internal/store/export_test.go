@@ -12,3 +12,10 @@ func LoginLockoutKey(limit LoginLimit, username, clientIP string) []byte {
 	k := loginLockoutKey(limit, loginUsernameHash(username), LoginClientKey(clientIP))
 	return k[:]
 }
+
+// SetMaxJobHosts lowers the cap on a job's hosts for a test.
+func SetMaxJobHosts(n int) (restore func()) {
+	old := maxJobHosts
+	maxJobHosts = n
+	return func() { maxJobHosts = old }
+}
