@@ -16,7 +16,8 @@
 		expired: 'Your sign-in expired or was started in another browser. Try again.',
 		no_code: 'The sign-on provider did not complete the sign-in. Try again.',
 		failed: 'Sign-in failed. Try again.',
-		username_taken: 'Your username belongs to another account. Ask an administrator to rename it.',
+		username_taken:
+			"Your username belongs to another account. Ask an administrator to reset that account's single sign-on link or rename it.",
 		deactivated: 'Your account is deactivated.',
 		not_provisioned: "Your account hasn't been set up. Ask an administrator to add you."
 	};

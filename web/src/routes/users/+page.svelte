@@ -97,15 +97,15 @@
 		<form onsubmit={create}>
 			<div class="field">
 				Sign-in
-				<div class="types" role="radiogroup">
-					<label class:chosen={authSource === 'local'}>
+				<div class="choices" role="radiogroup">
+					<label>
 						<input type="radio" name="authSource" bind:group={authSource} value="local" />
-						<span>
+						<span class="choice-text">
 							<strong>Local</strong>
 							<span class="muted small">Signs in with a password you set here.</span>
 						</span>
 					</label>
-					<label class:chosen={authSource === 'oidc'}>
+					<label>
 						<input
 							type="radio"
 							name="authSource"
@@ -113,7 +113,7 @@
 							value="oidc"
 							disabled={!sso}
 						/>
-						<span>
+						<span class="choice-text">
 							<strong>{sso ?? 'Single sign-on'}</strong>
 							<span class="muted small">
 								{#if sso}
@@ -219,42 +219,5 @@
 	.field {
 		font-weight: 500;
 		margin-bottom: 0.75rem;
-	}
-
-	.types {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-		gap: 0.5rem;
-		margin-top: 0.25rem;
-	}
-
-	.types label {
-		display: flex;
-		gap: 0.5rem;
-		align-items: flex-start;
-		margin: 0;
-		padding: 0.6rem 0.75rem;
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		font-weight: normal;
-		cursor: pointer;
-	}
-
-	.types label.chosen {
-		border-color: var(--accent);
-	}
-
-	.types label:has(input:disabled) {
-		cursor: default;
-		opacity: 0.5;
-	}
-
-	.types input {
-		margin-top: 0.2rem;
-	}
-
-	.types span {
-		display: flex;
-		flex-direction: column;
 	}
 </style>

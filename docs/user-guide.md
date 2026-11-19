@@ -62,6 +62,12 @@ from then on is recognised by issuer and subject like any other. Enter the
 username exactly as the provider's username claim sends it; it can be
 corrected until the first sign-in.
 
+If the provider starts identifying someone differently (a new subject or
+issuer), their sign-in is refused because their username belongs to their old
+account. An administrator can then use **Reset single sign-on link** on the
+user's page. This makes the user await first sign-in again and ends their
+sessions. Their next sign-in claims the account, with its roles and teams.
+
 By default anyone the provider signs in gets an account. To let only users
 an administrator added sign in, set `spec.oidc.autoCreateUsers: false`
 (`DISPATCH_OIDC_AUTO_CREATE_USERS=false`); everyone else is turned away at

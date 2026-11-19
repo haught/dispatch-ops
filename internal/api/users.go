@@ -85,6 +85,12 @@ func (h *Handlers) UpdateUser(ctx context.Context, req apigen.UpdateUserRequestO
 	if b.IsActive != nil && !*b.IsActive && req.UserId == caller(ctx).UserID {
 		return nil, badRequest("you can't deactivate yourself")
 	}
+	if b.OidcPending != nil && !*b.OidcPending {
+		return nil, badRequest("a single sign-on user stops being pending by signing in")
+	}
+	if b.OidcPending != nil && req.UserId == caller(ctx).UserID {
+		return nil, badRequest("you can't reset your own single sign-on link")
+	}
 	var hash *string
 	if b.Password != nil {
 		h, err := auth.HashPassword(*b.Password)
@@ -103,6 +109,7 @@ func (h *Handlers) UpdateUser(ctx context.Context, req apigen.UpdateUserRequestO
 	if p := caller(ctx); req.UserId == p.UserID && p.Method == auth.MethodSession {
 		keep = p.TokenID
 	}
+	ssoReset := false
 	u, err := h.Store.UpdateUser(ctx, req.UserId, keep, func(f *store.UserFields) error {
 		if f.AuthSource != "local" && b.Password != nil {
 			return badRequest("single sign-on users have no password")
@@ -111,6 +118,16 @@ func (h *Handlers) UpdateUser(ctx context.Context, req apigen.UpdateUserRequestO
 		// what an administrator typed, and may need correcting.
 		if f.AuthSource != "local" && !f.OIDCPending && b.Username != nil {
 			return badRequest("single sign-on users get their username from the provider")
+		}
+		// Resetting a single sign-on user's link makes them pending again:
+		// whoever next signs in with their username claims them.
+		if b.OidcPending != nil {
+			if f.AuthSource != "oidc" {
+				return badRequest("only single sign-on users have a provider link to reset")
+			}
+			if !f.OIDCPending {
+				f.OIDCPending, ssoReset = true, true
+			}
 		}
 		setIf(&f.Username, b.Username)
 		setIf(&f.DisplayName, b.DisplayName)
@@ -131,6 +148,9 @@ func (h *Handlers) UpdateUser(ctx context.Context, req apigen.UpdateUserRequestO
 	after := userAudit(out)
 	if b.Password != nil {
 		after["passwordChanged"] = true
+	}
+	if ssoReset {
+		after["ssoReset"] = true
 	}
 	h.Log.InfoContext(ctx, "user updated", "user_id", u.ID, "username", u.Username, "by", principalName(ctx))
 	h.audit(ctx, auditRecord{

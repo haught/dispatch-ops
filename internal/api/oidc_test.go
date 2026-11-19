@@ -345,6 +345,65 @@ func TestOIDCUserAddedBeforeSignIn(t *testing.T) {
 	}
 }
 
+// When the provider starts identifying someone by a new subject, an
+// administrator resets their link and their next sign-in claims the user.
+func TestOIDCResetLink(t *testing.T) {
+	idp := newFakeIDP(t)
+	srv, _, username, password := startServerWith(t, func(h *api.Handlers) { h.OIDC = testSSO(idp) })
+	admin := login(t, srv.URL, username, password)
+
+	name := unique("dave")
+	oldClaims := map[string]any{"sub": unique("sub"), "preferred_username": name}
+	dave := sessionFrom(t, srv.URL, idp.signIn(srv.URL, oldClaims))
+	me := dave.mustDo("GET", "/api/v1/me", nil, 200)
+	id := me["id"].(string)
+	grant(admin, map[string]any{"role": "auditor", "userId": id})
+
+	// A new subject with the same username is refused.
+	newClaims := map[string]any{"sub": unique("sub"), "preferred_username": name, "name": "Dave D."}
+	if loc := idp.signIn(srv.URL, newClaims).Header.Get("Location"); loc != "/login?error=username_taken" {
+		t.Fatalf("new subject redirects to %q", loc)
+	}
+
+	// Only true, only for single sign-on users, and not for yourself.
+	admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"oidcPending": false}, 400)
+	_, bob := newUser(t, srv, admin)
+	admin.mustDo("PATCH", "/api/v1/users/"+bob, map[string]any{"oidcPending": true}, 400)
+	self := admin.mustDo("GET", "/api/v1/me", nil, 200)["id"].(string)
+	admin.mustDo("PATCH", "/api/v1/users/"+self, map[string]any{"oidcPending": true}, 400)
+
+	// Resetting makes the user pending and ends their sessions.
+	if u := admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"oidcPending": true}, 200); u["oidcPending"] != true {
+		t.Errorf("after reset: %v", u)
+	}
+	dave.mustDo("GET", "/api/v1/me", nil, 401)
+	// Resetting a pending user changes nothing.
+	admin.mustDo("PATCH", "/api/v1/users/"+id, map[string]any{"oidcPending": true}, 200)
+
+	// The new subject's sign-in claims the same user, roles and all.
+	dave = sessionFrom(t, srv.URL, idp.signIn(srv.URL, newClaims))
+	if me := dave.mustDo("GET", "/api/v1/me", nil, 200); me["id"] != id || me["oidcPending"] != false ||
+		me["isAuditor"] != true || me["displayName"] != "Dave D." {
+		t.Errorf("after re-linking: %v", me)
+	}
+	// And the old subject is no longer this user.
+	if loc := idp.signIn(srv.URL, oldClaims).Header.Get("Location"); loc != "/login?error=username_taken" {
+		t.Errorf("old subject redirects to %q", loc)
+	}
+
+	// The reset is in the audit log, once.
+	log := admin.mustDo("GET", "/api/v1/audit-log?action=update&resourceId="+id, nil, 200)
+	resets := 0
+	for _, it := range log["items"].([]any) {
+		if after, _ := it.(map[string]any)["after"].(map[string]any); after["ssoReset"] == true {
+			resets++
+		}
+	}
+	if resets != 1 {
+		t.Errorf("audit log has %d resets: %v", resets, log)
+	}
+}
+
 // With OIDCAddedOnly, single sign-on is only for users an administrator
 // added.
 func TestOIDCAddedUsersOnly(t *testing.T) {

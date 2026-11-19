@@ -254,7 +254,8 @@ export interface paths {
          * @description System administrators only. Deactivating a user ends their sessions;
          *     their API tokens stop working until they are reactivated. OIDC
          *     users' username, display name and email are updated from the
-         *     provider at each sign-in.
+         *     provider at each sign-in. Setting `oidcPending` resets a single
+         *     sign-on user's link to their provider identity.
          */
         patch: operations["updateUser"];
         trace?: never;
@@ -1625,6 +1626,14 @@ export interface components {
             isActive?: boolean;
             /** @description Local users only */
             password?: components["schemas"]["Password"];
+            /**
+             * @description Single sign-on users only, and only `true`: unlinks the user from
+             *     their provider identity (issuer and subject), so the next sign-in
+             *     with this username claims the account, keeping its roles and
+             *     teams. Ends the user's sessions. Use it when the provider starts
+             *     identifying someone differently. You cannot reset your own link.
+             */
+            oidcPending?: boolean;
         };
         ApiTokenList: {
             items: components["schemas"]["ApiToken"][];

@@ -183,9 +183,9 @@
 	<div class="field">
 		Job type
 		{#if template}<span class="muted small">can't be changed</span>{/if}
-		<div class="types" role="radiogroup">
+		<div class="choices" role="radiogroup">
 			{#each jobTypes as jt (jt.type)}
-				<label class:chosen={jobType === jt.type}>
+				<label>
 					<input
 						type="radio"
 						name="jobType"
@@ -193,7 +193,7 @@
 						value={jt.type}
 						disabled={Boolean(template)}
 					/>
-					<span>
+					<span class="choice-text">
 						<strong>{jt.label}</strong>
 						<span class="muted small">{jt.help}</span>
 					</span>
@@ -443,45 +443,5 @@
 		font-weight: normal;
 		color: var(--warn);
 		margin: 0.5rem 0 0;
-	}
-
-	.types {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-		gap: 0.5rem;
-		margin-top: 0.25rem;
-	}
-
-	.types label {
-		display: flex;
-		gap: 0.5rem;
-		align-items: flex-start;
-		margin: 0;
-		padding: 0.6rem 0.75rem;
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		font-weight: normal;
-		cursor: pointer;
-	}
-
-	.types label.chosen {
-		border-color: var(--accent);
-	}
-
-	.types label:has(input:disabled) {
-		cursor: default;
-	}
-
-	.types label:has(input:disabled):not(.chosen) {
-		opacity: 0.5;
-	}
-
-	.types input {
-		margin-top: 0.2rem;
-	}
-
-	.types span {
-		display: flex;
-		flex-direction: column;
 	}
 </style>

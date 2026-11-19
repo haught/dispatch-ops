@@ -263,8 +263,69 @@ pre.code {
 	max-height: 24rem;
 }
 
-input[type='checkbox'] {
+input[type='checkbox'],
+input[type='radio'] {
 	width: auto;
+	accent-color: var(--accent);
+}
+
+/* A set of radio options shown as cards, each with a title and a line of help. */
+.choices {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	gap: 0.5rem;
+	margin-top: 0.35rem;
+}
+
+.choices label {
+	display: flex;
+	gap: 0.6rem;
+	align-items: flex-start;
+	margin: 0;
+	padding: 0.65rem 0.8rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--bg);
+	font-weight: normal;
+	cursor: pointer;
+	transition:
+		border-color 0.1s,
+		background-color 0.1s;
+}
+
+.choices label:hover:not(:has(input:disabled, input:checked)) {
+	border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.choices label:has(input:checked) {
+	border-color: var(--accent);
+	background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+	box-shadow: 0 0 0 1px var(--accent);
+}
+
+.choices label:has(input:focus-visible) {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+.choices label:has(input:disabled) {
+	cursor: default;
+}
+
+.choices label:has(input:disabled:not(:checked)) {
+	opacity: 0.5;
+}
+
+.choices input {
+	flex: none;
+	margin: 0.2rem 0 0;
+}
+
+.choices .choice-text {
+	display: flex;
+	flex-direction: column;
+	gap: 0.1rem;
+	line-height: 1.35;
 }
 
 .checks {

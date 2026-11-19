@@ -140,12 +140,15 @@ func (s *Store) ListUsers(ctx context.Context, search string, page Page) ([]User
 // UserFields are a user's editable fields. PasswordHash is nil for OIDC
 // users.
 type UserFields struct {
-	Username     string
-	DisplayName  string
-	Email        string
-	IsActive     bool
-	AuthSource   string // read-only
-	OIDCPending  bool   // read-only; see User.OIDCPending
+	Username    string
+	DisplayName string
+	Email       string
+	IsActive    bool
+	AuthSource  string // read-only
+	// OIDCPending (see User.OIDCPending) can only be set: setting it on an
+	// OIDC user unlinks them from their issuer and subject, so their next
+	// sign-in by username claims the user again, and ends their sessions.
+	OIDCPending  bool
 	PasswordHash *string
 }
 
@@ -165,9 +168,18 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, keepToken uuid.UUI
 		if err != nil {
 			return mapErr(err)
 		}
-		oldHash := f.PasswordHash
+		oldHash, wasPending := f.PasswordHash, f.OIDCPending
 		if err := update(&f); err != nil {
 			return err
+		}
+		unlink := f.OIDCPending && !wasPending
+		if unlink {
+			if f.AuthSource != "oidc" {
+				return errors.New("only single sign-on users can be pending")
+			}
+			if _, err := tx.Exec(ctx, `UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE id = $1`, id); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE users SET username = $2, display_name = $3, email = $4, is_active = $5, password_hash = $6
@@ -181,9 +193,10 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, keepToken uuid.UUI
 				return err
 			}
 		}
-		// Deactivating a user ends their sessions; their API tokens stop
-		// working while the user is inactive.
-		if !f.IsActive {
+		// Deactivating a user, or unlinking them from their provider
+		// identity, ends their sessions; their API tokens stop working
+		// while the user is inactive.
+		if !f.IsActive || unlink {
 			if _, err := tx.Exec(ctx, `DELETE FROM auth_tokens WHERE user_id = $1 AND kind = 'session'`, id); err != nil {
 				return err
 			}

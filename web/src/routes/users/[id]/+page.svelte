@@ -88,6 +88,7 @@
 		email?: string;
 		isActive?: boolean;
 		password?: string;
+		oidcPending?: boolean;
 	}) {
 		error = '';
 		const { data, error: err } = await api.PATCH('/api/v1/users/{userId}', {
@@ -112,6 +113,17 @@
 	async function setPassword(event: SubmitEvent) {
 		event.preventDefault();
 		if (await update({ password: newPassword })) newPassword = '';
+	}
+
+	async function resetSSO() {
+		if (
+			!user ||
+			!confirm(
+				`Unlink ${user.username} from their provider identity? Whoever next signs in through the provider with the username ${user.username} becomes this user, keeping their roles and teams. Their sessions end now.`
+			)
+		)
+			return;
+		await update({ oidcPending: true });
 	}
 
 	async function remove() {
@@ -227,10 +239,18 @@
 								>Reactivate</button
 							>
 						{/if}
+						{#if user.authSource === 'oidc' && !user.oidcPending}
+							<button class="secondary" onclick={resetSSO}>Reset single sign-on link</button>
+						{/if}
 						<button class="danger" onclick={remove}>Delete user</button>
 					</div>
 					<p class="muted small">
 						Deactivating ends the user's sessions and stops their API tokens until reactivated.
+						{#if user.authSource === 'oidc' && !user.oidcPending}
+							If the provider starts identifying this user differently and they're told their
+							username belongs to another account, reset their single sign-on link: their next
+							sign-in claims this user again.
+						{/if}
 					</p>
 				{/if}
 			</section>
