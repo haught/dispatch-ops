@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -74,8 +76,10 @@ func (h *Handlers) ListJobEvents(ctx context.Context, req apigen.ListJobEventsRe
 	}
 	limit := 1000
 	setIf(&limit, req.Params.Limit)
-	events, err := h.Store.ListJobEvents(ctx, req.JobId,
-		store.JobEventFilter{AfterSeq: deref(req.Params.AfterSeq), HostName: deref(req.Params.HostName)}, limit)
+	p := req.Params
+	events, err := h.Store.ListJobEvents(ctx, req.JobId, store.JobEventFilter{
+		AfterSeq: deref(p.AfterSeq), BeforeSeq: deref(p.BeforeSeq), HostName: deref(p.HostName), LogOnly: deref(p.Log),
+	}, limit)
 	if err != nil {
 		return nil, orNotFound(err, "Job")
 	}
@@ -188,6 +192,7 @@ func (s jobStream) VisitStreamJobResponse(w http.ResponseWriter) error {
 	after := s.after
 	lastStatus := ""
 	lastCancel := false
+	var lastHosts int64
 	recheck := s.h.StreamRecheck
 	if recheck <= 0 {
 		recheck = DefaultStreamRecheck
@@ -216,8 +221,14 @@ func (s jobStream) VisitStreamJobResponse(w http.ResponseWriter) error {
 				return s.end(err)
 			}
 		}
+		if job.HostResultsSeq > lastHosts {
+			lastHosts = job.HostResultsSeq
+			if err := writeSSE(w, "hosts", "", map[string]int64{"seq": lastHosts}); err != nil {
+				return s.end(err)
+			}
+		}
 		for {
-			events, err := s.h.Store.ListJobEvents(ctx, s.jobID, store.JobEventFilter{AfterSeq: after}, streamBatch)
+			events, err := s.h.Store.ListJobEvents(ctx, s.jobID, store.JobEventFilter{AfterSeq: after, LogOnly: true}, streamBatch)
 			if err != nil {
 				return s.end(err)
 			}
@@ -228,6 +239,9 @@ func (s jobStream) VisitStreamJobResponse(w http.ResponseWriter) error {
 				after = e.Seq
 			}
 			if len(events) < streamBatch {
+				// Every event up to the job's last was just read, log or
+				// not: don't scan past the others again.
+				after = max(after, job.LastEventSeq)
 				break
 			}
 		}
@@ -475,4 +489,59 @@ func (h *Handlers) ListJobNotifications(ctx context.Context, req apigen.ListJobN
 		out.Items = append(out.Items, item)
 	}
 	return out, nil
+}
+
+// --- Log download ---
+
+// outputPage is how many events the log download reads at a time.
+const outputPage = 5000
+
+// ansiEscape matches ANSI escape sequences (CSI, and OSC up to BEL or ST).
+var ansiEscape = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])`)
+
+func (h *Handlers) GetJobOutput(ctx context.Context, req apigen.GetJobOutputRequestObject) (apigen.GetJobOutputResponseObject, error) {
+	if _, err := h.getJob(ctx, req.JobId); err != nil {
+		return nil, err
+	}
+	ansi := true
+	setIf(&ansi, req.Params.Ansi)
+	return jobOutput{h: h, ctx: ctx, jobID: req.JobId, ansi: ansi}, nil
+}
+
+// jobOutput writes a job's log as text, reading it a page at a time.
+type jobOutput struct {
+	h     *Handlers
+	ctx   context.Context
+	jobID uuid.UUID
+	ansi  bool
+}
+
+func (o jobOutput) VisitGetJobOutputResponse(w http.ResponseWriter) error {
+	hdr := w.Header()
+	hdr.Set("Content-Type", "text/plain; charset=utf-8")
+	hdr.Set("Content-Disposition", `attachment; filename="job-`+o.jobID.String()+`.log"`)
+	w.WriteHeader(http.StatusOK)
+	bw := bufio.NewWriterSize(w, 64<<10)
+	var after int64
+	for {
+		events, err := o.h.Store.ListJobEvents(o.ctx, o.jobID, store.JobEventFilter{AfterSeq: after, LogOnly: true}, outputPage)
+		if err != nil {
+			// The status is sent; all that can be done is to stop.
+			o.h.Log.ErrorContext(o.ctx, "writing job output", "job_id", o.jobID, "err", err)
+			return nil
+		}
+		for _, e := range events {
+			text := e.Stdout
+			if !o.ansi {
+				text = ansiEscape.ReplaceAllString(text, "")
+			}
+			if _, err := bw.WriteString(text + "\n"); err != nil {
+				return nil // the client went away
+			}
+			after = e.Seq
+		}
+		if len(events) < outputPage {
+			return bw.Flush()
+		}
+	}
 }

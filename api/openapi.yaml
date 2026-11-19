@@ -2053,7 +2053,10 @@ paths:
       summary: Page through a job's output events
       description: |
         Returns events in sequence order. To get the next page, pass the last
-        event's `seq` as `afterSeq`.
+        event's `seq` as `afterSeq`. To page backwards, pass the first
+        event's `seq` as `beforeSeq`, which returns the `limit` events before
+        it; a `beforeSeq` past the last event (such as 2^53 - 1) returns the
+        end of the output.
       parameters:
         - name: afterSeq
           in: query
@@ -2062,6 +2065,20 @@ paths:
             format: int64
             minimum: 0
             default: 0
+        - name: beforeSeq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: log
+          in: query
+          description: |
+            Only the events that make up the job's log: output lines,
+            runner messages, and structured events with output
+          schema:
+            type: boolean
+            default: false
         - name: limit
           in: query
           schema:
@@ -2131,6 +2148,35 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/jobs/{jobId}/output:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      operationId: getJobOutput
+      tags: [jobs]
+      summary: Download a job's log
+      description: |
+        The job's whole log as text, one event's output per line, as a file
+        to save. While the job runs, it is the log so far.
+      parameters:
+        - name: ansi
+          in: query
+          description: Keep ANSI escape sequences (colors); false strips them
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: The log
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /api/v1/jobs/{jobId}/stream:
     parameters:
       - $ref: "#/components/parameters/JobId"
@@ -2141,10 +2187,14 @@ paths:
       description: |
         A `text/event-stream` with these events:
 
-        - `job_event`: one output event (a `JobEvent`). The SSE `id` is its
+        - `job_event`: one event of the job's log (a `JobEvent`): an output
+          line, a runner message, or a structured event with output (see
+          the `log` option of the events endpoint). The SSE `id` is its
           `seq`, so a reconnecting `EventSource` resumes where it left off.
         - `status`: the job (a `Job`) whenever its status changes, and once
           when the stream opens.
+        - `hosts`: the job's per-host results have changed since the last
+          `hosts` event (or the stream opened); its data is `{"seq": n}`.
         - `end`: the job has finished and all of its output has been sent.
           The server then closes the stream.
         - `revoked`: the caller may no longer see the job (they signed out,
@@ -4756,6 +4806,7 @@ components:
         - createdAt
         - startedAt
         - finishedAt
+        - outputTruncated
       properties:
         id:
           type: string
@@ -4816,6 +4867,11 @@ components:
           type: string
           format: date-time
           nullable: true
+        outputTruncated:
+          type: boolean
+          description: |
+            The job's output reached the output limit, so the rest of its
+            log was not kept (its per-host results were)
 
     JobList:
       type: object

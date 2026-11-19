@@ -1,44 +1,37 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { tick } from 'svelte';
 	import {
 		api,
 		errorMessage,
 		finishedStatuses,
-		hostEventTypes,
 		type Job,
 		type JobEvent,
 		type JobHostCounts,
-		type JobHostSummary,
 		type NotificationDelivery
 	} from '#lib/api/client.js';
-	import { parseAnsi } from '#lib/ansi.js';
+	import JobHosts from '#lib/components/JobHosts.svelte';
+	import JobLog from '#lib/components/JobLog.svelte';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import TabPanel from '#lib/components/TabPanel.svelte';
 	import Tabs from '#lib/components/Tabs.svelte';
 	import { fmtDuration, fmtTime } from '#lib/format.js';
+	import { JobLog as LogBuffer, PAGE } from '#lib/joblog.svelte.js';
 	import { activeTab, type Tab } from '#lib/tabs.svelte.js';
 
 	let job = $state<Job | null>(null);
-	// Raw: the log can be long, and lines never change once added.
-	let lines = $state.raw<JobEvent[]>([]);
+	const log = new LogBuffer();
 	let live = $state(false);
 	let error = $state('');
 	let canceling = $state(false);
 	let relaunching = $state(false);
 	let deliveries = $state<NotificationDelivery[]>([]);
 
-	// Per-host results (Ansible jobs), and the task results of the host
-	// picked in the table.
-	let hosts = $state<JobHostSummary[]>([]);
+	// Per-host results (Ansible jobs): their counts, and a counter bumped
+	// whenever they change.
 	let hostCounts = $state<JobHostCounts | null>(null);
-	let selectedHost = $state<string | null>(null);
-	let hostEvents = $state<JobEvent[]>([]);
-	let hostEventsError = $state('');
+	let hostsChanged = $state(0);
 
-	let logEl = $state<HTMLElement | null>(null);
-	let follow = $state(true);
 	// Ticks once a second so the running duration updates.
 	let now = $state(Date.now());
 
@@ -81,159 +74,97 @@
 		const id = page.params.id;
 		if (!id) return;
 		job = null;
-		lines = [];
+		log.clear();
 		error = '';
-		hosts = [];
 		hostCounts = null;
 		deliveries = [];
-		selectedHost = null;
 		let source: EventSource | null = null;
 		let pending: JobEvent[] = [];
 		let frame = 0;
 		let closed = false;
-		let hostsTimer: ReturnType<typeof setTimeout> | undefined;
-
-		const loadHosts = async () => {
-			const { data } = await api.GET('/api/v1/jobs/{jobId}/hosts', {
-				params: { path: { jobId: id } }
-			});
-			if (data && !closed) {
-				hosts = data.items;
-				hostCounts = data.counts;
-			}
-		};
-		// Host results change with every task; refresh them at most every 1.5s.
-		const scheduleHosts = () => {
-			hostsTimer ??= setTimeout(() => {
-				hostsTimer = undefined;
-				loadHosts();
-				if (selectedHost) loadHostEvents(id, selectedHost);
-			}, 1500);
-		};
 
 		// Batch incoming lines into one update per animation frame.
 		const flush = () => {
 			frame = 0;
-			lines = lines.concat(pending);
+			log.append(pending);
 			pending = [];
-			scrollIfFollowing();
 		};
 
-		api
-			.GET('/api/v1/jobs/{jobId}', { params: { path: { jobId: id } } })
-			.then(({ data, error: err }) => {
-				if (closed) return;
-				if (!data) {
-					error = errorMessage(err);
-					return;
-				}
-				job = data;
-				if (data.config.jobType === 'ansible') loadHosts();
-				source = new EventSource(`/api/v1/jobs/${id}/stream`);
-				live = true;
-				source.addEventListener('status', (e) => {
-					job = JSON.parse(e.data);
-				});
-				source.addEventListener('job_event', (e) => {
-					const ev: JobEvent = JSON.parse(e.data);
-					// The log: output lines, and what Ansible printed for its events.
-					if (ev.type === 'stdout' || ev.type === 'runner' || ev.stdout !== '') {
-						pending.push(ev);
-						if (!frame) frame = requestAnimationFrame(flush);
-					}
-					if (hostEventTypes.includes(ev.type)) scheduleHosts();
-				});
-				source.addEventListener('end', () => {
-					source?.close();
-					live = false;
-					if (job?.config.jobType === 'ansible') {
-						clearTimeout(hostsTimer);
-						hostsTimer = undefined;
-						loadHosts();
-						if (selectedHost) loadHostEvents(id, selectedHost);
-					}
-				});
-				source.addEventListener('revoked', () => {
-					// Don't let the browser reconnect: access has ended.
-					source?.close();
-					live = false;
-					error = 'You no longer have access to this job. Sign in again or ask an admin.';
-				});
-				source.onerror = () => {
-					// The browser reconnects by itself (resuming with Last-Event-ID)
-					// unless the server refused the stream.
-					if (source?.readyState === EventSource.CLOSED) {
-						live = false;
-						error = 'Lost the live connection. Reload to try again.';
-					}
-				};
+		(async () => {
+			const { data, error: err } = await api.GET('/api/v1/jobs/{jobId}', {
+				params: { path: { jobId: id } }
 			});
+			if (closed) return;
+			if (!data) {
+				error = errorMessage(err);
+				return;
+			}
+			job = data;
+
+			// The end of the log, then what follows, live.
+			const tail = await api.GET('/api/v1/jobs/{jobId}/events', {
+				params: {
+					path: { jobId: id },
+					query: { log: true, beforeSeq: Number.MAX_SAFE_INTEGER, limit: PAGE }
+				}
+			});
+			if (closed) return;
+			if (!tail.data) {
+				error = errorMessage(tail.error);
+				return;
+			}
+			log.prepend(tail.data.items, tail.data.items.length === PAGE);
+
+			source = new EventSource(`/api/v1/jobs/${id}/stream?afterSeq=${log.lastSeq}`);
+			live = true;
+			source.addEventListener('status', (e) => {
+				job = JSON.parse(e.data);
+			});
+			source.addEventListener('job_event', (e) => {
+				pending.push(JSON.parse(e.data));
+				if (!frame) frame = requestAnimationFrame(flush);
+			});
+			source.addEventListener('hosts', () => hostsChanged++);
+			source.addEventListener('end', () => {
+				source?.close();
+				live = false;
+				hostsChanged++;
+			});
+			source.addEventListener('revoked', () => {
+				// Don't let the browser reconnect: access has ended.
+				source?.close();
+				live = false;
+				error = 'You no longer have access to this job. Sign in again or ask an admin.';
+			});
+			source.onerror = () => {
+				// The browser reconnects by itself (resuming with Last-Event-ID)
+				// unless the server refused the stream.
+				if (source?.readyState === EventSource.CLOSED) {
+					live = false;
+					error = 'Lost the live connection. Reload to try again.';
+				}
+			};
+		})();
 
 		const timer = setInterval(() => (now = Date.now()), 1000);
 		return () => {
 			closed = true;
 			source?.close();
 			if (frame) cancelAnimationFrame(frame);
-			clearTimeout(hostsTimer);
 			clearInterval(timer);
 		};
 	});
 
-	async function loadHostEvents(jobId: string, host: string) {
-		const { data, error: err } = await api.GET('/api/v1/jobs/{jobId}/events', {
-			params: { path: { jobId }, query: { hostName: host, limit: 5000 } }
-		});
-		if (selectedHost !== host) return;
-		if (data) {
-			hostEvents = data.items.filter((e) => hostEventTypes.includes(e.type));
-			hostEventsError = '';
-		} else {
-			hostEventsError = errorMessage(err);
-		}
-	}
-
-	function selectHost(host: string) {
+	async function loadEarlier() {
 		if (!job) return;
-		if (selectedHost === host) {
-			selectedHost = null;
-			return;
-		}
-		selectedHost = host;
-		hostEvents = [];
-		hostEventsError = '';
-		loadHostEvents(job.id, host);
-	}
-
-	/** A task result's outcome, for its badge. */
-	function outcome(e: JobEvent): JobHostSummary['status'] {
-		switch (e.type) {
-			case 'host_ok':
-				return e.data?.changed ? 'changed' : 'ok';
-			case 'host_failed':
-				return 'failed';
-			case 'host_unreachable':
-				return 'unreachable';
-			default:
-				return 'skipped';
-		}
-	}
-
-	const hostExtras = $derived(hosts.some((h) => h.rescued || h.ignored));
-
-	async function scrollIfFollowing() {
-		if (!follow) return;
-		await tick();
-		logEl?.scrollTo({ top: logEl.scrollHeight });
-	}
-
-	// The log can't scroll while its tab is hidden; catch up when it shows.
-	$effect(() => {
-		if (tab === 'output') scrollIfFollowing();
-	});
-
-	function onScroll() {
-		if (!logEl || tab !== 'output') return;
-		follow = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+		const { data, error: err } = await api.GET('/api/v1/jobs/{jobId}/events', {
+			params: {
+				path: { jobId: job.id },
+				query: { log: true, beforeSeq: log.firstSeq, limit: PAGE }
+			}
+		});
+		if (data) log.prepend(data.items, data.items.length === PAGE);
+		else error = errorMessage(err);
 	}
 
 	async function cancel() {
@@ -313,115 +244,23 @@
 	<Tabs {tabs} label="Job sections" />
 
 	<TabPanel id="output" active={tab}>
-		<section class="card log-card">
-			<pre class="log" bind:this={logEl} onscroll={onScroll}>{#each lines as line (line.seq)}<span
-						class="line {line.type}"
-						>{#each parseAnsi(line.stdout) as seg, i (i)}<span class={seg.cls}>{seg.text}</span
-							>{/each}</span
-					>{'\n'}{:else}<span class="muted">{finished ? 'No output.' : 'Waiting for output…'}</span
-					>{/each}</pre>
-			{#if !follow && live}
-				<button class="secondary jump" onclick={() => ((follow = true), scrollIfFollowing())}>
-					Follow output ↓
-				</button>
-			{/if}
-		</section>
+		{#if job.outputTruncated}
+			<p class="muted small">
+				The output reached its size limit, so its end was not kept. Host results are complete.
+			</p>
+		{/if}
+		<JobLog {log} jobId={job.id} {live} {finished} visible={tab === 'output'} {loadEarlier} />
 	</TabPanel>
 
 	<TabPanel id="hosts" active={tab}>
 		{#if job.config.jobType === 'ansible'}
-			<section class="card">
-				<h2>Hosts</h2>
-				{#if hosts.length === 0}
-					<p class="muted">{finished ? 'No host results.' : 'No host results yet.'}</p>
-				{:else}
-					<div class="table-wrap">
-						<table>
-							<thead>
-								<tr>
-									<th>Host</th>
-									<th>Result</th>
-									<th class="num">OK</th>
-									<th class="num">Changed</th>
-									<th class="num">Failed</th>
-									<th class="num">Unreachable</th>
-									<th class="num">Skipped</th>
-									{#if hostExtras}
-										<th class="num">Rescued</th>
-										<th class="num">Ignored</th>
-									{/if}
-								</tr>
-							</thead>
-							<tbody>
-								{#each hosts as h (h.hostName)}
-									<tr class:selected={selectedHost === h.hostName}>
-										<td>
-											<button
-												class="link"
-												aria-expanded={selectedHost === h.hostName}
-												onclick={() => selectHost(h.hostName)}>{h.hostName}</button
-											>
-										</td>
-										<td><StatusBadge status={h.status} /></td>
-										<td class="num">{h.ok}</td>
-										<td class="num">{h.changed}</td>
-										<td class="num">{h.failed}</td>
-										<td class="num">{h.unreachable}</td>
-										<td class="num">{h.skipped}</td>
-										{#if hostExtras}
-											<td class="num">{h.rescued}</td>
-											<td class="num">{h.ignored}</td>
-										{/if}
-									</tr>
-									{#if selectedHost === h.hostName}
-										<tr class="host-detail">
-											<td colspan={hostExtras ? 9 : 7}>
-												{#if hostEventsError}
-													<p class="error">{hostEventsError}</p>
-												{:else if hostEvents.length === 0}
-													<p class="muted">No task results.</p>
-												{:else}
-													<table class="tasks">
-														<thead>
-															<tr>
-																<th>Task</th>
-																<th>Result</th>
-																<th>Message</th>
-															</tr>
-														</thead>
-														<tbody>
-															{#each hostEvents as e (e.seq)}
-																<tr>
-																	<td>
-																		{e.task?.name ?? ''}
-																		{#if e.task?.play}<div class="muted small">
-																				{e.task.play}
-																			</div>{/if}
-																	</td>
-																	<td>
-																		<StatusBadge status={outcome(e)} />
-																		{#if e.data?.ignored}<span class="muted small">ignored</span
-																			>{/if}
-																	</td>
-																	<td class="msg"
-																		>{#each parseAnsi(String(e.data?.msg ?? e.data?.stderr ?? '')) as seg, i (i)}<span
-																				class={seg.cls}>{seg.text}</span
-																			>{/each}</td
-																	>
-																</tr>
-															{/each}
-														</tbody>
-													</table>
-												{/if}
-											</td>
-										</tr>
-									{/if}
-								{/each}
-							</tbody>
-						</table>
-					</div>
-				{/if}
-			</section>
+			<JobHosts
+				jobId={job.id}
+				{finished}
+				visible={tab === 'hosts'}
+				changed={hostsChanged}
+				bind:counts={hostCounts}
+			/>
 		{/if}
 	</TabPanel>
 
@@ -606,75 +445,7 @@
 		overflow-wrap: anywhere;
 	}
 
-	.table-wrap {
-		overflow-x: auto;
-	}
-
-	.num {
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-	}
-
-	button.link {
-		padding: 0;
-		border: none;
-		background: none;
-		color: var(--accent);
-		text-align: left;
-	}
-
-	tr.selected > td {
-		background: var(--bg);
-	}
-
-	.host-detail > td {
-		background: var(--bg);
-		padding: 0.25rem 0.5rem 0.75rem 1.5rem;
-	}
-
-	.tasks th,
-	.tasks td {
-		font-size: 0.9rem;
-		vertical-align: top;
-	}
-
-	.msg {
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.85rem;
-	}
-
 	.small {
 		font-size: 0.8rem;
-	}
-
-	.log-card {
-		position: relative;
-		padding: 0;
-	}
-
-	.log {
-		margin: 0;
-		padding: 1rem;
-		height: 60vh;
-		overflow: auto;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.85rem;
-		line-height: 1.45;
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
-	}
-
-	.line.runner {
-		color: var(--muted);
-		font-style: italic;
-	}
-
-	.jump {
-		position: absolute;
-		right: 1rem;
-		bottom: 1rem;
-		background: var(--surface);
 	}
 </style>

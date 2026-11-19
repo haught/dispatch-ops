@@ -8,6 +8,7 @@ be done in the web UI or through the REST API ([api/openapi.yaml](../api/openapi
 - [Access control](#access-control)
 - [Audit log](#audit-log)
 - [Job types](#job-types)
+- [Job output](#job-output)
 - [Projects](#projects)
 - [Ansible jobs](#ansible-jobs)
 - [What the command sees](#what-the-command-sees)
@@ -199,6 +200,23 @@ matched nothing. Only enabled hosts count. Ansible's implicit `localhost`
 isn't included, and a playbook's own `hosts:` can narrow the set further. The
 preview needs `read` on the inventory, and the API serves it at
 `GET /api/v1/inventories/{id}/host-matches?pattern=…`.
+
+## Job output
+
+The job page opens at the end of the job's log and follows it while the job
+runs. *Load earlier output* pages back through it. While you follow a long
+log, the page keeps its latest 50,000 lines. *Download log* saves the whole
+log as text (`GET /api/v1/jobs/{id}/output`; add `?ansi=false` to strip
+colors).
+
+For an Ansible job, the *Hosts* tab lists each host's results. Filter them
+by result or find a host by name, and select a host to see its task
+results. *Relaunch on failed hosts* reruns the job on the hosts that failed
+or were unreachable.
+
+A job stores at most a set amount of output (256 MiB by default). Past that
+the job keeps running, and its log ends with a note that the rest was not
+kept. Its host results are still complete.
 
 ## Projects
 

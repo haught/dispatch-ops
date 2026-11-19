@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -113,6 +114,14 @@ type Job struct {
 	// Overrides are the launch overrides the job was started with; nil for
 	// jobs from before they were kept, and for inventory syncs.
 	Overrides *LaunchOverrides
+	// OutputTruncated is set once the job's output reached the cap.
+	OutputTruncated bool
+	// LastEventSeq is the seq of the job's last event received; events up
+	// to it are all stored (or were dropped at the cap).
+	LastEventSeq int64
+	// HostResultsSeq is the seq of the last event that changed the job's
+	// host results.
+	HostResultsSeq int64
 }
 
 // ScheduleRef identifies a schedule.
@@ -125,7 +134,8 @@ const jobColumns = `j.id, j.job_template_id, j.name, j.status, j.launch_type, j.
 	j.config, j.cancel_requested, j.cancel_requested_at, j.exit_code, j.failure_reason,
 	j.k8s_namespace, j.k8s_job_name, j.runner_version, j.scm_revision,
 	j.created_at, j.dispatched_at, j.started_at, j.finished_at, j.last_heartbeat_at,
-	j.schedule_id, sc.name, j.relaunch_of, j.sync_inventory_id, j.overrides`
+	j.schedule_id, sc.name, j.relaunch_of, j.sync_inventory_id, j.overrides,
+	j.output_truncated, j.last_event_seq, j.host_results_seq`
 
 const jobFrom = `jobs j LEFT JOIN users u ON u.id = j.launched_by LEFT JOIN schedules sc ON sc.id = j.schedule_id`
 
@@ -143,7 +153,8 @@ func (j *jobRow) scanTargets() []any {
 		&j.Config, &j.CancelRequested, &j.CancelRequestedAt, &j.ExitCode, &j.FailureReason,
 		&j.K8sNamespace, &j.K8sJobName, &j.RunnerVersion, &j.ScmRevision,
 		&j.CreatedAt, &j.DispatchedAt, &j.StartedAt, &j.FinishedAt, &j.LastHeartbeatAt,
-		&j.scheduleID, &j.scheduleName, &j.RelaunchOf, &j.SyncInventoryID, &j.Overrides}
+		&j.scheduleID, &j.scheduleName, &j.RelaunchOf, &j.SyncInventoryID, &j.Overrides,
+		&j.OutputTruncated, &j.LastEventSeq, &j.HostResultsSeq}
 }
 
 func (j *jobRow) job() Job {
@@ -647,12 +658,21 @@ func stripNUL(s string) string {
 // JobEventFilter narrows ListJobEvents.
 type JobEventFilter struct {
 	AfterSeq int64
-	HostName string // only events about this host, if set
+	// BeforeSeq, if set, selects the last events before it instead of the
+	// first after AfterSeq.
+	BeforeSeq int64
+	HostName  string // only events about this host, if set
+	// LogOnly selects the events that make up the job's log.
+	LogOnly bool
 }
 
-// ListJobEvents returns up to limit events with seq greater than
-// f.AfterSeq. With f.HostName, each host result also has its Task. It
-// returns ErrNotFound if the job does not exist.
+// logEvent is the condition on job_events e for events in a job's log:
+// output lines, runner messages, and structured events with output.
+const logEvent = `(e.event_type IN ('stdout', 'runner') OR e.stdout <> '')`
+
+// ListJobEvents returns up to limit events, in seq order, matching f. With
+// f.HostName, each host result also has its Task. It returns ErrNotFound if
+// the job does not exist.
 func (s *Store) ListJobEvents(ctx context.Context, jobID uuid.UUID, f JobEventFilter, limit int) ([]JobEvent, error) {
 	sql := `SELECT e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data, e.task_seq, NULL::jsonb
 		FROM job_events e WHERE e.job_id = $1 AND e.seq > $2`
@@ -661,10 +681,20 @@ func (s *Store) ListJobEvents(ctx context.Context, jobID uuid.UUID, f JobEventFi
 		sql = `SELECT e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data, e.task_seq, t.data
 			FROM job_events e
 			LEFT JOIN job_events t ON t.job_id = e.job_id AND t.seq = e.task_seq AND t.event_type = 'task_start'
-			WHERE e.job_id = $1 AND e.seq > $2 AND e.host_name = $4`
+			WHERE e.job_id = $1 AND e.seq > $2`
 		args = append(args, f.HostName)
+		sql += ` AND e.host_name = $` + strconv.Itoa(len(args))
 	}
-	rows, err := s.pool.Query(ctx, sql+` ORDER BY e.seq LIMIT $3`, args...)
+	if f.LogOnly {
+		sql += ` AND ` + logEvent
+	}
+	order := `e.seq`
+	if f.BeforeSeq > 0 {
+		args = append(args, f.BeforeSeq)
+		sql += ` AND e.seq < $` + strconv.Itoa(len(args))
+		order = `e.seq DESC`
+	}
+	rows, err := s.pool.Query(ctx, sql+` ORDER BY `+order+` LIMIT $3`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -681,6 +711,9 @@ func (s *Store) ListJobEvents(ctx context.Context, jobID uuid.UUID, f JobEventFi
 	})
 	if err != nil {
 		return nil, err
+	}
+	if f.BeforeSeq > 0 {
+		slices.Reverse(events)
 	}
 	if len(events) == 0 {
 		var exists bool
