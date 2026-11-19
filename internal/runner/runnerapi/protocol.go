@@ -6,4 +6,6 @@ package runnerapi
 //
 // 2: projects, and the ansible and script job types.
 // 3: the inventory_sync job type and its inventory report.
-const ProtocolVersion = 3
+// 4: structured Ansible events carry the output Ansible printed for them,
+// and host results refer to their task by taskSeq.
+const ProtocolVersion = 4

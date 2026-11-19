@@ -4841,17 +4841,19 @@ components:
         type:
           type: string
           description: |
-            `stdout` for command output, `runner` for messages from the
-            runner. Ansible jobs also have structured events, whose `stdout`
-            is empty and whose `data` holds the details: `playbook_start`,
-            `play_start`, `task_start`, `host_ok`, `host_failed`,
-            `host_skipped`, `host_unreachable` (these four have a
-            `hostName`) and `playbook_stats`.
+            `stdout` for a line of command output, `runner` for messages
+            from the runner. Ansible jobs also have structured events, with
+            the details in `data` and the text Ansible printed for them in
+            `stdout` (often empty): `playbook_start`, `play_start`,
+            `task_start` (`data` has the task, action and play), and
+            `host_ok`, `host_failed`, `host_skipped` and `host_unreachable`
+            (with a `hostName`, and a `taskSeq`).
         stdout:
           type: string
           description: |
-            One line of output. It may contain ANSI escape sequences, such
-            as the colors in the output of Ansible jobs.
+            Output, one line or (for a structured event) several. It may
+            contain ANSI escape sequences, such as the colors in the output
+            of Ansible jobs.
         hostName:
           type: string
           nullable: true
@@ -4859,6 +4861,28 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+        taskSeq:
+          type: integer
+          format: int64
+          description: For a host result, the `seq` of its task's `task_start` event
+        task:
+          $ref: "#/components/schemas/JobEventTask"
+
+    JobEventTask:
+      type: object
+      description: |
+        The task of a host result, from its `task_start` event. Only in
+        events listed with `hostName`.
+      required: [name, action, play]
+      properties:
+        name:
+          type: string
+        action:
+          type: string
+        play:
+          type: string
+        handler:
+          type: boolean
 
     JobEventList:
       type: object
@@ -5457,6 +5481,11 @@ components:
         data:
           type: object
           additionalProperties: true
+        taskSeq:
+          type: integer
+          format: int64
+          minimum: 1
+          description: For a host result, the `seq` of its task's `task_start` event
         time:
           type: string
           format: date-time

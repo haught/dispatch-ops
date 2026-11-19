@@ -2367,23 +2367,41 @@ export interface components {
             /** Format: date-time */
             time: string;
             /**
-             * @description `stdout` for command output, `runner` for messages from the
-             *     runner. Ansible jobs also have structured events, whose `stdout`
-             *     is empty and whose `data` holds the details: `playbook_start`,
-             *     `play_start`, `task_start`, `host_ok`, `host_failed`,
-             *     `host_skipped`, `host_unreachable` (these four have a
-             *     `hostName`) and `playbook_stats`.
+             * @description `stdout` for a line of command output, `runner` for messages
+             *     from the runner. Ansible jobs also have structured events, with
+             *     the details in `data` and the text Ansible printed for them in
+             *     `stdout` (often empty): `playbook_start`, `play_start`,
+             *     `task_start` (`data` has the task, action and play), and
+             *     `host_ok`, `host_failed`, `host_skipped` and `host_unreachable`
+             *     (with a `hostName`, and a `taskSeq`).
              */
             type: string;
             /**
-             * @description One line of output. It may contain ANSI escape sequences, such
-             *     as the colors in the output of Ansible jobs.
+             * @description Output, one line or (for a structured event) several. It may
+             *     contain ANSI escape sequences, such as the colors in the output
+             *     of Ansible jobs.
              */
             stdout: string;
             hostName: string | null;
             data: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Format: int64
+             * @description For a host result, the `seq` of its task's `task_start` event
+             */
+            taskSeq?: number;
+            task?: components["schemas"]["JobEventTask"];
+        };
+        /**
+         * @description The task of a host result, from its `task_start` event. Only in
+         *     events listed with `hostName`.
+         */
+        JobEventTask: {
+            name: string;
+            action: string;
+            play: string;
+            handler?: boolean;
         };
         JobEventList: {
             items: components["schemas"]["JobEvent"][];
@@ -2698,6 +2716,11 @@ export interface components {
             data?: {
                 [key: string]: unknown;
             };
+            /**
+             * Format: int64
+             * @description For a host result, the `seq` of its task's `task_start` event
+             */
+            taskSeq?: number;
             /** Format: date-time */
             time?: string;
         };

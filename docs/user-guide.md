@@ -243,10 +243,13 @@ extra vars are written to the in-memory secrets volume, not to disk.
 
 The runner adds a callback plugin, `dispatch_events`, through
 `ANSIBLE_CALLBACK_PLUGINS` (this replaces a `callback_plugins` setting in the
-project's `ansible.cfg`; Ansible's default directories stay on the path). It
-reports each play, task and host result as a structured event, without the
-output of `no_log` tasks. The job page's *Hosts* tab shows a per-host summary
-and each host's task results.
+project's `ansible.cfg`; Ansible's default directories stay on the path), and
+makes it the stdout callback (this replaces a `stdout_callback` setting). It
+prints what Ansible's default callback prints, and its options (such as
+`display_skipped_hosts` and `callback_result_format`) still apply. Each play,
+task and host result becomes a structured event that carries the output
+Ansible printed for it, without the output of `no_log` tasks. The job page's
+*Hosts* tab shows a per-host summary and each host's task results.
 
 ### Roles and collections
 
@@ -393,7 +396,8 @@ Ansible images, the Ansible tools. It lists the collections, prints the
 runner protocol, and exits non-zero when the image can't run jobs. The
 template's workflow runs it on every build.
 
-The API rejects runners too old for a job, with an explanation on the job.
+The API rejects runners whose protocol it doesn't support, with an
+explanation on the job.
 Rebuilding a custom image on a newer starter image picks up the new runner;
 the template's Renovate config opens that pull request for you.
 

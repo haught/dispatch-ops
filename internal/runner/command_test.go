@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -142,23 +143,109 @@ func TestStaticInventory(t *testing.T) {
 
 func TestParseEventLine(t *testing.T) {
 	const m = "\x1edispatch-event:abc:"
-	typ, host, data, ok := parseEventLine(m+`{"type":"host_ok","host":"web1","data":{"changed":true}}`, m)
-	if !ok || typ != "host_ok" || host != "web1" || data["changed"] != true {
-		t.Errorf("got %q %q %v %v", typ, host, data, ok)
+	ev, kind := parseEventLine(m+`{"type":"host_ok","host":"web1","task":"u1","data":{"changed":true}}`, m)
+	if kind != eventOpen || ev.typ != "host_ok" || ev.host != "web1" || ev.task != "u1" || ev.data["changed"] != true {
+		t.Errorf("got %+v %v", ev, kind)
+	}
+	if _, kind := parseEventLine(m+".", m); kind != eventClose {
+		t.Errorf("close line: %v", kind)
 	}
 	for _, line := range []string{
 		`{"type":"host_ok"}`, // no marker
 		"\x1edispatch-event:other:" + `{"type":"host_ok"}`, // another job's marker
 		m + `{"type":"Bad Type"}`,
 		m + `not json`,
+		m + `..`,
 	} {
-		if _, _, _, ok := parseEventLine(line, m); ok {
-			t.Errorf("%q was parsed as an event", line)
+		if _, kind := parseEventLine(line, m); kind != outputLine {
+			t.Errorf("%q was parsed as %v", line, kind)
 		}
 	}
-	if _, _, _, ok := parseEventLine(`{"type":"host_ok"}`, ""); ok {
+	if _, kind := parseEventLine(`{"type":"host_ok"}`, ""); kind != outputLine {
 		t.Error("parsed an event without a marker")
 	}
+}
+
+func TestConsumeGroupsEventOutput(t *testing.T) {
+	const m = "\x1edispatch-event:abc:"
+	e := &emitter{echo: io.Discard, queue: make(chan queued, 100)}
+	long := strings.Repeat("y", 1000)
+	var out strings.Builder
+	for _, l := range []string{
+		"plain before",
+		m + `{"type":"play_start","data":{"play":"P"}}`,
+		"",
+		"PLAY [P] ***",
+		m + ".",
+		m + `{"type":"task_start","task":"u1","data":{"task":"T"}}`,
+		"TASK [T] ***",
+		m + ".",
+		m + `{"type":"host_ok","host":"web1","task":"u1","data":{"changed":false}}`,
+		"ok: [web1]",
+		m + ".",
+		m + `{"type":"host_ok","host":"web2","task":"unknown","data":{}}`,
+		m + ".",
+		"between",
+	} {
+		out.WriteString(l + "\n")
+	}
+	// An event with more output than it can carry.
+	out.WriteString(m + `{"type":"host_failed","host":"web3","task":"u1","data":{}}` + "\n")
+	for range maxEventText/len(long) + 2 {
+		out.WriteString(long + "\n")
+	}
+	out.WriteString(m + ".\n")
+	// One that never closes.
+	out.WriteString(m + `{"type":"host_ok","host":"web4","task":"u1","data":{}}` + "\nlast\n")
+	e.consume(strings.NewReader(out.String()), m)
+	close(e.queue)
+
+	var got []runnerapiEvent
+	for q := range e.queue {
+		got = append(got, runnerapiEvent{q.ev.Seq, q.ev.Type, q.ev.Stdout, deref(q.ev.TaskSeq)})
+	}
+	want := []runnerapiEvent{
+		{1, "stdout", "plain before", 0},
+		{2, "play_start", "\nPLAY [P] ***", 0},
+		{3, "task_start", "TASK [T] ***", 0},
+		{4, "host_ok", "ok: [web1]", 3},
+		{5, "host_ok", "", 0},
+		{6, "stdout", "between", 0},
+	}
+	if len(got) < len(want)+3 {
+		t.Fatalf("got %d events: %+v", len(got), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("event %d = %+v, want %+v", i, got[i], w)
+		}
+	}
+	web3 := got[len(want)]
+	if web3.typ != "host_failed" || web3.task != 3 || len(web3.stdout) > maxEventText || !strings.HasPrefix(web3.stdout, long) {
+		t.Errorf("web3 = %s %d, %d bytes", web3.typ, web3.task, len(web3.stdout))
+	}
+	if next := got[len(want)+1]; next.typ != "stdout" || next.stdout != long {
+		t.Errorf("after web3: %+v", next)
+	}
+	last := got[len(got)-1]
+	if last.typ != "host_ok" || last.stdout != "last" || last.task != 3 {
+		t.Errorf("unclosed event: %+v", last)
+	}
+}
+
+type runnerapiEvent struct {
+	seq    int64
+	typ    string
+	stdout string
+	task   int64
+}
+
+func deref[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
+	}
+	return *p
 }
 
 func TestAskpass(t *testing.T) {

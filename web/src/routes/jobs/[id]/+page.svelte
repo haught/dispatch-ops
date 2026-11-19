@@ -136,12 +136,12 @@
 				});
 				source.addEventListener('job_event', (e) => {
 					const ev: JobEvent = JSON.parse(e.data);
-					if (ev.type === 'stdout' || ev.type === 'runner') {
+					// The log: output lines, and what Ansible printed for its events.
+					if (ev.type === 'stdout' || ev.type === 'runner' || ev.stdout !== '') {
 						pending.push(ev);
 						if (!frame) frame = requestAnimationFrame(flush);
-					} else if (hostEventTypes.includes(ev.type) || ev.type === 'playbook_stats') {
-						scheduleHosts();
 					}
+					if (hostEventTypes.includes(ev.type)) scheduleHosts();
 				});
 				source.addEventListener('end', () => {
 					source?.close();
@@ -393,9 +393,9 @@
 															{#each hostEvents as e (e.seq)}
 																<tr>
 																	<td>
-																		{e.data?.task ?? ''}
-																		{#if e.data?.play}<div class="muted small">
-																				{e.data.play}
+																		{e.task?.name ?? ''}
+																		{#if e.task?.play}<div class="muted small">
+																				{e.task.play}
 																			</div>{/if}
 																	</td>
 																	<td>

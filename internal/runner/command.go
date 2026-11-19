@@ -135,7 +135,7 @@ var callbackPlugin []byte
 // ansibleCommand runs ansible-playbook on the playbook, in the project
 // directory (so the project's ansible.cfg applies), with the job's
 // inventory, extra vars, options and credentials. The callback plugin
-// reports structured events in the output.
+// prints the default output, marking the structured events in it.
 func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, error) {
 	playbook, err := projectFile(spec, ws, "playbook")
 	if err != nil {
@@ -192,8 +192,10 @@ func ansibleCommand(spec *runnerapi.RunnerJobSpec, ws *workspace) (command, erro
 	marker := "\x1edispatch-event:" + rand.Text()[:12] + ":"
 	env = append(env,
 		"DISPATCH_EVENT_MARKER="+marker,
-		// Ours first, then Ansible's defaults.
+		// Ours first, then Ansible's defaults. It is the stdout callback:
+		// the default output, with events around it.
 		"ANSIBLE_CALLBACK_PLUGINS="+pluginDir+":~/.ansible/plugins/callback:/usr/share/ansible/plugins/callback",
+		"ANSIBLE_STDOUT_CALLBACK=dispatch_events",
 		"ANSIBLE_RETRY_FILES_ENABLED=False",
 		// Don't echo limit patterns that match no host into the output:
 		// they could be the lines of a file.
@@ -552,25 +554,48 @@ func ansibleCredentialArgs(creds []runnerapi.RunnerCredential, ws *workspace) ([
 	return args, nil
 }
 
-// parseEventLine turns a line the callback plugin wrote into an event, or
-// reports false if the line is not one.
-func parseEventLine(line, marker string) (typ, host string, data map[string]any, ok bool) {
+// eventLine is a line of the callback plugin's that opens an event.
+type eventLine struct {
+	typ, host string
+	task      string // the task's UUID, for task_start and host results
+	data      map[string]any
+	size      int
+}
+
+// Kinds of output line.
+const (
+	outputLine = iota // not the callback plugin's
+	eventOpen         // opens an event: the lines up to eventClose are its output
+	eventClose
+)
+
+// eventCloseLine follows the marker in a line closing an event.
+const eventCloseLine = "."
+
+// parseEventLine reports whether line is one of the callback plugin's,
+// and if it opens an event, which.
+func parseEventLine(line, marker string) (eventLine, int) {
 	rest, found := strings.CutPrefix(line, marker)
 	if marker == "" || !found {
-		return "", "", nil, false
+		return eventLine{}, outputLine
+	}
+	if rest == eventCloseLine {
+		return eventLine{}, eventClose
 	}
 	var ev struct {
 		Type string         `json:"type"`
 		Host *string        `json:"host"`
+		Task string         `json:"task"`
 		Data map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(rest), &ev); err != nil || !eventType.MatchString(ev.Type) {
-		return "", "", nil, false
+		return eventLine{}, outputLine
 	}
+	out := eventLine{typ: ev.Type, task: ev.Task, data: ev.Data, size: len(line)}
 	if ev.Host != nil {
-		host = truncateHost(*ev.Host)
+		out.host = truncateHost(*ev.Host)
 	}
-	return ev.Type, host, ev.Data, true
+	return out, eventOpen
 }
 
 // truncateHost keeps a host name within the API's limit of 255 bytes.

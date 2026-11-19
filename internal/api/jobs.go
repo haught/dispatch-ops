@@ -115,7 +115,10 @@ func (h *Handlers) ListJobHosts(ctx context.Context, req apigen.ListJobHostsRequ
 }
 
 func toAPIJobEvent(e store.JobEvent) apigen.JobEvent {
-	out := apigen.JobEvent{Seq: e.Seq, Time: e.Time, Type: e.Type, Stdout: e.Stdout, HostName: e.HostName}
+	out := apigen.JobEvent{Seq: e.Seq, Time: e.Time, Type: e.Type, Stdout: e.Stdout, HostName: e.HostName, TaskSeq: e.TaskSeq}
+	if t := e.Task; t != nil {
+		out.Task = &apigen.JobEventTask{Name: t.Name, Action: t.Action, Play: t.Play, Handler: &t.Handler}
+	}
 	if e.Data != nil {
 		d := e.Data
 		out.Data = &d

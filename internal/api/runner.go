@@ -17,15 +17,12 @@ import (
 // the runner API changes compatibly; raise the minimum only when support for
 // old execution environment images is dropped.
 //
-// Protocol 2 added projects and the ansible and script job types.
-// Protocol 3 added the inventory_sync job type and its inventory report.
+// Protocol 4 (events carrying Ansible's output, and host results referring
+// to their task) is the oldest supported: older runners must be rebuilt.
 const (
-	MinRunnerProtocol = 1
-	MaxRunnerProtocol = 3
+	MinRunnerProtocol = 4
+	MaxRunnerProtocol = 4
 )
-
-// minProtocolFor is the oldest runner protocol that can run each job type.
-var minProtocolFor = map[string]int{"container": 1, "ansible": 2, "script": 2, "inventory_sync": 3}
 
 // runnerJob checks that the job token authenticates the job in the path.
 func runnerJob(ctx context.Context, pathJobID uuid.UUID) error {
@@ -72,17 +69,6 @@ func (h *Handlers) GetRunnerJobSpec(ctx context.Context, req apigen.GetRunnerJob
 		}
 		return nil, badRequest("%s", reason)
 	}
-	if need := minProtocolFor[job.Config.JobType]; req.Params.Protocol < need {
-		reason := fmt.Sprintf("The execution environment's runner (version %s, protocol %d) is too old to run %s jobs, "+
-			"which need protocol %d. Rebuild the image with a newer runner.",
-			req.Params.Version, req.Params.Protocol, job.Config.JobType, need)
-		log.WarnContext(ctx, "runner too old for job type")
-		if err := h.Store.EndJob(ctx, job.ID, store.JobError, nil, reason, store.JobWaiting); err != nil && !errors.Is(err, store.ErrJobState) {
-			return nil, err
-		}
-		return nil, badRequest("%s", reason)
-	}
-
 	spec, err := h.buildRunnerSpec(ctx, job)
 	var se *specError
 	if errors.As(err, &se) {
@@ -183,7 +169,7 @@ func (h *Handlers) PostRunnerJobEvents(ctx context.Context, req apigen.PostRunne
 	now := time.Now()
 	events := make([]store.JobEvent, len(req.Body.Events))
 	for i, e := range req.Body.Events {
-		events[i] = store.JobEvent{Seq: e.Seq, Time: now, Type: e.Type, HostName: e.HostName, Stdout: e.Stdout}
+		events[i] = store.JobEvent{Seq: e.Seq, Time: now, Type: e.Type, HostName: e.HostName, Stdout: e.Stdout, TaskSeq: e.TaskSeq}
 		if e.Time != nil {
 			events[i].Time = *e.Time
 		}

@@ -489,6 +489,16 @@ type JobEvent struct {
 	HostName *string
 	Stdout   string
 	Data     map[string]any
+	// TaskSeq is a host result's task_start event.
+	TaskSeq *int64
+	// Task is filled in from it when listing a host's events.
+	Task *JobEventTask
+}
+
+// JobEventTask is the task of a host result.
+type JobEventTask struct {
+	Name, Action, Play string
+	Handler            bool
 }
 
 // AppendJobEvents stores a batch of events for a running job and notifies
@@ -515,11 +525,12 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 		host   *string
 		stdout string
 		data   *string
+		task   *int64
 		size   int64
 	}
 	all := make([]row, len(events))
 	for i, e := range events {
-		r := row{seq: e.Seq, at: e.Time, typ: e.Type, stdout: stripNUL(e.Stdout)}
+		r := row{seq: e.Seq, at: e.Time, typ: e.Type, stdout: stripNUL(e.Stdout), task: e.TaskSeq}
 		if e.HostName != nil {
 			h := stripNUL(*e.HostName)
 			r.host = &h
@@ -591,17 +602,17 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 
 		if len(keep) > 0 {
 			n := len(keep)
-			seqs, times := make([]int64, n), make([]time.Time, n)
+			seqs, times, tasks := make([]int64, n), make([]time.Time, n), make([]*int64, n)
 			types, hosts, stdouts, data := make([]string, n), make([]*string, n), make([]string, n), make([]*string, n)
 			for i, r := range keep {
-				seqs[i], times[i], types[i], hosts[i], stdouts[i], data[i] = r.seq, r.at, r.typ, r.host, r.stdout, r.data
+				seqs[i], times[i], types[i], hosts[i], stdouts[i], data[i], tasks[i] = r.seq, r.at, r.typ, r.host, r.stdout, r.data, r.task
 			}
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO job_events (job_id, seq, created_at, event_type, host_name, stdout, data)
-				SELECT $1, e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data::jsonb
-				FROM unnest($2::bigint[], $3::timestamptz[], $4::text[], $5::text[], $6::text[], $7::text[])
-					AS e(seq, created_at, event_type, host_name, stdout, data)`,
-				id, seqs, times, types, hosts, stdouts, data); err != nil {
+				INSERT INTO job_events (job_id, seq, created_at, event_type, host_name, stdout, data, task_seq)
+				SELECT $1, e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data::jsonb, e.task_seq
+				FROM unnest($2::bigint[], $3::timestamptz[], $4::text[], $5::text[], $6::text[], $7::text[], $8::bigint[])
+					AS e(seq, created_at, event_type, host_name, stdout, data, task_seq)`,
+				id, seqs, times, types, hosts, stdouts, data, tasks); err != nil {
 				return err
 			}
 		}
@@ -640,22 +651,32 @@ type JobEventFilter struct {
 }
 
 // ListJobEvents returns up to limit events with seq greater than
-// f.AfterSeq. It returns ErrNotFound if the job does not exist.
+// f.AfterSeq. With f.HostName, each host result also has its Task. It
+// returns ErrNotFound if the job does not exist.
 func (s *Store) ListJobEvents(ctx context.Context, jobID uuid.UUID, f JobEventFilter, limit int) ([]JobEvent, error) {
-	sql := `SELECT seq, created_at, event_type, host_name, stdout, data
-		FROM job_events WHERE job_id = $1 AND seq > $2`
+	sql := `SELECT e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data, e.task_seq, NULL::jsonb
+		FROM job_events e WHERE e.job_id = $1 AND e.seq > $2`
 	args := []any{jobID, f.AfterSeq, limit}
 	if f.HostName != "" {
-		sql += ` AND host_name = $4`
+		sql = `SELECT e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data, e.task_seq, t.data
+			FROM job_events e
+			LEFT JOIN job_events t ON t.job_id = e.job_id AND t.seq = e.task_seq AND t.event_type = 'task_start'
+			WHERE e.job_id = $1 AND e.seq > $2 AND e.host_name = $4`
 		args = append(args, f.HostName)
 	}
-	rows, err := s.pool.Query(ctx, sql+` ORDER BY seq LIMIT $3`, args...)
+	rows, err := s.pool.Query(ctx, sql+` ORDER BY e.seq LIMIT $3`, args...)
 	if err != nil {
 		return nil, err
 	}
 	events, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (JobEvent, error) {
 		var e JobEvent
-		err := row.Scan(&e.Seq, &e.Time, &e.Type, &e.HostName, &e.Stdout, &e.Data)
+		var task map[string]any
+		err := row.Scan(&e.Seq, &e.Time, &e.Type, &e.HostName, &e.Stdout, &e.Data, &e.TaskSeq, &task)
+		if task != nil {
+			str := func(k string) string { v, _ := task[k].(string); return v }
+			handler, _ := task["handler"].(bool)
+			e.Task = &JobEventTask{Name: str("task"), Action: str("action"), Play: str("play"), Handler: handler}
+		}
 		return e, err
 	})
 	if err != nil {

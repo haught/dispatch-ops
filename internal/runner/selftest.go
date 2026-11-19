@@ -52,7 +52,7 @@ func selfTest(w io.Writer, version string, env selfTestEnv) int {
 	}
 
 	fmt.Fprintf(w, "dispatch-runner %s, runner protocol %d\n", version, runnerapi.ProtocolVersion)
-	fmt.Fprintf(w, "  (ansible and script jobs need protocol 2 or later, inventory syncs 3)\n\n")
+	fmt.Fprintf(w, "\n")
 
 	if env.uid == 0 {
 		check("FAIL", "user", "runs as root; job pods run as non-root, so end the Dockerfile with USER 1000:1000")
