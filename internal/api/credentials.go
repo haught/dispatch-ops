@@ -219,7 +219,7 @@ func (h *Handlers) CreateExecutionEnvironment(ctx context.Context, req apigen.Cr
 	out := toAPIExecutionEnvironment(e)
 	h.audit(ctx, auditRecord{
 		Action: apigen.Create, ResourceType: apigen.AuditResourceTypeExecutionEnvironment, ResourceID: e.ID, ResourceName: e.Name,
-		After: out,
+		After: execEnvAudit(out),
 	})
 	return apigen.CreateExecutionEnvironment201JSONResponse(out), nil
 }
@@ -269,7 +269,7 @@ func (h *Handlers) UpdateExecutionEnvironment(ctx context.Context, req apigen.Up
 	before.CreatedAt = out.CreatedAt
 	h.audit(ctx, auditRecord{
 		Action: apigen.Update, ResourceType: apigen.AuditResourceTypeExecutionEnvironment, ResourceID: e.ID, ResourceName: e.Name,
-		Before: before, After: out,
+		Before: execEnvAudit(before), After: execEnvAudit(out),
 	})
 	return apigen.UpdateExecutionEnvironment200JSONResponse(out), nil
 }
@@ -287,7 +287,7 @@ func (h *Handlers) DeleteExecutionEnvironment(ctx context.Context, req apigen.De
 	}
 	h.audit(ctx, auditRecord{
 		Action: apigen.Delete, ResourceType: apigen.AuditResourceTypeExecutionEnvironment, ResourceID: e.ID, ResourceName: e.Name,
-		Before: toAPIExecutionEnvironment(e),
+		Before: execEnvAudit(toAPIExecutionEnvironment(e)),
 	})
 	return apigen.DeleteExecutionEnvironment204Response{}, nil
 }
@@ -295,8 +295,18 @@ func (h *Handlers) DeleteExecutionEnvironment(ctx context.Context, req apigen.De
 func toAPIExecutionEnvironment(e store.ExecutionEnvironment) apigen.ExecutionEnvironment {
 	return apigen.ExecutionEnvironment{
 		Id: e.ID, Name: e.Name, Description: e.Description, Image: e.Image, PullPolicy: apigen.PullPolicy(e.PullPolicy),
-		RegistryCredentialId: e.RegistryCredentialID, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt,
+		RegistryCredentialId: e.RegistryCredentialID, TemplateCount: e.TemplateCount, InventorySourceCount: e.InventorySourceCount,
+		CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt,
 	}
+}
+
+// execEnvAudit is what the audit log records about an execution
+// environment: its own fields, not counts of what uses it.
+func execEnvAudit(e apigen.ExecutionEnvironment) map[string]any {
+	m := toMap(e)
+	delete(m, "templateCount")
+	delete(m, "inventorySourceCount")
+	return m
 }
 
 // principalName names the caller for log lines.

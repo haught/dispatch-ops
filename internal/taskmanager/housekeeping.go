@@ -144,17 +144,29 @@ func (m *Manager) notifyLoop(ctx context.Context, wake <-chan struct{}) {
 	}
 }
 
-// --- Retention -----------------------------------------------------------------
+// --- Retention and job output partitions --------------------------------------
 
-// CleanUp deletes finished jobs and audit log entries older than their
-// retention periods (if set).
+// partitionsAhead is how many days ahead job output partitions are created,
+// so that a task manager that is down for a while doesn't leave new jobs
+// without anywhere to store their output.
+const partitionsAhead = 7
+
+// EnsurePartitions creates the job output partitions for the coming days.
+func (m *Manager) EnsurePartitions(ctx context.Context) error {
+	return m.Store.EnsureJobPartitions(ctx, partitionsAhead)
+}
+
+// CleanUp creates the coming days' job output partitions, and deletes
+// finished jobs and audit log entries older than their retention periods
+// (if set).
 func (m *Manager) CleanUp(ctx context.Context) error {
-	var errs []error
+	errs := []error{m.EnsurePartitions(ctx)}
 	if age := m.Config.JobRetention; age > 0 {
-		n, err := m.Store.DeleteJobsFinishedBefore(ctx, age)
-		metrics.RetentionDeleted.WithLabelValues("jobs").Add(float64(n))
-		if n > 0 {
-			m.Log.Info("deleted old jobs", "count", n, "retention", age)
+		n, err := m.Store.DeleteExpiredJobs(ctx, age)
+		metrics.RetentionDeleted.WithLabelValues("jobs").Add(float64(n.Jobs))
+		metrics.RetentionDeleted.WithLabelValues("job_partitions").Add(float64(n.Partitions))
+		if n.Jobs > 0 || n.Partitions > 0 {
+			m.Log.Info("deleted old jobs", "count", n.Jobs, "partitions", n.Partitions, "retention", age)
 		}
 		errs = append(errs, err)
 	}
@@ -169,12 +181,9 @@ func (m *Manager) CleanUp(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// cleanupLoop runs CleanUp regularly. Run has already created the
+// partitions, so the first pass waits.
 func (m *Manager) cleanupLoop(ctx context.Context) {
-	if m.Config.JobRetention <= 0 && m.Config.AuditRetention <= 0 {
-		return
-	}
-	// Not right at start, so a crash-looping task manager doesn't run it
-	// over and over.
 	t := time.NewTimer(time.Minute)
 	defer t.Stop()
 	for {
@@ -184,7 +193,7 @@ func (m *Manager) cleanupLoop(ctx context.Context) {
 		case <-t.C:
 		}
 		if err := m.CleanUp(ctx); err != nil && ctx.Err() == nil {
-			m.Log.Error("deleting old data", "err", err)
+			m.Log.Error("housekeeping", "err", err)
 		}
 		t.Reset(m.Config.RetentionInterval)
 	}
@@ -212,6 +221,8 @@ var (
 		"How long the oldest pending job has waited (0 if none).", nil, nil)
 	descNotificationsPending = prometheus.NewDesc("dispatch_notifications_pending",
 		"Notifications waiting to be sent, including those waiting to retry.", nil, nil)
+	descPartitionsAhead = prometheus.NewDesc("dispatch_job_partitions_ahead_days",
+		"Days past today (UTC) that job output partitions exist for. Below 0, new jobs can't store output.", nil, nil)
 )
 
 // Describe implements prometheus.Collector.
@@ -220,6 +231,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descJobs
 	ch <- descOldestPending
 	ch <- descNotificationsPending
+	ch <- descPartitionsAhead
 }
 
 // Collect implements prometheus.Collector.
@@ -243,6 +255,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(descNotificationsPending, prometheus.GaugeValue, float64(n))
 	} else {
 		ch <- prometheus.NewInvalidMetric(descNotificationsPending, err)
+	}
+	if n, err := c.m.Store.JobPartitionsAhead(ctx); err == nil {
+		ch <- prometheus.MustNewConstMetric(descPartitionsAhead, prometheus.GaugeValue, float64(n))
+	} else {
+		ch <- prometheus.NewInvalidMetric(descPartitionsAhead, err)
 	}
 }
 

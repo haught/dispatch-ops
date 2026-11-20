@@ -84,8 +84,9 @@ func (e *jobEnv) stdout(jobID string) string {
 	e.t.Helper()
 	var lines []string
 	for _, it := range e.c.mustDo("GET", "/api/v1/jobs/"+jobID+"/events?limit=5000", nil, 200)["items"].([]any) {
+		// The log: output lines, and the output of structured events.
 		ev := it.(map[string]any)
-		if ev["type"] == "stdout" {
+		if ev["type"] == "stdout" || (ev["type"] != "runner" && ev["stdout"] != "") {
 			lines = append(lines, ev["stdout"].(string))
 		}
 	}
@@ -249,19 +250,19 @@ func TestRunnerTokenIsScopedToItsJob(t *testing.T) {
 	e.claim(b)
 
 	r := &client{t: t, base: e.c.base, bearer: tokenA}
-	resp, body := r.do("GET", "/runner/v1/jobs/"+b+"/spec?protocol=1&version=x", nil)
+	resp, body := r.do("GET", "/runner/v1/jobs/"+b+"/spec?protocol=4&version=x", nil)
 	expectStatus(t, resp, body, 403)
 	// Job tokens are not user credentials, and user credentials don't work
 	// on the runner API.
 	resp, body = r.do("GET", "/api/v1/jobs", nil)
 	expectStatus(t, resp, body, 401)
-	resp, body = e.c.do("GET", "/runner/v1/jobs/"+a+"/spec?protocol=1&version=x", nil)
+	resp, body = e.c.do("GET", "/runner/v1/jobs/"+a+"/spec?protocol=4&version=x", nil)
 	expectStatus(t, resp, body, 401)
 
 	// The spec can be fetched once.
-	resp, body = r.do("GET", "/runner/v1/jobs/"+a+"/spec?protocol=1&version=x", nil)
+	resp, body = r.do("GET", "/runner/v1/jobs/"+a+"/spec?protocol=4&version=x", nil)
 	expectStatus(t, resp, body, 200)
-	resp, body = r.do("GET", "/runner/v1/jobs/"+a+"/spec?protocol=1&version=x", nil)
+	resp, body = r.do("GET", "/runner/v1/jobs/"+a+"/spec?protocol=4&version=x", nil)
 	expectStatus(t, resp, body, 409)
 
 	// Retried event batches are stored once.

@@ -16,14 +16,21 @@ type ExecutionEnvironment struct {
 	Image                string
 	PullPolicy           string
 	RegistryCredentialID *uuid.UUID
+	// How many job templates and inventory sources use it.
+	TemplateCount        int
+	InventorySourceCount int
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }
 
-const execEnvColumns = `e.id, e.name, e.description, e.image, e.pull_policy, e.registry_credential_id, e.created_at, e.updated_at`
+const execEnvColumns = `e.id, e.name, e.description, e.image, e.pull_policy, e.registry_credential_id,
+	(SELECT count(*) FROM job_templates WHERE execution_environment_id = e.id),
+	(SELECT count(*) FROM inventory_sources WHERE execution_environment_id = e.id),
+	e.created_at, e.updated_at`
 
 func (e *ExecutionEnvironment) scanTargets() []any {
-	return []any{&e.ID, &e.Name, &e.Description, &e.Image, &e.PullPolicy, &e.RegistryCredentialID, &e.CreatedAt, &e.UpdatedAt}
+	return []any{&e.ID, &e.Name, &e.Description, &e.Image, &e.PullPolicy, &e.RegistryCredentialID,
+		&e.TemplateCount, &e.InventorySourceCount, &e.CreatedAt, &e.UpdatedAt}
 }
 
 // ExecutionEnvironmentFields are an execution environment's editable fields.
@@ -92,8 +99,26 @@ func (s *Store) UpdateExecutionEnvironment(ctx context.Context, id uuid.UUID, up
 	return out, err
 }
 
-// DeleteExecutionEnvironment deletes an execution environment. It returns
-// ErrInUse if a job template uses it.
+// DeleteExecutionEnvironment deletes an execution environment. If job
+// templates or inventory sources use it, it returns an *InUseError naming
+// them (or, if one was added meanwhile, plain ErrInUse).
 func (s *Store) DeleteExecutionEnvironment(ctx context.Context, id uuid.UUID) error {
+	var inUse InUseError
+	var err error
+	inUse.JobTemplates, inUse.JobTemplateCount, err = namesAndCount(ctx, s.pool, `
+		SELECT count(*) OVER (), name FROM job_templates
+		WHERE execution_environment_id = $1 ORDER BY name LIMIT $2`, id)
+	if err != nil {
+		return err
+	}
+	inUse.InventorySources, inUse.InventorySourceCount, err = namesAndCount(ctx, s.pool, `
+		SELECT count(*) OVER (), i.name FROM inventory_sources src JOIN inventories i ON i.id = src.inventory_id
+		WHERE src.execution_environment_id = $1 ORDER BY i.name LIMIT $2`, id)
+	if err != nil {
+		return err
+	}
+	if inUse.JobTemplateCount > 0 || inUse.InventorySourceCount > 0 {
+		return &inUse
+	}
 	return s.deleteByID(ctx, "execution_environments", id)
 }

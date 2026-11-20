@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -23,6 +24,46 @@ var (
 	// ErrInUse means a row cannot be deleted because others reference it.
 	ErrInUse = errors.New("in use")
 )
+
+// inUseNames is how many names of each kind an InUseError lists.
+const inUseNames = 5
+
+// InUseError is an ErrInUse that names what still references the row. The
+// name lists hold at most inUseNames entries each; the counts are complete.
+type InUseError struct {
+	JobTemplates     []string
+	JobTemplateCount int
+	// InventorySources are named by their inventory.
+	InventorySources     []string
+	InventorySourceCount int
+}
+
+func (e *InUseError) Error() string {
+	return fmt.Sprintf("in use by %d job templates and %d inventory sources", e.JobTemplateCount, e.InventorySourceCount)
+}
+
+func (e *InUseError) Is(target error) bool { return target == ErrInUse }
+
+// namesAndCount runs query, which takes an ID and a row limit and selects
+// count(*) OVER () and a name, and returns the first inUseNames names and
+// the total count.
+func namesAndCount(ctx context.Context, db querier, query string, id any) ([]string, int, error) {
+	rows, err := db.Query(ctx, query, id, inUseNames)
+	if err != nil {
+		return nil, 0, err
+	}
+	var names []string
+	var total int
+	var name string
+	_, err = pgx.ForEachRow(rows, []any{&total, &name}, func() error {
+		names = append(names, name)
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return names, total, nil
+}
 
 // Store wraps the connection pool.
 type Store struct {

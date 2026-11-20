@@ -1027,7 +1027,10 @@ export interface paths {
         /**
          * Page through a job's output events
          * @description Returns events in sequence order. To get the next page, pass the last
-         *     event's `seq` as `afterSeq`.
+         *     event's `seq` as `afterSeq`. To page backwards, pass the first
+         *     event's `seq` as `beforeSeq`, which returns the `limit` events before
+         *     it; a `beforeSeq` past the last event (such as 2^53 - 1) returns the
+         *     end of the output.
          */
         get: operations["listJobEvents"];
         put?: never;
@@ -1049,12 +1052,36 @@ export interface paths {
         };
         /**
          * Per-host results of an Ansible job
-         * @description One entry per host the playbook ran against, by host name. While the
-         *     job runs, the counts come from the task results received so far; once
-         *     the playbook finishes they are Ansible's own recap. Jobs of other
-         *     types have no entries.
+         * @description One entry per host the playbook ran against, by host name, a page at
+         *     a time. While the job runs, the counts come from the task results
+         *     received so far; once the playbook finishes they are Ansible's own
+         *     recap. Results are kept even when the job's output was cut at the
+         *     output limit. Jobs of other types have no entries.
          */
         get: operations["listJobHosts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{jobId}/output": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Download a job's log
+         * @description The job's whole log as text, one event's output per line, as a file
+         *     to save. While the job runs, it is the log so far.
+         */
+        get: operations["getJobOutput"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1076,10 +1103,14 @@ export interface paths {
          * Follow a job's output live (server-sent events)
          * @description A `text/event-stream` with these events:
          *
-         *     - `job_event`: one output event (a `JobEvent`). The SSE `id` is its
+         *     - `job_event`: one event of the job's log (a `JobEvent`): an output
+         *       line, a runner message, or a structured event with output (see
+         *       the `log` option of the events endpoint). The SSE `id` is its
          *       `seq`, so a reconnecting `EventSource` resumes where it left off.
          *     - `status`: the job (a `Job`) whenever its status changes, and once
          *       when the stream opens.
+         *     - `hosts`: the job's per-host results have changed since the last
+         *       `hosts` event (or the stream opened); its data is `{"seq": n}`.
          *     - `end`: the job has finished and all of its output has been sent.
          *       The server then closes the stream.
          *     - `revoked`: the caller may no longer see the job (they signed out,
@@ -2062,6 +2093,10 @@ export interface components {
              * @description A `registry` credential used to pull the image
              */
             registryCredentialId: string | null;
+            /** @description How many job templates use the execution environment */
+            templateCount: number;
+            /** @description How many inventory sources use the execution environment */
+            inventorySourceCount: number;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -2355,6 +2390,11 @@ export interface components {
             startedAt: string | null;
             /** Format: date-time */
             finishedAt: string | null;
+            /**
+             * @description The job's output reached the output limit, so the rest of its
+             *     log was not kept (its per-host results were)
+             */
+            outputTruncated: boolean;
         };
         JobList: {
             items: components["schemas"]["Job"][];
@@ -2366,34 +2406,48 @@ export interface components {
             /** Format: date-time */
             time: string;
             /**
-             * @description `stdout` for command output, `runner` for messages from the
-             *     runner. Ansible jobs also have structured events, whose `stdout`
-             *     is empty and whose `data` holds the details: `playbook_start`,
-             *     `play_start`, `task_start`, `host_ok`, `host_failed`,
-             *     `host_skipped`, `host_unreachable` (these four have a
-             *     `hostName`) and `playbook_stats`.
+             * @description `stdout` for a line of command output, `runner` for messages
+             *     from the runner. Ansible jobs also have structured events, with
+             *     the details in `data` and the text Ansible printed for them in
+             *     `stdout` (often empty): `playbook_start`, `play_start`,
+             *     `task_start` (`data` has the task, action and play), and
+             *     `host_ok`, `host_failed`, `host_skipped` and `host_unreachable`
+             *     (with a `hostName`, and a `taskSeq`).
              */
             type: string;
             /**
-             * @description One line of output. It may contain ANSI escape sequences, such
-             *     as the colors in the output of Ansible jobs.
+             * @description Output, one line or (for a structured event) several. It may
+             *     contain ANSI escape sequences, such as the colors in the output
+             *     of Ansible jobs.
              */
             stdout: string;
             hostName: string | null;
             data: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Format: int64
+             * @description For a host result, the `seq` of its task's `task_start` event
+             */
+            taskSeq?: number;
+            task?: components["schemas"]["JobEventTask"];
+        };
+        /**
+         * @description The task of a host result, from its `task_start` event. Only in
+         *     events listed with `hostName`.
+         */
+        JobEventTask: {
+            name: string;
+            action: string;
+            play: string;
+            handler?: boolean;
         };
         JobEventList: {
             items: components["schemas"]["JobEvent"][];
         };
         JobHostSummary: {
             hostName: string;
-            /**
-             * @description The host's overall result, the worst of its task results
-             * @enum {string}
-             */
-            status: "ok" | "changed" | "failed" | "unreachable" | "skipped";
+            status: components["schemas"]["JobHostStatus"];
             /** @description Tasks that succeeded, including changed ones */
             ok: number;
             changed: number;
@@ -2404,8 +2458,23 @@ export interface components {
             /** @description Failed tasks with `ignore_errors` */
             ignored: number;
         };
+        /**
+         * @description A host's overall result, the worst of its task results
+         * @enum {string}
+         */
+        JobHostStatus: "ok" | "changed" | "failed" | "unreachable" | "skipped";
         JobHostSummaryList: {
             items: components["schemas"]["JobHostSummary"][];
+            /** @description Hosts matching the filter */
+            total: number;
+            /** @description All of the job's hosts, by overall result */
+            counts: {
+                ok: number;
+                changed: number;
+                failed: number;
+                unreachable: number;
+                skipped: number;
+            };
         };
         RelaunchRequest: {
             /**
@@ -2686,6 +2755,11 @@ export interface components {
             data?: {
                 [key: string]: unknown;
             };
+            /**
+             * Format: int64
+             * @description For a host result, the `seq` of its task's `task_start` event
+             */
+            taskSeq?: number;
             /** Format: date-time */
             time?: string;
         };
@@ -4458,7 +4532,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description A job template still uses the execution environment */
+            /** @description Job templates or inventory sources still use the execution environment; the detail names them */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4948,6 +5022,12 @@ export interface operations {
         parameters: {
             query?: {
                 afterSeq?: number;
+                beforeSeq?: number;
+                /**
+                 * @description Only the events that make up the job's log: output lines,
+                 *     runner messages, and structured events with output
+                 */
+                log?: boolean;
                 limit?: number;
                 /** @description Only events about this host (Ansible jobs) */
                 hostName?: string;
@@ -4975,7 +5055,14 @@ export interface operations {
     };
     listJobHosts: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Only hosts with one of these overall results */
+                status?: components["schemas"]["JobHostStatus"][];
+                /** @description Case-insensitive substring match on the name */
+                search?: components["parameters"]["Search"];
+                limit?: number;
+                offset?: components["parameters"]["Offset"];
+            };
             header?: never;
             path: {
                 jobId: components["parameters"]["JobId"];
@@ -4991,6 +5078,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobHostSummaryList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getJobOutput: {
+        parameters: {
+            query?: {
+                /** @description Keep ANSI escape sequences (colors); false strips them */
+                ansi?: boolean;
+            };
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The log */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
                 };
             };
             401: components["responses"]["Unauthorized"];

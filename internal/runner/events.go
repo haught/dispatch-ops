@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,24 +81,34 @@ func (e *emitter) add(typ, text string) {
 	e.queueEvent(runnerapi.RunnerEvent{Type: typ, Stdout: text}, len(text), echo)
 }
 
-// addStructured queues a structured event (no output text). size is
-// roughly how many bytes its data takes as JSON.
-func (e *emitter) addStructured(typ, host string, data map[string]any, size int) {
+// addStructured queues a structured event, with the lines of output that
+// belong to it (if any), and returns its seq. size is roughly how many
+// bytes its data takes as JSON.
+func (e *emitter) addStructured(typ, host string, taskSeq int64, data map[string]any, lines []string, size int) int64 {
 	ev := runnerapi.RunnerEvent{Type: typ}
 	if host != "" {
 		ev.HostName = &host
 	}
+	if taskSeq > 0 {
+		ev.TaskSeq = &taskSeq
+	}
 	if data != nil {
 		ev.Data = &data
 	}
-	e.queueEvent(ev, size, "")
+	echo := ""
+	if len(lines) > 0 {
+		ev.Stdout = strings.Join(lines, "\n")
+		echo = ev.Stdout + "\n"
+	}
+	return e.queueEvent(ev, size+len(ev.Stdout), echo)
 }
 
-func (e *emitter) queueEvent(ev runnerapi.RunnerEvent, size int, echo string) {
+// queueEvent numbers and queues ev, and returns its seq.
+func (e *emitter) queueEvent(ev runnerapi.RunnerEvent, size int, echo string) int64 {
 	e.sending.RLock()
 	defer e.sending.RUnlock()
 	if e.closed {
-		return
+		return 0
 	}
 	// Number and queue under one lock: events must reach the API in seq
 	// order, or a stream reader could move past a seq that arrives later.
@@ -110,26 +121,73 @@ func (e *emitter) queueEvent(ev runnerapi.RunnerEvent, size int, echo string) {
 		_, _ = io.WriteString(e.echo, echo)
 	}
 	e.queue <- queued{ev: ev, size: size}
+	return e.seq
 }
 
 // runner queues a message from the runner itself.
 func (e *emitter) runner(msg string) { e.add("runner", msg) }
 
-// consume reads r line by line into stdout events until EOF. Lines that
-// start with marker (if not empty) are structured events; see
-// parseEventLine.
+// maxEventText is the most output one structured event carries (the API
+// takes 64 KiB).
+const maxEventText = 60 << 10
+
+// openEvent is a structured event whose output is still being read.
+type openEvent struct {
+	eventLine
+	taskSeq int64
+	lines   []string
+	text    int // bytes of lines, with separators
+}
+
+// consume reads r line by line into events until EOF. Lines that start
+// with marker (if not empty) open and close structured events (see
+// parseEventLine); the lines in between are the event's output. Other
+// lines are stdout events.
 func (e *emitter) consume(r io.Reader, marker string) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), maxEventBytes+1)
 	sc.Split(splitLines)
+	// The seq of each task's task_start event, by task UUID, for the
+	// task's host results to refer to.
+	tasks := map[string]int64{}
+	var open *openEvent
+	flush := func() {
+		if open == nil {
+			return
+		}
+		seq := e.addStructured(open.typ, open.host, open.taskSeq, open.data, open.lines, open.size)
+		if open.typ == "task_start" && open.task != "" {
+			tasks[open.task] = seq
+		}
+		open = nil
+	}
 	for sc.Scan() {
 		line := string(sc.Bytes())
-		if typ, host, data, ok := parseEventLine(line, marker); ok {
-			e.addStructured(typ, host, data, len(line))
-			continue
+		ev, kind := parseEventLine(line, marker)
+		switch kind {
+		case eventOpen:
+			flush()
+			open = &openEvent{eventLine: ev}
+			if strings.HasPrefix(ev.typ, "host_") {
+				open.taskSeq = tasks[ev.task]
+			}
+		case eventClose:
+			flush()
+		default:
+			if open != nil {
+				if open.text+len(line)+1 <= maxEventText {
+					open.lines = append(open.lines, line)
+					open.text += len(line) + 1
+					continue
+				}
+				// Too much to go with the event: send it, and the rest of
+				// its output as stdout.
+				flush()
+			}
+			e.add("stdout", line)
 		}
-		e.add("stdout", line)
 	}
+	flush()
 }
 
 // lineWriter returns a writer whose lines become stdout events, and a

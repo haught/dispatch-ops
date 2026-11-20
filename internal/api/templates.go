@@ -516,7 +516,7 @@ func toAPIJob(j store.Job) apigen.Job {
 		Id: j.ID, Name: j.Name, JobTemplateId: j.TemplateID, Status: apigen.JobStatus(j.Status),
 		LaunchType: apigen.JobLaunchType(j.LaunchType), CancelRequested: j.CancelRequested,
 		ExitCode: j.ExitCode, FailureReason: j.FailureReason, ScmRevision: j.ScmRevision,
-		CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
+		CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt, OutputTruncated: j.OutputTruncated,
 		Config: apigen.JobConfig{
 			JobType: apigen.JobType(c.JobType),
 			ExecutionEnvironment: apigen.ExecutionEnvironmentRef{

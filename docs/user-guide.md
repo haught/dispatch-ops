@@ -8,6 +8,7 @@ be done in the web UI or through the REST API ([api/openapi.yaml](../api/openapi
 - [Access control](#access-control)
 - [Audit log](#audit-log)
 - [Job types](#job-types)
+- [Job output](#job-output)
 - [Projects](#projects)
 - [Ansible jobs](#ansible-jobs)
 - [What the command sees](#what-the-command-sees)
@@ -200,6 +201,23 @@ isn't included, and a playbook's own `hosts:` can narrow the set further. The
 preview needs `read` on the inventory, and the API serves it at
 `GET /api/v1/inventories/{id}/host-matches?pattern=…`.
 
+## Job output
+
+The job page opens at the end of the job's log and follows it while the job
+runs. *Load earlier output* pages back through it. While you follow a long
+log, the page keeps its latest 50,000 lines. *Download log* saves the whole
+log as text (`GET /api/v1/jobs/{id}/output`; add `?ansi=false` to strip
+colors).
+
+For an Ansible job, the *Hosts* tab lists each host's results. Filter them
+by result or find a host by name, and select a host to see its task
+results. *Relaunch on failed hosts* reruns the job on the hosts that failed
+or were unreachable.
+
+A job stores at most a set amount of output (256 MiB by default). Past that
+the job keeps running, and its log ends with a note that the rest was not
+kept. Its host results are still complete.
+
 ## Projects
 
 A project is a git repository (`scmUrl`) and a branch, tag or commit
@@ -243,10 +261,13 @@ extra vars are written to the in-memory secrets volume, not to disk.
 
 The runner adds a callback plugin, `dispatch_events`, through
 `ANSIBLE_CALLBACK_PLUGINS` (this replaces a `callback_plugins` setting in the
-project's `ansible.cfg`; Ansible's default directories stay on the path). It
-reports each play, task and host result as a structured event, without the
-output of `no_log` tasks. The job page's *Hosts* tab shows a per-host summary
-and each host's task results.
+project's `ansible.cfg`; Ansible's default directories stay on the path), and
+makes it the stdout callback (this replaces a `stdout_callback` setting). It
+prints what Ansible's default callback prints, and its options (such as
+`display_skipped_hosts` and `callback_result_format`) still apply. Each play,
+task and host result becomes a structured event that carries the output
+Ansible printed for it, without the output of `no_log` tasks. The job page's
+*Hosts* tab shows a per-host summary and each host's task results.
 
 ### Roles and collections
 
@@ -337,7 +358,9 @@ the `haught.akips.akips_inventory` plugin:
 
 An execution environment (EE) is the container image a job runs in. Register
 it by name and image on the *Execution environments* page, with a registry
-credential if it is private. The starter images, published with each release
+credential if it is private. The page shows how many job templates and
+inventory sources use each one; it can't be deleted until none do, and the
+refusal names them. The starter images, published with each release
 as `ghcr.io/haught/dispatch-ops/<name>:<version>`, are:
 
 - `ee-shell`: bash, curl, jq, git and ssh.
@@ -393,7 +416,8 @@ Ansible images, the Ansible tools. It lists the collections, prints the
 runner protocol, and exits non-zero when the image can't run jobs. The
 template's workflow runs it on every build.
 
-The API rejects runners too old for a job, with an explanation on the job.
+The API rejects runners whose protocol it doesn't support, with an
+explanation on the job.
 Rebuilding a custom image on a newer starter image picks up the new runner;
 the template's Renovate config opens that pull request for you.
 

@@ -1638,7 +1638,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: A job template still uses the execution environment
+          description: Job templates or inventory sources still use the execution environment; the detail names them
           content:
             application/problem+json:
               schema:
@@ -2053,7 +2053,10 @@ paths:
       summary: Page through a job's output events
       description: |
         Returns events in sequence order. To get the next page, pass the last
-        event's `seq` as `afterSeq`.
+        event's `seq` as `afterSeq`. To page backwards, pass the first
+        event's `seq` as `beforeSeq`, which returns the `limit` events before
+        it; a `beforeSeq` past the last event (such as 2^53 - 1) returns the
+        end of the output.
       parameters:
         - name: afterSeq
           in: query
@@ -2062,6 +2065,20 @@ paths:
             format: int64
             minimum: 0
             default: 0
+        - name: beforeSeq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: log
+          in: query
+          description: |
+            Only the events that make up the job's log: output lines,
+            runner messages, and structured events with output
+          schema:
+            type: boolean
+            default: false
         - name: limit
           in: query
           schema:
@@ -2095,10 +2112,30 @@ paths:
       tags: [jobs]
       summary: Per-host results of an Ansible job
       description: |
-        One entry per host the playbook ran against, by host name. While the
-        job runs, the counts come from the task results received so far; once
-        the playbook finishes they are Ansible's own recap. Jobs of other
-        types have no entries.
+        One entry per host the playbook ran against, by host name, a page at
+        a time. While the job runs, the counts come from the task results
+        received so far; once the playbook finishes they are Ansible's own
+        recap. Results are kept even when the job's output was cut at the
+        output limit. Jobs of other types have no entries.
+      parameters:
+        - name: status
+          in: query
+          description: Only hosts with one of these overall results
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/JobHostStatus"
+          style: form
+          explode: true
+        - $ref: "#/components/parameters/Search"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 500
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: Host results
@@ -2106,6 +2143,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/JobHostSummaryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/jobs/{jobId}/output:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      operationId: getJobOutput
+      tags: [jobs]
+      summary: Download a job's log
+      description: |
+        The job's whole log as text, one event's output per line, as a file
+        to save. While the job runs, it is the log so far.
+      parameters:
+        - name: ansi
+          in: query
+          description: Keep ANSI escape sequences (colors); false strips them
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: The log
+          content:
+            text/plain:
+              schema:
+                type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -2121,10 +2187,14 @@ paths:
       description: |
         A `text/event-stream` with these events:
 
-        - `job_event`: one output event (a `JobEvent`). The SSE `id` is its
+        - `job_event`: one event of the job's log (a `JobEvent`): an output
+          line, a runner message, or a structured event with output (see
+          the `log` option of the events endpoint). The SSE `id` is its
           `seq`, so a reconnecting `EventSource` resumes where it left off.
         - `status`: the job (a `Job`) whenever its status changes, and once
           when the stream opens.
+        - `hosts`: the job's per-host results have changed since the last
+          `hosts` event (or the stream opened); its data is `{"seq": n}`.
         - `end`: the job has finished and all of its output has been sent.
           The server then closes the stream.
         - `revoked`: the caller may no longer see the job (they signed out,
@@ -4146,7 +4216,7 @@ components:
 
     ExecutionEnvironment:
       type: object
-      required: [id, name, description, image, pullPolicy, registryCredentialId, createdAt, updatedAt]
+      required: [id, name, description, image, pullPolicy, registryCredentialId, templateCount, inventorySourceCount, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -4164,6 +4234,12 @@ components:
           format: uuid
           nullable: true
           description: A `registry` credential used to pull the image
+        templateCount:
+          type: integer
+          description: How many job templates use the execution environment
+        inventorySourceCount:
+          type: integer
+          description: How many inventory sources use the execution environment
         createdAt:
           type: string
           format: date-time
@@ -4736,6 +4812,7 @@ components:
         - createdAt
         - startedAt
         - finishedAt
+        - outputTruncated
       properties:
         id:
           type: string
@@ -4796,6 +4873,11 @@ components:
           type: string
           format: date-time
           nullable: true
+        outputTruncated:
+          type: boolean
+          description: |
+            The job's output reached the output limit, so the rest of its
+            log was not kept (its per-host results were)
 
     JobList:
       type: object
@@ -4821,17 +4903,19 @@ components:
         type:
           type: string
           description: |
-            `stdout` for command output, `runner` for messages from the
-            runner. Ansible jobs also have structured events, whose `stdout`
-            is empty and whose `data` holds the details: `playbook_start`,
-            `play_start`, `task_start`, `host_ok`, `host_failed`,
-            `host_skipped`, `host_unreachable` (these four have a
-            `hostName`) and `playbook_stats`.
+            `stdout` for a line of command output, `runner` for messages
+            from the runner. Ansible jobs also have structured events, with
+            the details in `data` and the text Ansible printed for them in
+            `stdout` (often empty): `playbook_start`, `play_start`,
+            `task_start` (`data` has the task, action and play), and
+            `host_ok`, `host_failed`, `host_skipped` and `host_unreachable`
+            (with a `hostName`, and a `taskSeq`).
         stdout:
           type: string
           description: |
-            One line of output. It may contain ANSI escape sequences, such
-            as the colors in the output of Ansible jobs.
+            Output, one line or (for a structured event) several. It may
+            contain ANSI escape sequences, such as the colors in the output
+            of Ansible jobs.
         hostName:
           type: string
           nullable: true
@@ -4839,6 +4923,28 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+        taskSeq:
+          type: integer
+          format: int64
+          description: For a host result, the `seq` of its task's `task_start` event
+        task:
+          $ref: "#/components/schemas/JobEventTask"
+
+    JobEventTask:
+      type: object
+      description: |
+        The task of a host result, from its `task_start` event. Only in
+        events listed with `hostName`.
+      required: [name, action, play]
+      properties:
+        name:
+          type: string
+        action:
+          type: string
+        play:
+          type: string
+        handler:
+          type: boolean
 
     JobEventList:
       type: object
@@ -4856,9 +4962,7 @@ components:
         hostName:
           type: string
         status:
-          type: string
-          description: The host's overall result, the worst of its task results
-          enum: [ok, changed, failed, unreachable, skipped]
+          $ref: "#/components/schemas/JobHostStatus"
         ok:
           type: integer
           description: Tasks that succeeded, including changed ones
@@ -4876,14 +4980,37 @@ components:
           type: integer
           description: Failed tasks with `ignore_errors`
 
+    JobHostStatus:
+      type: string
+      description: A host's overall result, the worst of its task results
+      enum: [ok, changed, failed, unreachable, skipped]
+
     JobHostSummaryList:
       type: object
-      required: [items]
+      required: [items, total, counts]
       properties:
         items:
           type: array
           items:
             $ref: "#/components/schemas/JobHostSummary"
+        total:
+          type: integer
+          description: Hosts matching the filter
+        counts:
+          type: object
+          description: All of the job's hosts, by overall result
+          required: [ok, changed, failed, unreachable, skipped]
+          properties:
+            ok:
+              type: integer
+            changed:
+              type: integer
+            failed:
+              type: integer
+            unreachable:
+              type: integer
+            skipped:
+              type: integer
 
     RelaunchRequest:
       type: object
@@ -5416,6 +5543,11 @@ components:
         data:
           type: object
           additionalProperties: true
+        taskSeq:
+          type: integer
+          format: int64
+          minimum: 1
+          description: For a host result, the `seq` of its task's `task_start` event
         time:
           type: string
           format: date-time

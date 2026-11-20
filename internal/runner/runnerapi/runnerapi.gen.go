@@ -136,10 +136,13 @@ type RunnerEvent struct {
 	HostName *string                 `json:"hostName,omitempty"`
 
 	// Seq Starts at 1 and increases by one per event
-	Seq    int64      `json:"seq"`
-	Stdout string     `json:"stdout"`
-	Time   *time.Time `json:"time,omitempty"`
-	Type   string     `json:"type"`
+	Seq    int64  `json:"seq"`
+	Stdout string `json:"stdout"`
+
+	// TaskSeq For a host result, the `seq` of its task's `task_start` event
+	TaskSeq *int64     `json:"taskSeq,omitempty"`
+	Time    *time.Time `json:"time,omitempty"`
+	Type    string     `json:"type"`
 }
 
 // RunnerEventBatch defines model for RunnerEventBatch.

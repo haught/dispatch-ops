@@ -89,15 +89,15 @@ func TestScriptJob(t *testing.T) {
 	}
 }
 
-func TestOldRunnerCantRunProjectJobs(t *testing.T) {
+func TestOldRunnerIsRefused(t *testing.T) {
 	e := newJobEnv(t)
 	url, _ := gitRepo(t, map[string]string{"x.sh": "true\n"})
 	jobID := e.launchTemplate(map[string]any{"jobType": "script", "projectId": e.project(url, "main"), "entrypoint": "x.sh"})
 	r := &client{t: t, base: e.c.base, bearer: e.claim(jobID)}
-	resp, body := r.do("GET", "/runner/v1/jobs/"+jobID+"/spec?protocol=1&version=0.1.0", nil)
+	resp, body := r.do("GET", "/runner/v1/jobs/"+jobID+"/spec?protocol=3&version=0.1.0", nil)
 	expectStatus(t, resp, body, 400)
 	job := e.c.mustDo("GET", "/api/v1/jobs/"+jobID, nil, 200)
-	if job["status"] != "error" || !strings.Contains(job["failureReason"].(string), "too old to run script jobs") {
+	if job["status"] != "error" || !strings.Contains(job["failureReason"].(string), "is not supported by this server") {
 		t.Errorf("job = %s", jsonOf(job))
 	}
 }
@@ -106,7 +106,7 @@ func TestJobHostSummaries(t *testing.T) {
 	e := newJobEnv(t)
 	jobID := e.launch(map[string]any{"command": []string{"true"}})
 	r := &client{t: t, base: e.c.base, bearer: e.claim(jobID)}
-	r.mustDo("GET", "/runner/v1/jobs/"+jobID+"/spec?protocol=2&version=x", nil, 200)
+	r.mustDo("GET", "/runner/v1/jobs/"+jobID+"/spec?protocol=4&version=x", nil, 200)
 
 	ev := func(seq int, typ, host string, data map[string]any) map[string]any {
 		m := map[string]any{"seq": seq, "type": typ, "stdout": ""}
@@ -287,8 +287,14 @@ func TestAnsibleJob(t *testing.T) {
 		}
 		if ev["type"] == "host_failed" && data["ignored"] == false {
 			failMsg = data["msg"].(string)
-			if data["task"] != "Break web2" || data["play"] != "Configure" {
-				t.Errorf("failed event = %v", data)
+			// The task is named once, in its task_start event.
+			task, _ := ev["task"].(map[string]any)
+			if task["name"] != "Break web2" || task["play"] != "Configure" || data["task"] != nil {
+				t.Errorf("failed event = %v", ev)
+			}
+			// With what Ansible printed for it.
+			if out := ev["stdout"].(string); !strings.Contains(out, "fatal: [web2]") || !strings.Contains(out, "boom") {
+				t.Errorf("failed event's output = %q", out)
 			}
 		}
 	}
@@ -300,7 +306,7 @@ func TestAnsibleJob(t *testing.T) {
 	for _, it := range all {
 		seen[it.(map[string]any)["type"].(string)] = true
 	}
-	for _, typ := range []string{"playbook_start", "play_start", "task_start", "host_skipped", "playbook_stats", "runner", "stdout"} {
+	for _, typ := range []string{"playbook_start", "play_start", "task_start", "host_skipped", "runner", "stdout"} {
 		if !seen[typ] {
 			t.Errorf("no %s event", typ)
 		}

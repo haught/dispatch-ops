@@ -21,7 +21,7 @@ without the operator.
 | `DISPATCH_TLS_CERT_FILE`, `DISPATCH_TLS_KEY_FILE` | | A PEM certificate (chain) and key, reloaded when the files change. Without them, the server makes a self-signed ECDSA P-384 certificate at startup, held only in memory |
 | `DISPATCH_SECURE_COOKIES` | `true` | Secure, `__Host-` cookies (`__Host-dispatch_session`), which a sibling subdomain or a plain-HTTP response can't plant. Set `false` only for plain-HTTP development; the cookies are then `dispatch_session` and `dispatch_oidc` |
 | `DISPATCH_SESSION_TTL` | `12h` | Browser session lifetime |
-| `DISPATCH_JOB_MAX_OUTPUT` | `256Mi` | Output one job may store (its events' text and data). Past it, the job keeps running and a note says the output was cut; only its Ansible recap is still kept. `0` for no cap |
+| `DISPATCH_JOB_MAX_OUTPUT` | `256Mi` | Output one job may store (its events' text and data). Past it, the job keeps running and a note says the output was cut; its per-host results are still complete. `0` for no cap |
 | `DISPATCH_LOGIN_THROTTLE_WINDOW` | `15m` | Period over which failed password sign-ins are counted |
 | `DISPATCH_LOGIN_MAX_FAILURES_PER_USER` | `10` | Failed sign-ins a username may have from one client address in the window before further attempts for it from there get `429`; a success from that address resets it. Other addresses are unaffected, so a stranger can't lock the account's owner out this way. `0` turns this limit off |
 | `DISPATCH_LOGIN_MAX_FAILURES_PER_USER_TOTAL` | `100` | Failed sign-ins a username may have from all addresses together in the window before attempts for it get `429`, except from addresses it has signed in from with its password in the last 90 days. It is set high so that locking an account out takes many addresses. `0` turns this limit off |
@@ -80,7 +80,7 @@ defaults.
 | `DISPATCH_JOB_CPU_LIMIT`, `DISPATCH_JOB_MEMORY_LIMIT` | `2`, `2Gi` | Job pods' limits; `0` for none |
 | `DISPATCH_JOB_WORK_SIZE_LIMIT` | `4Gi` | Cap on a job pod's working directory; `0` for none |
 | `DISPATCH_LEADER_ELECTION` | `true` | Elect one active task manager with a Lease |
-| `DISPATCH_JOB_RETENTION` | `90d` | Delete finished jobs this long after they finish; `0` keeps them |
+| `DISPATCH_JOB_RETENTION` | `90d` | Delete finished jobs this long after they finish (a whole day at a time, so up to a day later); `0` keeps them |
 | `DISPATCH_AUDIT_RETENTION` | `0` | Delete audit log entries this old; `0` keeps them |
 
 ## Command line

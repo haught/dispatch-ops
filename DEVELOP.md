@@ -49,8 +49,8 @@ The Makefile expects a container named `postgresql` with the superuser
 ```sh
 docker run -d --name postgresql --restart unless-stopped \
   -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
-  -v dispatch-ops-pg:/var/lib/postgresql/data \
-  postgres:17
+  -v dispatch-ops-pg:/var/lib/postgresql \
+  postgres:18
 ```
 
 It runs on your machine's Docker, next to the dev container, so it survives
@@ -368,10 +368,11 @@ what an image must provide.
 ### Runner protocol
 
 The runner reports a protocol version and the API rejects runners it doesn't
-support, with an explanation on the job. Ansible and script jobs need
-protocol 2 or later, and inventory syncs need protocol 3. Bump the protocol
-when the runner needs something from the API that older servers don't have,
-or when a new job type needs a newer runner.
+support, with an explanation on the job. The API supports protocol 4 only
+(`api.MinRunnerProtocol` to `api.MaxRunnerProtocol`), so execution
+environments must be built with the current runner. Bump the protocol when
+the runner needs something from the API that older servers don't have, or
+when what it sends changes.
 
 ## Using the API from the command line
 

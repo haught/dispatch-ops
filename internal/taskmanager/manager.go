@@ -78,7 +78,8 @@ type Config struct {
 	// OrphanGrace is how long after a job finishes its pod may keep running
 	// (the runner exits right after reporting) before it is deleted.
 	OrphanGrace time.Duration
-	// RetentionInterval is how often old data is deleted.
+	// RetentionInterval is how often housekeeping runs: creating job
+	// output partitions and deleting old data.
 	RetentionInterval time.Duration
 }
 
@@ -123,6 +124,21 @@ func (m *Manager) Run(ctx context.Context) error {
 		"job_retention", m.Config.JobRetention, "audit_retention", m.Config.AuditRetention)
 	m.leading.Store(true)
 	defer m.leading.Store(false)
+
+	// Jobs can't store output without their day's partition: make sure it
+	// exists before dispatching any.
+	for backoff := time.Second; ; backoff = min(2*backoff, time.Minute) {
+		err := m.EnsurePartitions(ctx)
+		if err == nil {
+			break
+		}
+		m.Log.Error("creating job output partitions; retrying", "err", err, "retry_in", backoff)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+	}
 
 	// Job status changes wake both the dispatcher and the notifier, which
 	// sends the notifications the change queued.

@@ -9,15 +9,6 @@ import (
 // deleting a large backlog doesn't hold long locks.
 const retentionBatch = 500
 
-// DeleteJobsFinishedBefore deletes jobs that finished more than age ago,
-// with their output and notification deliveries, and returns how many.
-func (s *Store) DeleteJobsFinishedBefore(ctx context.Context, age time.Duration) (int64, error) {
-	return deleteInBatches(ctx, s, `
-		DELETE FROM jobs WHERE id IN (
-			SELECT id FROM jobs WHERE finished_at < now() - make_interval(secs => $1)
-			ORDER BY finished_at LIMIT $2)`, age.Seconds())
-}
-
 // DeleteAuditEntriesBefore deletes audit log entries older than age and
 // returns how many.
 func (s *Store) DeleteAuditEntriesBefore(ctx context.Context, age time.Duration) (int64, error) {
@@ -27,10 +18,13 @@ func (s *Store) DeleteAuditEntriesBefore(ctx context.Context, age time.Duration)
 			ORDER BY id LIMIT $2)`, age.Seconds())
 }
 
-func deleteInBatches(ctx context.Context, s *Store, sql string, ageSeconds float64) (int64, error) {
+// deleteInBatches runs sql until it deletes fewer than retentionBatch rows,
+// and returns how many it deleted. sql takes args, then the batch size.
+func deleteInBatches(ctx context.Context, s *Store, sql string, args ...any) (int64, error) {
+	args = append(args, retentionBatch)
 	var total int64
 	for {
-		tag, err := s.pool.Exec(ctx, sql, ageSeconds, retentionBatch)
+		tag, err := s.pool.Exec(ctx, sql, args...)
 		if err != nil {
 			return total, err
 		}

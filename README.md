@@ -83,7 +83,7 @@ and upgrades all of this from a single `DispatchOps` resource.
   plugin that enforces NetworkPolicy (Calico, Cilium and so on) is
   recommended, to isolate job pods.
 - **Helm 3**, to install the operator.
-- **PostgreSQL 15 or later.** For a trial, the operator can run one for you;
+- **PostgreSQL 18.** For a trial, the operator can run one for you;
   for production, use your own backed-up database.
 - **Access to `ghcr.io`**, where the images are published (or a mirror).
 - Optional: an ingress controller and DNS name, an OIDC provider,

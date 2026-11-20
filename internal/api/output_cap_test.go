@@ -12,7 +12,8 @@ import (
 )
 
 // L8: a job's stored output is capped; past the cap the job keeps running,
-// a note says the output was cut, and only the recap is still kept.
+// and a note says the output was cut. (Host results are still counted; see
+// the store's tests.)
 func TestJobOutputCap(t *testing.T) {
 	e := newJobEnv(t)
 	ctx := context.Background()
@@ -52,7 +53,7 @@ func TestJobOutputCap(t *testing.T) {
 			t.Errorf("truncation note = %q", ev["stdout"])
 		}
 	}
-	want := []string{"stdout", "stdout", "runner", "playbook_stats"}
+	want := []string{"stdout", "stdout", "runner"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("stored events = %v, want %v", got, want)
 	}

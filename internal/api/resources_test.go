@@ -276,8 +276,22 @@ func TestExecutionEnvironmentsAndTemplates(t *testing.T) {
 		t.Errorf("created template = %v", jt)
 	}
 
-	// Things a template uses can't be deleted.
-	c.mustDo("DELETE", "/api/v1/execution-environments/"+eeID, nil, 409)
+	// Things a template uses can't be deleted. An execution environment
+	// counts what uses it, and the refusal names them.
+	synced := unique("synced")
+	syncedID := c.mustDo("POST", "/api/v1/inventories", map[string]any{"name": synced}, 201)["id"].(string)
+	proj := c.mustDo("POST", "/api/v1/projects", map[string]any{"name": unique("p"), "scmUrl": "https://example.com/ops.git", "scmRef": "main"}, 201)["id"].(string)
+	c.mustDo("PUT", "/api/v1/inventories/"+syncedID+"/source", map[string]any{"projectId": proj, "sourcePath": "hosts.yml", "executionEnvironmentId": eeID}, 200)
+	ee = c.mustDo("GET", "/api/v1/execution-environments/"+eeID, nil, 200)
+	if ee["templateCount"] != 1.0 || ee["inventorySourceCount"] != 1.0 {
+		t.Errorf("EE counts = %v", ee)
+	}
+	inUse := c.mustDo("DELETE", "/api/v1/execution-environments/"+eeID, nil, 409)
+	want := fmt.Sprintf(`Still used by job template %q, and by the source of inventory %q; change or delete them first`, jt["name"], synced)
+	if inUse["detail"] != want {
+		t.Errorf("in-use detail = %q, want %q", inUse["detail"], want)
+	}
+	c.mustDo("DELETE", "/api/v1/inventories/"+syncedID+"/source", nil, 204)
 	c.mustDo("DELETE", "/api/v1/credentials/"+ssh, nil, 409)
 	c.mustDo("DELETE", "/api/v1/inventories/"+inv, nil, 409)
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"dispatch-ops/internal/api/apigen"
 	"dispatch-ops/internal/credentials"
@@ -51,6 +52,7 @@ func problemFor(err error) (p apigen.Problem, ok bool) {
 	var ae *apiError
 	var ve *credentials.ValidationError
 	var le *store.LaunchError
+	var iu *store.InUseError
 	switch {
 	case errors.As(err, &ae):
 		return problemDetail(ae.status, ae.title, ae.detail), true
@@ -62,6 +64,8 @@ func problemFor(err error) (p apigen.Problem, ok bool) {
 		return problem(http.StatusNotFound, "Not found"), true
 	case errors.Is(err, store.ErrConflict):
 		return problemDetail(http.StatusConflict, "Conflict", "The name is already in use"), true
+	case errors.As(err, &iu):
+		return problemDetail(http.StatusConflict, "In use", inUseDetail(iu)), true
 	case errors.Is(err, store.ErrInUse):
 		return problemDetail(http.StatusConflict, "In use", "Job templates or inventory sources still use it; change or delete them first"), true
 	case errors.Is(err, store.ErrInvalidReference):
@@ -72,4 +76,39 @@ func problemFor(err error) (p apigen.Problem, ok bool) {
 		return problemDetail(http.StatusConflict, "Conflict", "The job is not in a state that allows this"), true
 	}
 	return apigen.Problem{}, false
+}
+
+// inUseDetail says what still uses a resource, e.g. `Still used by job
+// template "deploy", and by the sources of inventories "prod", "staging";
+// change or delete them first`.
+func inUseDetail(e *store.InUseError) string {
+	var parts []string
+	if e.JobTemplateCount > 0 {
+		parts = append(parts, namedList("job template", "job templates", e.JobTemplates, e.JobTemplateCount))
+	}
+	if e.InventorySourceCount > 0 {
+		parts = append(parts, namedList("the source of inventory", "the sources of inventories", e.InventorySources, e.InventorySourceCount))
+	}
+	them := "them"
+	if e.JobTemplateCount+e.InventorySourceCount == 1 {
+		them = "it"
+	}
+	return fmt.Sprintf("Still used by %s; change or delete %s first", strings.Join(parts, ", and by "), them)
+}
+
+// namedList lists quoted names, noting how many more there are than names.
+func namedList(one, many string, names []string, total int) string {
+	label := many
+	if total == 1 {
+		label = one
+	}
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = fmt.Sprintf("%q", n)
+	}
+	s := label + " " + strings.Join(quoted, ", ")
+	if more := total - len(names); more > 0 {
+		s += fmt.Sprintf(" and %d more", more)
+	}
+	return s
 }

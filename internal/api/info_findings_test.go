@@ -17,7 +17,7 @@ func TestCanceledWaitingJobGetsNoSpec(t *testing.T) {
 	e.c.mustDo("POST", "/api/v1/jobs/"+id+"/cancel", nil, 202)
 
 	r := &client{t: t, base: e.c.base, bearer: token}
-	resp, body := r.do("GET", "/runner/v1/jobs/"+id+"/spec?protocol=3&version=x", nil)
+	resp, body := r.do("GET", "/runner/v1/jobs/"+id+"/spec?protocol=4&version=x", nil)
 	expectStatus(t, resp, body, 409)
 	if _, ok := body["credentials"]; ok {
 		t.Error("spec returned for a canceled job")
@@ -72,7 +72,7 @@ func TestSpecSeparatesOverrideVars(t *testing.T) {
 	id := launched["id"].(string)
 
 	r := &client{t: t, base: e.c.base, bearer: e.claim(id)}
-	resp, spec := r.do("GET", "/runner/v1/jobs/"+id+"/spec?protocol=3&version=x", nil)
+	resp, spec := r.do("GET", "/runner/v1/jobs/"+id+"/spec?protocol=4&version=x", nil)
 	expectStatus(t, resp, spec, 200)
 	extra, _ := spec["extraVars"].(map[string]any)
 	if extra["base"] != "{{ 1 + 1 }}" || extra["greeting"] != "hi" {
@@ -86,7 +86,7 @@ func TestSpecSeparatesOverrideVars(t *testing.T) {
 	// No launcher vars: no overrideVars.
 	plain := e.launch(map[string]any{"command": []string{"true"}})
 	r = &client{t: t, base: e.c.base, bearer: e.claim(plain)}
-	resp, spec = r.do("GET", "/runner/v1/jobs/"+plain+"/spec?protocol=3&version=x", nil)
+	resp, spec = r.do("GET", "/runner/v1/jobs/"+plain+"/spec?protocol=4&version=x", nil)
 	expectStatus(t, resp, spec, 200)
 	if _, ok := spec["overrideVars"]; ok {
 		t.Errorf("overrideVars = %v, want none", spec["overrideVars"])

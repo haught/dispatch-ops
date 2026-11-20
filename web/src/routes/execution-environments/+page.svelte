@@ -2,11 +2,9 @@
 	import {
 		api,
 		errorMessage,
-		listTemplates,
 		pullPolicies,
 		type Credential,
 		type ExecutionEnvironment,
-		type JobTemplate,
 		type PullPolicy
 	} from '#lib/api/client.js';
 	import { session } from '#lib/session.svelte.js';
@@ -14,7 +12,6 @@
 	let images = $state<ExecutionEnvironment[]>([]);
 	let total = $state(0);
 	let credentials = $state<Credential[]>([]);
-	let templates = $state<JobTemplate[]>([]);
 	let search = $state('');
 	let loading = $state(true);
 	let error = $state('');
@@ -52,15 +49,10 @@
 	});
 
 	$effect(() => {
-		listTemplates().then((t) => (templates = t));
 		api
 			.GET('/api/v1/credentials', { params: { query: { kind: 'registry', limit: 500 } } })
 			.then(({ data }) => (credentials = data?.items ?? []));
 	});
-
-	function usedBy(e: ExecutionEnvironment): number {
-		return templates.filter((t) => t.executionEnvironmentId === e.id).length;
-	}
 
 	function credentialName(id: string): string {
 		return credentials.find((c) => c.id === id)?.name ?? 'a credential';
@@ -139,7 +131,7 @@
 </div>
 <p class="muted">
 	The container images jobs run in. Each is built with the Dispatch Ops runner as its entrypoint,
-	plus the tools its jobs need. Job templates choose one.
+	plus the tools its jobs need. Job templates and inventory sources choose one.
 </p>
 
 {#if !(adding || editing)}
@@ -166,6 +158,7 @@
 							<th>Image</th>
 							<th>Pull</th>
 							<th>Templates</th>
+							<th>Inventory sources</th>
 							<th></th>
 						</tr>
 					</thead>
@@ -188,7 +181,8 @@
 									{/if}
 								</td>
 								<td class="small">{e.pullPolicy}</td>
-								<td>{usedBy(e)}</td>
+								<td>{e.templateCount}</td>
+								<td>{e.inventorySourceCount}</td>
 								<td>
 									{#if isAdmin}
 										<div class="row-actions">

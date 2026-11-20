@@ -352,7 +352,7 @@ func TestRunnerInventoryReport(t *testing.T) {
 	jobID := e.launch(map[string]any{"command": []string{"true"}})
 	token := e.claim(jobID)
 	rc := &client{t: t, base: e.c.base, bearer: token}
-	rc.mustDo("GET", "/runner/v1/jobs/"+jobID+"/spec?protocol=3&version=test", nil, 200)
+	rc.mustDo("GET", "/runner/v1/jobs/"+jobID+"/spec?protocol=4&version=test", nil, 200)
 	rc.mustDo("POST", "/runner/v1/jobs/"+jobID+"/inventory", map[string]any{"_meta": map[string]any{"hostvars": map[string]any{}}}, 409)
 
 	// A runner too old for inventory syncs is refused.

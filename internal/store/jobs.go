@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -115,6 +114,14 @@ type Job struct {
 	// Overrides are the launch overrides the job was started with; nil for
 	// jobs from before they were kept, and for inventory syncs.
 	Overrides *LaunchOverrides
+	// OutputTruncated is set once the job's output reached the cap.
+	OutputTruncated bool
+	// LastEventSeq is the seq of the job's last event received; events up
+	// to it are all stored (or were dropped at the cap).
+	LastEventSeq int64
+	// HostResultsSeq is the seq of the last event that changed the job's
+	// host results.
+	HostResultsSeq int64
 }
 
 // ScheduleRef identifies a schedule.
@@ -127,7 +134,8 @@ const jobColumns = `j.id, j.job_template_id, j.name, j.status, j.launch_type, j.
 	j.config, j.cancel_requested, j.cancel_requested_at, j.exit_code, j.failure_reason,
 	j.k8s_namespace, j.k8s_job_name, j.runner_version, j.scm_revision,
 	j.created_at, j.dispatched_at, j.started_at, j.finished_at, j.last_heartbeat_at,
-	j.schedule_id, sc.name, j.relaunch_of, j.sync_inventory_id, j.overrides`
+	j.schedule_id, sc.name, j.relaunch_of, j.sync_inventory_id, j.overrides,
+	j.output_truncated, j.last_event_seq, j.host_results_seq`
 
 const jobFrom = `jobs j LEFT JOIN users u ON u.id = j.launched_by LEFT JOIN schedules sc ON sc.id = j.schedule_id`
 
@@ -145,7 +153,8 @@ func (j *jobRow) scanTargets() []any {
 		&j.Config, &j.CancelRequested, &j.CancelRequestedAt, &j.ExitCode, &j.FailureReason,
 		&j.K8sNamespace, &j.K8sJobName, &j.RunnerVersion, &j.ScmRevision,
 		&j.CreatedAt, &j.DispatchedAt, &j.StartedAt, &j.FinishedAt, &j.LastHeartbeatAt,
-		&j.scheduleID, &j.scheduleName, &j.RelaunchOf, &j.SyncInventoryID, &j.Overrides}
+		&j.scheduleID, &j.scheduleName, &j.RelaunchOf, &j.SyncInventoryID, &j.Overrides,
+		&j.OutputTruncated, &j.LastEventSeq, &j.HostResultsSeq}
 }
 
 func (j *jobRow) job() Job {
@@ -491,24 +500,34 @@ type JobEvent struct {
 	HostName *string
 	Stdout   string
 	Data     map[string]any
+	// TaskSeq is a host result's task_start event.
+	TaskSeq *int64
+	// Task is filled in from it when listing a host's events.
+	Task *JobEventTask
 }
 
-// recapAllowance is how far past the output cap a job's Ansible recap
-// (playbook_stats events) may still be stored, in all, so its per-host
-// results survive a truncated log without letting a job bypass the cap:
-// the runner could send any number of such events. The recap comes in
-// events of 50 hosts (a few KiB each), so 1 MiB keeps it for several thousand
-// hosts.
-const recapAllowance = 1 << 20
+// JobEventTask is the task of a host result.
+type JobEventTask struct {
+	Name, Action, Play string
+	Handler            bool
+}
 
-// AppendJobEvents stores events for a running job, skipping any whose seq is
-// already stored, and notifies stream listeners. It also counts as a
-// heartbeat, and reports whether the job should be canceled.
+// AppendJobEvents stores a batch of events for a running job and notifies
+// stream listeners. It also counts as a heartbeat, and reports whether the
+// job should be canceled.
+//
+// The runner sends batches in seq order, one at a time, retrying a batch
+// until it is acknowledged; so events at or below the job's last_event_seq
+// are from a retried batch already stored, and are skipped.
+//
+// Host results (host_* events and the recap) are added to
+// job_host_results, whatever the output cap. The recap (playbook_stats) is
+// not stored as an event.
 //
 // maxOutput, if positive, caps the bytes of output a job may store (stdout,
 // host name and data of its events). The event that would cross it is
-// replaced by a runner event saying so; later events are dropped, except
-// the recap, within recapAllowance. The job keeps running.
+// replaced by a runner event saying so, and later events are dropped. The
+// job keeps running.
 func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobEvent, maxOutput int64) (cancelRequested bool, err error) {
 	type row struct {
 		seq    int64
@@ -517,11 +536,12 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 		host   *string
 		stdout string
 		data   *string
+		task   *int64
 		size   int64
 	}
 	all := make([]row, len(events))
 	for i, e := range events {
-		r := row{seq: e.Seq, at: e.Time, typ: e.Type, stdout: stripNUL(e.Stdout)}
+		r := row{seq: e.Seq, at: e.Time, typ: e.Type, stdout: stripNUL(e.Stdout), task: e.TaskSeq}
 		if e.HostName != nil {
 			h := stripNUL(*e.HostName)
 			r.host = &h
@@ -542,11 +562,13 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 	}
 
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
-		var used int64
+		var used, lastSeq, hostsSeq int64
+		var hostCount int
 		var truncated bool
 		err := tx.QueryRow(ctx, `
 			UPDATE jobs SET last_heartbeat_at = now() WHERE id = $1 AND status = 'running'
-			RETURNING cancel_requested, output_bytes, output_truncated`, id).Scan(&cancelRequested, &used, &truncated)
+			RETURNING cancel_requested, output_bytes, output_truncated, last_event_seq, host_results_seq, host_count`, id).
+			Scan(&cancelRequested, &used, &truncated, &lastSeq, &hostsSeq, &hostCount)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrJobState
 		}
@@ -554,60 +576,56 @@ func (s *Store) AppendJobEvents(ctx context.Context, id uuid.UUID, events []JobE
 			return err
 		}
 
-		keep := all
-		if maxOutput > 0 {
-			// A retried batch's events are already stored; don't count them twice.
-			seqs := make([]int64, len(all))
-			for i, r := range all {
-				seqs[i] = r.seq
+		var tally hostTally
+		keep := make([]row, 0, len(all))
+		maxSeq := lastSeq
+		for _, r := range all {
+			if r.seq <= lastSeq {
+				continue
 			}
-			rows, err := tx.Query(ctx, `SELECT seq FROM job_events WHERE job_id = $1 AND seq = ANY($2)`, id, seqs)
-			if err != nil {
-				return err
-			}
-			stored, err := pgx.CollectRows(rows, pgx.RowTo[int64])
-			if err != nil {
-				return err
-			}
-			wasTruncated := truncated
-			keep = make([]row, 0, len(all))
-			for _, r := range all {
-				switch {
-				case slices.Contains(stored, r.seq):
-				case r.typ == "playbook_stats" && used+r.size <= maxOutput+recapAllowance:
-					keep, used = append(keep, r), used+r.size
-				case truncated:
-				case used+r.size > maxOutput:
-					truncated = true
-					keep = append(keep, row{seq: r.seq, at: r.at, typ: "runner", stdout: fmt.Sprintf(
-						"This job's output reached the limit of %s; later output is not kept (the job keeps running)", formatBytes(maxOutput))})
-				default:
-					keep, used = append(keep, r), used+r.size
-				}
-			}
-			if _, err := tx.Exec(ctx, `UPDATE jobs SET output_bytes = $2, output_truncated = $3 WHERE id = $1`,
-				id, used, truncated || wasTruncated); err != nil {
-				return err
+			maxSeq = max(maxSeq, r.seq)
+			tally.add(r.typ, r.host, r.data)
+			switch {
+			case r.typ == "playbook_stats":
+			case truncated && maxOutput > 0:
+			case maxOutput > 0 && used+r.size > maxOutput:
+				truncated = true
+				keep = append(keep, row{seq: r.seq, at: r.at, typ: "runner", stdout: fmt.Sprintf(
+					"This job's output reached the limit of %s; later output is not kept (the job keeps running)", formatBytes(maxOutput))})
+			default:
+				keep, used = append(keep, r), used+r.size
 			}
 		}
-		if len(keep) == 0 {
+		if maxSeq == lastSeq {
 			return nil
 		}
-
-		n := len(keep)
-		seqs, times := make([]int64, n), make([]time.Time, n)
-		types, hosts, stdouts, data := make([]string, n), make([]*string, n), make([]string, n), make([]*string, n)
-		for i, r := range keep {
-			seqs[i], times[i], types[i], hosts[i], stdouts[i], data[i] = r.seq, r.at, r.typ, r.host, r.stdout, r.data
+		if !tally.empty() {
+			hostsSeq = maxSeq
+		}
+		if hostCount, err = tally.save(ctx, tx, id, hostCount); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO job_events (job_id, seq, created_at, event_type, host_name, stdout, data)
-			SELECT $1, e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data::jsonb
-			FROM unnest($2::bigint[], $3::timestamptz[], $4::text[], $5::text[], $6::text[], $7::text[])
-				AS e(seq, created_at, event_type, host_name, stdout, data)
-			ON CONFLICT (job_id, seq) DO NOTHING`,
-			id, seqs, times, types, hosts, stdouts, data); err != nil {
+			UPDATE jobs SET last_event_seq = $2, output_bytes = $3, output_truncated = $4, host_results_seq = $5, host_count = $6
+			WHERE id = $1`, id, maxSeq, used, truncated, hostsSeq, hostCount); err != nil {
 			return err
+		}
+
+		if len(keep) > 0 {
+			n := len(keep)
+			seqs, times, tasks := make([]int64, n), make([]time.Time, n), make([]*int64, n)
+			types, hosts, stdouts, data := make([]string, n), make([]*string, n), make([]string, n), make([]*string, n)
+			for i, r := range keep {
+				seqs[i], times[i], types[i], hosts[i], stdouts[i], data[i], tasks[i] = r.seq, r.at, r.typ, r.host, r.stdout, r.data, r.task
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO job_events (job_id, seq, created_at, event_type, host_name, stdout, data, task_seq)
+				SELECT $1, e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data::jsonb, e.task_seq
+				FROM unnest($2::bigint[], $3::timestamptz[], $4::text[], $5::text[], $6::text[], $7::text[], $8::bigint[])
+					AS e(seq, created_at, event_type, host_name, stdout, data, task_seq)`,
+				id, seqs, times, types, hosts, stdouts, data, tasks); err != nil {
+				return err
+			}
 		}
 		_, err = tx.Exec(ctx, `SELECT pg_notify('dispatch_job_events', $1)`, id.String())
 		return err
@@ -640,30 +658,62 @@ func stripNUL(s string) string {
 // JobEventFilter narrows ListJobEvents.
 type JobEventFilter struct {
 	AfterSeq int64
-	HostName string // only events about this host, if set
+	// BeforeSeq, if set, selects the last events before it instead of the
+	// first after AfterSeq.
+	BeforeSeq int64
+	HostName  string // only events about this host, if set
+	// LogOnly selects the events that make up the job's log.
+	LogOnly bool
 }
 
-// ListJobEvents returns up to limit events with seq greater than
-// f.AfterSeq. It returns ErrNotFound if the job does not exist.
+// logEvent is the condition on job_events e for events in a job's log:
+// output lines, runner messages, and structured events with output.
+const logEvent = `(e.event_type IN ('stdout', 'runner') OR e.stdout <> '')`
+
+// ListJobEvents returns up to limit events, in seq order, matching f. With
+// f.HostName, each host result also has its Task. It returns ErrNotFound if
+// the job does not exist.
 func (s *Store) ListJobEvents(ctx context.Context, jobID uuid.UUID, f JobEventFilter, limit int) ([]JobEvent, error) {
-	sql := `SELECT seq, created_at, event_type, host_name, stdout, data
-		FROM job_events WHERE job_id = $1 AND seq > $2`
+	sql := `SELECT e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data, e.task_seq, NULL::jsonb
+		FROM job_events e WHERE e.job_id = $1 AND e.seq > $2`
 	args := []any{jobID, f.AfterSeq, limit}
 	if f.HostName != "" {
-		sql += ` AND host_name = $4`
+		sql = `SELECT e.seq, e.created_at, e.event_type, e.host_name, e.stdout, e.data, e.task_seq, t.data
+			FROM job_events e
+			LEFT JOIN job_events t ON t.job_id = e.job_id AND t.seq = e.task_seq AND t.event_type = 'task_start'
+			WHERE e.job_id = $1 AND e.seq > $2`
 		args = append(args, f.HostName)
+		sql += ` AND e.host_name = $` + strconv.Itoa(len(args))
 	}
-	rows, err := s.pool.Query(ctx, sql+` ORDER BY seq LIMIT $3`, args...)
+	if f.LogOnly {
+		sql += ` AND ` + logEvent
+	}
+	order := `e.seq`
+	if f.BeforeSeq > 0 {
+		args = append(args, f.BeforeSeq)
+		sql += ` AND e.seq < $` + strconv.Itoa(len(args))
+		order = `e.seq DESC`
+	}
+	rows, err := s.pool.Query(ctx, sql+` ORDER BY `+order+` LIMIT $3`, args...)
 	if err != nil {
 		return nil, err
 	}
 	events, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (JobEvent, error) {
 		var e JobEvent
-		err := row.Scan(&e.Seq, &e.Time, &e.Type, &e.HostName, &e.Stdout, &e.Data)
+		var task map[string]any
+		err := row.Scan(&e.Seq, &e.Time, &e.Type, &e.HostName, &e.Stdout, &e.Data, &e.TaskSeq, &task)
+		if task != nil {
+			str := func(k string) string { v, _ := task[k].(string); return v }
+			handler, _ := task["handler"].(bool)
+			e.Task = &JobEventTask{Name: str("task"), Action: str("action"), Play: str("play"), Handler: handler}
+		}
 		return e, err
 	})
 	if err != nil {
 		return nil, err
+	}
+	if f.BeforeSeq > 0 {
+		slices.Reverse(events)
 	}
 	if len(events) == 0 {
 		var exists bool
@@ -675,122 +725,4 @@ func (s *Store) ListJobEvents(ctx context.Context, jobID uuid.UUID, f JobEventFi
 		}
 	}
 	return events, nil
-}
-
-// JobHostSummary is one host's task results in an Ansible job.
-type JobHostSummary struct {
-	HostName    string
-	OK          int
-	Changed     int
-	Failed      int
-	Unreachable int
-	Skipped     int
-	Rescued     int
-	Ignored     int
-}
-
-// Status is the host's overall result: the worst of its task results.
-func (h JobHostSummary) Status() string {
-	switch {
-	case h.Unreachable > 0:
-		return "unreachable"
-	case h.Failed > 0:
-		return "failed"
-	case h.Changed > 0:
-		return "changed"
-	case h.OK > 0:
-		return "ok"
-	}
-	return "skipped"
-}
-
-// ListJobHostSummaries returns a job's per-host results, by host name.
-// They are counted from the host_* events received so far; once the
-// playbook_stats event arrives, its numbers (Ansible's own recap, which
-// also knows about rescued tasks) replace the counts for the hosts it lists.
-// It returns ErrNotFound if the job does not exist.
-func (s *Store) ListJobHostSummaries(ctx context.Context, jobID uuid.UUID) ([]JobHostSummary, error) {
-	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE id = $1)`, jobID).Scan(&exists); err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, ErrNotFound
-	}
-
-	rows, err := s.pool.Query(ctx, `
-		SELECT host_name,
-			-- Like Ansible's recap, failures with ignore_errors count as ok too.
-			count(*) FILTER (WHERE succeeded),
-			count(*) FILTER (WHERE succeeded AND changed),
-			count(*) FILTER (WHERE event_type = 'host_failed' AND NOT ignored),
-			count(*) FILTER (WHERE event_type = 'host_unreachable'),
-			count(*) FILTER (WHERE event_type = 'host_skipped'),
-			count(*) FILTER (WHERE event_type = 'host_failed' AND ignored)
-		FROM (
-			SELECT host_name, event_type,
-				coalesce(data->>'changed' = 'true', false) AS changed,
-				coalesce(data->>'ignored' = 'true', false) AS ignored,
-				event_type = 'host_ok' OR (event_type = 'host_failed' AND coalesce(data->>'ignored' = 'true', false)) AS succeeded
-			FROM job_events
-			WHERE job_id = $1 AND host_name IS NOT NULL
-				AND event_type IN ('host_ok', 'host_failed', 'host_unreachable', 'host_skipped')
-		) e
-		GROUP BY host_name ORDER BY host_name`, jobID)
-	if err != nil {
-		return nil, err
-	}
-	hosts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (JobHostSummary, error) {
-		var h JobHostSummary
-		err := row.Scan(&h.HostName, &h.OK, &h.Changed, &h.Failed, &h.Unreachable, &h.Skipped, &h.Ignored)
-		return h, err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// The recap comes in chunks of hosts.
-	rows, err = s.pool.Query(ctx, `
-		SELECT data FROM job_events WHERE job_id = $1 AND event_type = 'playbook_stats' ORDER BY seq`, jobID)
-	if err != nil {
-		return nil, err
-	}
-	type hostStats struct {
-		OK          int `json:"ok"`
-		Changed     int `json:"changed"`
-		Failures    int `json:"failures"`
-		Unreachable int `json:"unreachable"`
-		Skipped     int `json:"skipped"`
-		Rescued     int `json:"rescued"`
-		Ignored     int `json:"ignored"`
-	}
-	recap := map[string]hostStats{}
-	var chunk struct {
-		Hosts map[string]hostStats `json:"hosts"`
-	}
-	_, err = pgx.ForEachRow(rows, []any{&chunk}, func() error {
-		maps.Copy(recap, chunk.Hosts)
-		chunk.Hosts = nil
-		return nil
-	})
-	if err != nil || len(recap) == 0 {
-		return hosts, err
-	}
-	byName := map[string]int{}
-	for i, h := range hosts {
-		byName[h.HostName] = i
-	}
-	for name, st := range recap {
-		h := JobHostSummary{
-			HostName: name, OK: st.OK, Changed: st.Changed, Failed: st.Failures, Unreachable: st.Unreachable,
-			Skipped: st.Skipped, Rescued: st.Rescued, Ignored: st.Ignored,
-		}
-		if i, ok := byName[name]; ok {
-			hosts[i] = h
-		} else {
-			hosts = append(hosts, h)
-		}
-	}
-	slices.SortFunc(hosts, func(a, b JobHostSummary) int { return strings.Compare(a.HostName, b.HostName) })
-	return hosts, nil
 }

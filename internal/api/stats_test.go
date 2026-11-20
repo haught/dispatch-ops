@@ -53,17 +53,18 @@ func TestDashboardStats(t *testing.T) {
 	launch(jt, "successful", 8*24*time.Hour, time.Minute) // the previous week
 	launch(other, "successful", time.Hour, time.Minute)   // not carol's
 
-	events := []struct {
-		job, typ, host, data string
+	results := []struct {
+		job, host                        string
+		ok, failed, unreachable, ignored int
 	}{
-		{failed, "host_failed", "web1", `{}`},
-		{failed, "host_failed", "web2", `{"ignored": true}`},
-		{failed, "host_ok", "web3", `{}`},
-		{errored, "host_unreachable", "web1", `{}`},
+		{failed, "web1", 0, 1, 0, 0},
+		{failed, "web2", 1, 0, 0, 1}, // an ignored failure
+		{failed, "web3", 1, 0, 0, 0},
+		{errored, "web1", 0, 0, 1, 0},
 	}
-	for i, e := range events {
-		if _, err := pool.Exec(ctx, `INSERT INTO job_events (job_id, seq, event_type, host_name, data) VALUES ($1, $2, $3, $4, $5)`,
-			e.job, i, e.typ, e.host, e.data); err != nil {
+	for _, h := range results {
+		if _, err := pool.Exec(ctx, `INSERT INTO job_host_results (job_id, host_name, ok, failed, unreachable, ignored) VALUES ($1, $2, $3, $4, $5, $6)`,
+			h.job, h.host, h.ok, h.failed, h.unreachable, h.ignored); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -126,7 +127,8 @@ func TestDashboardStats(t *testing.T) {
 		t.Fatalf("problemHosts = %v, want only web1 (web2's failure was ignored)", hosts)
 	}
 	web1 := hosts[0].(map[string]any)
-	if web1["hostName"] != "web1" || web1["failedJobs"] != 1.0 || web1["unreachableJobs"] != 1.0 || web1["lastJobId"] != errored {
+	// Its latest problem job is the failed one (2h ago, the error was 3h ago).
+	if web1["hostName"] != "web1" || web1["failedJobs"] != 1.0 || web1["unreachableJobs"] != 1.0 || web1["lastJobId"] != failed {
 		t.Errorf("web1 = %v", web1)
 	}
 
