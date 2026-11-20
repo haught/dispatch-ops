@@ -1638,7 +1638,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: A job template still uses the execution environment
+          description: Job templates or inventory sources still use the execution environment; the detail names them
           content:
             application/problem+json:
               schema:
@@ -4216,7 +4216,7 @@ components:
 
     ExecutionEnvironment:
       type: object
-      required: [id, name, description, image, pullPolicy, registryCredentialId, createdAt, updatedAt]
+      required: [id, name, description, image, pullPolicy, registryCredentialId, templateCount, inventorySourceCount, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -4234,6 +4234,12 @@ components:
           format: uuid
           nullable: true
           description: A `registry` credential used to pull the image
+        templateCount:
+          type: integer
+          description: How many job templates use the execution environment
+        inventorySourceCount:
+          type: integer
+          description: How many inventory sources use the execution environment
         createdAt:
           type: string
           format: date-time

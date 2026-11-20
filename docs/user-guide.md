@@ -358,7 +358,9 @@ the `haught.akips.akips_inventory` plugin:
 
 An execution environment (EE) is the container image a job runs in. Register
 it by name and image on the *Execution environments* page, with a registry
-credential if it is private. The starter images, published with each release
+credential if it is private. The page shows how many job templates and
+inventory sources use each one; it can't be deleted until none do, and the
+refusal names them. The starter images, published with each release
 as `ghcr.io/haught/dispatch-ops/<name>:<version>`, are:
 
 - `ee-shell`: bash, curl, jq, git and ssh.

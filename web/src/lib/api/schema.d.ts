@@ -2093,6 +2093,10 @@ export interface components {
              * @description A `registry` credential used to pull the image
              */
             registryCredentialId: string | null;
+            /** @description How many job templates use the execution environment */
+            templateCount: number;
+            /** @description How many inventory sources use the execution environment */
+            inventorySourceCount: number;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -4528,7 +4532,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description A job template still uses the execution environment */
+            /** @description Job templates or inventory sources still use the execution environment; the detail names them */
             409: {
                 headers: {
                     [name: string]: unknown;
